@@ -5,6 +5,7 @@ import {
 } from "./mcp.js";
 import { CAMPUS_CONTEXT } from "./campus.js";
 import { evaluateDeal } from "./broker.js";
+import { startLiveBoard } from "./live.js";
 import type { Turn } from "./db.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
@@ -436,7 +437,7 @@ function extractText(body: any): string {
 /** Execute a tool with the phone number bound from the inbound message. */
 async function runTool(name: string, args: any, phone: string): Promise<unknown> {
   if (name === "submit_request") {
-    const order = await mcp.submitOrder({
+    const order = (await mcp.submitOrder({
       phone, // bound, never model-supplied
       source: "imessage",
       title: args.title,
@@ -447,7 +448,18 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       deadline_at: args.deadline_at || undefined,
       budget_usd: args.budget_usd > 0 ? args.budget_usd : undefined,
       urgency: args.urgency || undefined,
-    });
+    })) as { order_id?: string; blocked?: boolean; [key: string]: unknown };
+    const orderId = typeof order?.order_id === "string" ? order.order_id : "";
+    if (orderId && !order.blocked) {
+      const live = await startLiveBoard({
+        orderId,
+        title: String(args.title ?? "Your request"),
+        category: args.category || undefined,
+        deadlineAt: args.deadline_at || undefined,
+        slots: 3,
+      });
+      return { ...order, live_url: live?.url ?? null };
+    }
     return order;
   }
   if (name === "get_my_activity") {

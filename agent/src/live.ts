@@ -9,15 +9,27 @@ export async function startLiveBoard(input: {
   deadlineAt?: string | null;
   slots?: number;
 }): Promise<{ token: string; url: string; created: boolean } | null> {
+  const url = `${config.marketMakerUrl}/api/live/start`;
   try {
-    const res = await fetch(`${config.marketMakerUrl}/api/live/start`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+      signal: AbortSignal.timeout(20_000),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as { token: string; url: string; created: boolean };
-  } catch {
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.error(`live board start failed: HTTP ${res.status} ${url} ${detail}`.trim());
+      return null;
+    }
+    const body = (await res.json()) as { token: string; url: string; created: boolean };
+    if (!body?.url) {
+      console.error(`live board start returned no url from ${url}`);
+      return null;
+    }
+    return body;
+  } catch (err) {
+    console.error(`live board start error at ${url}: ${(err as Error).message}`);
     return null;
   }
 }

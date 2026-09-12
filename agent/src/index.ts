@@ -24,6 +24,7 @@ import { learnStyle } from "./style.js";
 import { ackLiveSkip, listLiveSkips, postLiveEvent, postLiveMedia, startLiveBoard } from "./live.js";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
+const liveConfirmTries = new Map<string, number>();
 
 function isForUs(event: RelayEvent): boolean {
   if (event.type !== "message.received") return false;
@@ -554,15 +555,29 @@ async function sendOutreach(): Promise<void> {
 async function deliverHandoffs(): Promise<void> {
   for (const handoff of await undeliveredHandoffs()) {
     let text = handoffText(handoff);
-    if (handoff.kind === "order_confirmation" && handoff.order_id) {
-      const live = await openLiveBoard({
-        id: handoff.order_id,
-        title: String(handoff.payload?.title ?? "Your request"),
-        category: handoff.payload?.category ?? null,
-        deadlineAt: handoff.payload?.deadline_at ?? null,
-      });
-      if (live?.url) {
-        text = confirmationLine(handoff, live.url);
+    if (handoff.kind === "order_confirmation") {
+      const orderId = handoff.order_id ?? handoff.payload?.order_id;
+      let liveUrl =
+        typeof handoff.payload?.live_url === "string" && handoff.payload.live_url
+          ? handoff.payload.live_url
+          : null;
+      if (orderId) {
+        const live = await openLiveBoard({
+          id: String(orderId),
+          title: String(handoff.payload?.title ?? "Your request"),
+          category: handoff.payload?.category ?? null,
+          deadlineAt: handoff.payload?.deadline_at ?? null,
+        });
+        liveUrl = live?.url ?? liveUrl;
+      }
+      if (liveUrl) {
+        text = confirmationLine(handoff, liveUrl);
+        liveConfirmTries.delete(handoff.id);
+      } else {
+        const tries = (liveConfirmTries.get(handoff.id) ?? 0) + 1;
+        liveConfirmTries.set(handoff.id, tries);
+        log(`holding confirmation ${handoff.id} for a live url (try ${tries}/4)`);
+        if (tries < 4) continue;
       }
     }
     if (!text) continue;
@@ -1245,7 +1260,7 @@ async function main() {
     res.writeHead(404).end();
   }).listen(config.port, () => log(`http on :${config.port}`));
 
-  log(`gotchu agent up - model ${config.model}, numbers: ${config.allowedNumbers.join(", ") || "all enrolled"}`);
+  log(`gotchu agent up - model ${config.model}, market-maker ${config.marketMakerUrl}, numbers: ${config.allowedNumbers.join(", ") || "all enrolled"}`);
   loop("inbound", pollInbound, config.pollSeconds);
   loop("handoffs", deliverHandoffs, 5);
   loop("match", matchOpenOrders, 10);
