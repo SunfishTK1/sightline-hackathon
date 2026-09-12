@@ -9,6 +9,29 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, later night — the likeness consent gap from the last pass got closed
+
+**Merged in from teammates this pass (no changes from this agent - reviewed and typechecked only):**
+- `agent/src/likeness.ts`: the "optional photo" consent (`canUseLikeness`,
+  flagged in an earlier pass as unused scaffolding) is now actually wired
+  into task-film generation. Verified the enforcement is real, not just a
+  UI checkbox: `voice-mcp GET /v1/people/likeness` reads
+  `doc->'consents'->>'canUseLikeness'` straight from the shared `people`
+  row, defaults to `false` when absent, and only ever returns the photo
+  when both consent and an uploaded photo exist - the photo is never
+  handed over otherwise, enforced server-side. `agent/src/video.ts` calls
+  this only for the requester, falls back to the generic look on any
+  failure or absent consent, and never lets a missing likeness block a
+  film being made.
+- Requester now appears in their own task film if they opted in
+  (`agent/src/video.ts`); barter-rule false positive on plain coffee
+  deliveries fixed; live board no longer claims it's still matching a
+  finished job or waiting on a decision nobody was asked for.
+
+**Conflicts resolved this pass:** none - clean fast-forward.
+
+---
+
 ## 2026-09-12, night — onboarding page doubles as a no-login account view
 
 **What this agent added directly:**
