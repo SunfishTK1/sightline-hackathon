@@ -206,7 +206,14 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
           You&apos;ll need to agree to the first three
         </legend>
         <div className="space-y-1">
-          <label htmlFor="acceptedTerms" className="flex items-start gap-3 text-sm text-[var(--ink)]">
+          {/*
+            The dialog trigger is a sibling of the label, not nested inside
+            it - a <button> inside a <label for="acceptedTerms"> made the
+            checkbox toggle unpredictably on click (browsers don't agree on
+            whether a click on nested interactive content should also fire
+            the label's default "activate the associated control" behavior).
+          */}
+          <div className="flex items-start gap-3 text-sm text-[var(--ink)]">
             <input
               id="acceptedTerms"
               type="checkbox"
@@ -217,10 +224,13 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
               className="mt-0.5 size-4 accent-[var(--broker)]"
             />
             <span>
-              I have read and agree to the{" "}
-              <TermsDialog onAgree={() => form.setValue("acceptedTerms", true, { shouldValidate: true })} />
+              <label htmlFor="acceptedTerms">I have read and agree to the</label>{" "}
+              <TermsDialog
+                onAgree={() => form.setValue("acceptedTerms", true, { shouldValidate: true })}
+                onDecline={() => form.setValue("acceptedTerms", false, { shouldValidate: true })}
+              />
             </span>
-          </label>
+          </div>
           {errors.acceptedTerms ? (
             <p className="text-sm text-destructive">{errors.acceptedTerms.message}</p>
           ) : null}

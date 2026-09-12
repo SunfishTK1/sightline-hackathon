@@ -15,7 +15,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { TERMS_SECTIONS } from "@/lib/terms";
 
-export function TermsDialog({ onAgree }: { onAgree: () => void }) {
+export function TermsDialog({
+  onAgree,
+  onDecline,
+}: {
+  onAgree: () => void;
+  /** "Not yet" - explicitly declining, not just closing without deciding. */
+  onDecline: () => void;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -49,7 +56,11 @@ export function TermsDialog({ onAgree }: { onAgree: () => void }) {
           </div>
         </ScrollArea>
         <DialogFooter>
-          <DialogClose render={<Button variant="outline" />}>Not yet</DialogClose>
+          <DialogClose
+            render={<Button variant="outline" onClick={onDecline} />}
+          >
+            Not yet
+          </DialogClose>
           <Button
             type="button"
             onClick={() => {
