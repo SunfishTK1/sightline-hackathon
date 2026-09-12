@@ -272,6 +272,12 @@ export async function recordLiveEvent(input: {
        WHERE token = $1`,
       [token],
     );
+  } else if (["queued", "considering", "waiting", "countered"].includes(input.state ?? "")) {
+    await query(
+      `UPDATE live_boards SET status = 'matching', skip_requested = FALSE, updated_at = NOW()
+       WHERE token = $1 AND status = 'stopped'`,
+      [token],
+    );
   } else {
     await query("UPDATE live_boards SET updated_at = NOW() WHERE token = $1", [token]);
   }
@@ -373,11 +379,14 @@ async function reconcileWithOrder(
     });
     if (!res.ok) return null;
     const json = (await res.json()) as { ok?: boolean; data?: { status?: string } };
-    const next = TERMINAL_ORDER_STATUS[json.data?.status ?? ""];
+    const orderStatus = json.data?.status ?? "";
+    const next =
+      TERMINAL_ORDER_STATUS[orderStatus] ??
+      (["submitted", "offered"].includes(orderStatus) ? "matching" : undefined);
     if (!next) return null;
     await query(
       `UPDATE live_boards SET status = $2, skip_requested = FALSE, updated_at = NOW()
-       WHERE token = $1 AND status = 'matching'`,
+       WHERE token = $1 AND status IS DISTINCT FROM $2`,
       [token, next],
     );
     if (next === "agreed") {
@@ -435,7 +444,7 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
   const row = board.rows[0];
   if (!row) return null;
 
-  if (row.status === "matching") {
+  if (row.status === "matching" || row.status === "stopped") {
     const reconciled = await reconcileWithOrder(token, row.order_id);
     if (reconciled) row.status = reconciled;
   }

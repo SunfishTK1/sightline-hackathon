@@ -625,7 +625,7 @@ tools.push({
   shape: {
     phone: z.string(),
     offer_id: z.union([z.string(), z.number()]),
-    price_usd: z.number().describe("What they want to be paid"),
+    price_usd: z.number().positive().describe("What they want to be paid"),
     note: z.string().optional().describe("Anything they said about why, in their words"),
   },
   handler: async ({ phone, offer_id, price_usd, note }) =>

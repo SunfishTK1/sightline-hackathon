@@ -725,8 +725,11 @@ app.get("/v1/negotiation/pending", async (_req, res) => {
 /** A worker proposes different terms. */
 app.post("/v1/offers/:id/counter", async (req, res) => {
   const { phone, price_usd, note } = req.body ?? {};
-  if (!phone || typeof price_usd !== "number") {
-    return res.status(400).json({ ok: false, error: "phone and price_usd are required" });
+  if (!phone || typeof price_usd !== "number" || !Number.isFinite(price_usd) || price_usd <= 0) {
+    return res.status(400).json({
+      ok: false,
+      error: "phone is required and price_usd must be greater than zero",
+    });
   }
   const result = await counterOffer(req.params.id, String(phone), price_usd, note);
   if (result.error) return res.status(409).json({ ok: false, error: result.error });

@@ -156,6 +156,9 @@ export async function counterOffer(
 ): Promise<{
   status: string; error?: string; counter_price_usd?: number; final_round?: boolean;
 }> {
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
+    return { status: "unchanged", error: "price_usd must be greater than zero" };
+  }
   const { rows } = await pool.query(
     `UPDATE job_offers
         SET status = 'countered', counter_price_usd = $3, counter_note = $4,
@@ -341,15 +344,19 @@ export async function respondToCounter(
     return { status: "declined" };
   }
 
+  const counterPrice = Number(offer.counter_price_usd);
+  if (!Number.isFinite(counterPrice) || counterPrice <= 0) {
+    return { status: "unchanged", error: "That counter has an invalid price." };
+  }
   const accepted = await pool.query(
     `UPDATE orders
-        SET budget_usd = $2, status = 'accepted', accepted_by = $3,
+        SET budget_usd = NULLIF($2::numeric, 0), status = 'accepted', accepted_by = $3,
             accepted_at = now(), updated_at = now()
       WHERE id = $1
         AND accepted_by IS NULL
         AND status IN ('submitted', 'offered')
       RETURNING id`,
-    [offer.order_id, offer.counter_price_usd, offer.person_id],
+    [offer.order_id, counterPrice, offer.person_id],
   );
   if (!accepted.rows[0]) {
     await pool.query(
