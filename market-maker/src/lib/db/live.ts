@@ -81,24 +81,6 @@ function newToken(): string {
   return randomBytes(9).toString("base64url");
 }
 
-async function ensureActiveConsidering(token: string): Promise<void> {
-  const board = await loadLiveBoard(token);
-  if (!board || board.status !== "matching") return;
-  const hasActive = board.candidates.some((candidate) =>
-    ["considering", "waiting", "countered"].includes(candidate.state),
-  );
-  if (hasActive) return;
-  const first = board.candidates[0];
-  if (!first) return;
-  const waitingUntil = new Date(Date.now() + 10 * 60_000);
-  await query(
-    `UPDATE live_candidates
-     SET state = 'considering', waiting_until = $2
-     WHERE token = $1 AND slot = $3`,
-    [token, waitingUntil, first.slot],
-  );
-  await insertEvent(token, "considering", "Asking someone now.", first.slot);
-}
 
 export async function startLiveBoard(input: {
   orderId: string;
@@ -112,7 +94,11 @@ export async function startLiveBoard(input: {
     [input.orderId],
   );
   if (existing.rows[0]) {
-    await ensureActiveConsidering(existing.rows[0].token);
+    // Nothing is forced active here. This runs every ten seconds from the
+    // agent's match loop, and it used to flip slot 0 to "considering" with a
+    // fresh ten minute clock whenever no slot looked busy - inventing a person
+    // deciding on a job nobody had been asked about, and overwriting the real
+    // state the agent had just posted. The agent owns these states now.
     await seedLiveMedia(existing.rows[0].token);
     return {
       token: existing.rows[0].token,
@@ -134,24 +120,19 @@ export async function startLiveBoard(input: {
       input.deadlineAt ?? null,
     ],
   );
-  const waitingUntil = new Date(Date.now() + 10 * 60_000);
+  // Every slot starts empty. Slot 0 used to be seeded as "considering" with a
+  // ten minute clock at the moment the board was created - before a candidate
+  // had been chosen, let alone asked - so a board opened straight after a task
+  // was submitted showed a phantom person deciding, counting down, with no
+  // offer behind them. The real candidate arrives as an event.
   for (let slot = 0; slot < slots; slot += 1) {
-    const state = slot === 0 ? "considering" : "queued";
     await query(
       `INSERT INTO live_candidates (id, token, slot, color, state, waiting_until)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        newId("lc"),
-        token,
-        slot,
-        CANDIDATE_COLORS[slot % CANDIDATE_COLORS.length],
-        state,
-        slot === 0 ? waitingUntil : null,
-      ],
+       VALUES ($1,$2,$3,$4,'queued',NULL)`,
+      [newId("lc"), token, slot, CANDIDATE_COLORS[slot % CANDIDATE_COLORS.length]],
     );
   }
   await insertEvent(token, "started", `Looking for someone for "${input.title}".`, null);
-  await insertEvent(token, "considering", "Asking someone now.", 0);
   await seedLiveMedia(token);
   return { token, url: liveUrl(token), created: true };
 }
