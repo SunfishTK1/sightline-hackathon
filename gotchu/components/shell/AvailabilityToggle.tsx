@@ -1,62 +1,77 @@
 /** @owner Will — availability switch in header */
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 
-type Props = {
-  /** Null when the viewer has no worker profile yet - then there is nothing to toggle. */
-  initial: boolean | null;
-};
+export function AvailabilityToggle() {
+  const [ready, setReady] = useState(false);
+  const [checked, setChecked] = useState(false);
+  const [pending, setPending] = useState(false);
 
-export function AvailabilityToggle({ initial }: Props) {
-  const [available, setAvailable] = useState(Boolean(initial));
-  const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
 
-  if (initial === null) return null;
-
-  async function change(next: boolean) {
-    // Move immediately, then put it back if the server disagrees - the toggle
-    // should never claim a state the marketplace is not actually in.
-    setAvailable(next);
-    setBusy(true);
-    setFailed(false);
-    try {
-      const res = await fetch("/api/me/availability", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isAvailable: next }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.ok) throw new Error(json.error ?? "failed");
-      setAvailable(Boolean(json.data?.is_available));
-    } catch {
-      setAvailable(!next);
-      setFailed(true);
-    } finally {
-      setBusy(false);
+    async function load() {
+      const res = await fetch("/api/me");
+      const json = (await res.json()) as {
+        ok: boolean;
+        data?: { user?: { availability?: { isAvailable?: boolean } } | null };
+      };
+      if (cancelled) return;
+      if (json.ok && json.data?.user) {
+        setChecked(Boolean(json.data.user.availability?.isAvailable));
+        setReady(true);
+      }
     }
+
+    void load();
+    window.addEventListener("gotchu:user-updated", load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("gotchu:user-updated", load);
+    };
+  }, []);
+
+  if (!ready) {
+    return (
+      <span className="text-sm text-muted-foreground">Available after setup</span>
+    );
   }
 
   return (
-    <label
-      className="flex items-center gap-2 text-sm text-muted-foreground"
-      title={
-        failed
-          ? "That did not save."
-          : available
-            ? "You can be offered work."
-            : "You will not be offered work."
-      }
-    >
+    <label className="flex items-center gap-2 text-sm">
       <input
         type="checkbox"
         className="size-4 accent-[var(--broker)]"
-        checked={available}
-        disabled={busy}
-        onChange={(e) => change(e.target.checked)}
+        checked={checked}
+        disabled={pending}
+        onChange={async (event) => {
+          const next = event.target.checked;
+          setChecked(next);
+          setPending(true);
+          try {
+            const res = await fetch("/api/me/availability", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ isAvailable: next }),
+            });
+            const json = (await res.json()) as { ok: boolean; error?: string };
+            if (!json.ok) {
+              setChecked(!next);
+              toast.error(json.error ?? "Could not update availability");
+              return;
+            }
+            toast.success(next ? "You're available" : "You're off the market");
+          } catch {
+            setChecked(!next);
+            toast.error("Could not update availability");
+          } finally {
+            setPending(false);
+          }
+        }}
       />
-      {failed ? <span className="text-[var(--stop)]">Not saved</span> : "Available"}
+      Available
     </label>
   );
 }

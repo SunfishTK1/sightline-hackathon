@@ -1,44 +1,71 @@
 /**
- * Who is signed in, according to Auth0.
+ * @owner Will
+ * Resolve identity. Never trust a uuid from the client.
  *
- * This is deliberately separate from lib/auth.ts (which maps a session onto the
- * Mongo user document): everything here answers only "who is this person", and
- * the marketplace account itself lives in the voice-mcp service.
- *
- * The Auth0 subject is the key. It is read from the session on the server and
- * never accepted from a request body - a client that could name its own subject
- * could act as anyone.
+ * Registration has no login step: the httpOnly cookie set at
+ * onboarding time is the identity. Auth0 is only consulted as a
+ * fallback for a signed-in session (not required to use the app).
  */
-import { auth0 } from "./auth0";
+import { cookies } from "next/headers";
+import { getAuth0 } from "./auth0";
+import { isCmuEmail, normalizeCmuEmail } from "./validate";
+
+export const IDENTITY_COOKIE = "gotchu_identity";
 
 export type Identity = {
-  sub: string;
-  email: string;
-  name: string;
-  emailVerified: boolean;
-  /** CMU only, per the landing page. Checked here as well as in Auth0. */
-  isCmu: boolean;
+  auth0Sub: string;
+  cmuEmail: string;
+  source: "auth0" | "local";
 };
 
-const CMU_EMAIL = /@(andrew\.)?cmu\.edu$/i;
+function parseCookie(raw: string | undefined): Identity | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { auth0Sub?: string; cmuEmail?: string };
+    if (!parsed.auth0Sub || !parsed.cmuEmail || !isCmuEmail(parsed.cmuEmail)) {
+      return null;
+    }
+    return {
+      auth0Sub: parsed.auth0Sub,
+      cmuEmail: normalizeCmuEmail(parsed.cmuEmail),
+      source: "local",
+    };
+  } catch {
+    return null;
+  }
+}
 
 export async function getIdentity(): Promise<Identity | null> {
-  const session = await auth0.getSession().catch(() => null);
-  const user = session?.user;
-  if (!user?.sub) return null;
+  const jar = await cookies();
+  const fromCookie = parseCookie(jar.get(IDENTITY_COOKIE)?.value);
+  if (fromCookie) return fromCookie;
 
-  const email = typeof user.email === "string" ? user.email : "";
-  const name =
-    (typeof user.name === "string" && user.name) ||
-    [user.given_name, user.family_name].filter(Boolean).join(" ") ||
-    email.split("@")[0] ||
-    "";
+  const auth0 = getAuth0();
+  if (!auth0) return null;
+  try {
+    const session = await auth0.getSession();
+    const email = normalizeCmuEmail(session?.user?.email ?? "");
+    const sub = session?.user?.sub;
+    if (sub && isCmuEmail(email) && session?.user?.email_verified !== false) {
+      return { auth0Sub: sub, cmuEmail: email, source: "auth0" };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
 
-  return {
-    sub: user.sub,
-    email,
-    name,
-    emailVerified: user.email_verified === true,
-    isCmu: CMU_EMAIL.test(email),
-  };
+export async function requireIdentity(): Promise<Identity> {
+  const identity = await getIdentity();
+  if (!identity) {
+    throw new Error("Sign in with a verified @andrew.cmu.edu email first.");
+  }
+  return identity;
+}
+
+export function identityCookieValue(identity: Omit<Identity, "source">): string {
+  return JSON.stringify({
+    auth0Sub: identity.auth0Sub,
+    cmuEmail: normalizeCmuEmail(identity.cmuEmail),
+  });
 }

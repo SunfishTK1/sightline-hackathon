@@ -1,72 +1,143 @@
 /**
- * Sign someone up. The Auth0 subject and email come from the session, never
- * from the body - otherwise a request could claim to be anyone.
+ * @owner Will — POST create/update user. No login required to register.
  *
- * This writes into the live marketplace, so a person who signs up here is the
- * same person the phone agent talks to, with one account keyed on their phone.
+ * Email confirmation is delegated to Auth0, and it's re-demanded on
+ * *every* submission, not just the first: each POST creates/finds the
+ * corresponding Auth0 database-connection user via the Management API,
+ * forces it back to unverified if a prior click had verified it, and asks
+ * Auth0 to send a fresh verification email. The record is saved with
+ * emailVerified: false — and unusable for anything that needs a real
+ * inbox — until Auth0 reports back that the (new) link was clicked. That
+ * means editing your profile always requires re-confirming your email
+ * afterward, by design — not just registering for the first time.
  */
-import { NextResponse } from "next/server";
-import { z } from "zod";
-import { getIdentity } from "@/lib/identity";
-import { createSignup, MarketError, marketConfigured } from "@/lib/market";
-
-const Body = z.object({
-  firstName: z.string().trim().min(1, "First name is required").max(60),
-  lastName: z.string().trim().max(60).optional().default(""),
-  // Accept what people actually type; the marketplace normalises and rejects
-  // anything that is not a real number.
-  phone: z
-    .string()
-    .trim()
-    .min(10, "That phone number is too short")
-    .max(20)
-    .regex(/^[+\d][\d\s().-]+$/, "That does not look like a phone number"),
-  preferenceText: z.string().trim().max(1000).optional().default(""),
-  categories: z.array(z.string().trim().min(1)).max(12).optional().default([]),
-  minPriceUsd: z.number().min(0).max(1000).optional(),
-  wantsWork: z.boolean().optional().default(true),
-});
+import { cookies } from "next/headers";
+import {
+  auth0ManagementConfigured,
+  findOrCreateAuth0User,
+  sendAuth0VerificationEmail,
+  setAuth0EmailUnverified,
+} from "@/lib/auth0-management";
+import { fail, ok } from "@/lib/http";
+import { getIdentity, IDENTITY_COOKIE, identityCookieValue } from "@/lib/identity";
+import {
+  findUserByAuth0Sub,
+  findUserByCmuEmail,
+  PhoneAlreadyRegisteredError,
+  publicUser,
+  upsertUser,
+} from "@/lib/users";
+import { isCmuEmail, onboardingSchema } from "@/lib/validate";
+import { activateParticipant } from "@/lib/activate";
+import type { User } from "@/lib/types/user";
 
 export async function POST(req: Request) {
-  const identity = await getIdentity();
-  if (!identity) {
-    return NextResponse.json({ ok: false, error: "not_signed_in" }, { status: 401 });
-  }
-  if (!identity.isCmu) {
-    return NextResponse.json({ ok: false, error: "cmu_email_required" }, { status: 403 });
-  }
-  if (!marketConfigured()) {
-    return NextResponse.json({ ok: false, error: "market_not_configured" }, { status: 503 });
-  }
-
-  const parsed = Body.safeParse(await req.json().catch(() => null));
+  const body = await req.json().catch(() => null);
+  const parsed = onboardingSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json(
-      { ok: false, error: parsed.error.issues[0]?.message ?? "invalid_body" },
-      { status: 400 },
-    );
+    return fail(parsed.error.issues[0]?.message ?? "Invalid onboarding payload");
   }
-  const body = parsed.data;
 
-  try {
-    const result = await createSignup({
-      auth0_sub: identity.sub,
-      email: identity.email,
-      display_name: [body.firstName, body.lastName].filter(Boolean).join(" "),
-      phone: body.phone,
-      blurb: body.preferenceText || undefined,
-      categories: body.categories,
-      min_price_usd: body.minPriceUsd,
-      wants_work: body.wantsWork,
-    });
-    return NextResponse.json({ ok: true, data: result });
-  } catch (err) {
-    if (err instanceof MarketError) {
-      // A number already tied to another account is the one case worth naming:
-      // it would otherwise silently hand one person's thread to another.
-      const status = err.code === "phone_in_use" ? 409 : 502;
-      return NextResponse.json({ ok: false, error: err.code, message: err.message }, { status });
-    }
-    return NextResponse.json({ ok: false, error: "signup_failed" }, { status: 500 });
+  const input = parsed.data;
+  if (!isCmuEmail(input.cmuEmail)) {
+    return fail("Must be a verified CMU address ending in @andrew.cmu.edu", 403);
   }
+
+  // A returning visitor (identity cookie already set) updates their own
+  // record. Fall back to a lookup by email so a record that's already
+  // verified isn't re-created (and re-verified) just because the cookie
+  // was lost.
+  const identity = await getIdentity();
+  const existing =
+    (identity ? await findUserByAuth0Sub(identity.auth0Sub) : null) ??
+    (await findUserByCmuEmail(input.cmuEmail));
+
+  let auth0Sub = existing?.auth0Sub ?? null;
+  let emailVerified: boolean;
+  let emailVerifiedAt: string | undefined;
+
+  if (auth0ManagementConfigured()) {
+    const auth0User = await findOrCreateAuth0User(input.cmuEmail);
+    auth0Sub = auth0User.user_id;
+    if (auth0User.email_verified) {
+      await setAuth0EmailUnverified(auth0User.user_id);
+    }
+    await sendAuth0VerificationEmail(auth0User.user_id);
+    emailVerified = false;
+    emailVerifiedAt = undefined;
+  } else {
+    // Dev fallback so onboarding still works without an Auth0 tenant configured.
+    auth0Sub ??= `local|${input.cmuEmail}`;
+    emailVerified = true;
+    emailVerifiedAt = new Date().toISOString();
+    console.warn("AUTH0_M2M_* not configured — skipping email verification.");
+  }
+
+  const now = new Date().toISOString();
+  const phoneChanged = Boolean(existing && existing.phone !== input.phone);
+
+  const user: User = {
+    uuid: existing?.uuid ?? "",
+    auth0Sub: auth0Sub!,
+    firstName: input.firstName,
+    lastName: input.lastName,
+    cmuEmail: input.cmuEmail,
+    phone: input.phone,
+    emailVerified,
+    emailVerifiedAt,
+    // Omitted (not re-uploaded) on this submission just means "keep what's
+    // already saved" — upsertUser only overwrites it when a new one is sent.
+    photoDataUrl: input.photoDataUrl ?? existing?.photoDataUrl,
+    preferenceText: existing?.preferenceText ?? "",
+    preferenceEmbedding: existing?.preferenceEmbedding ?? [],
+    consents: {
+      age18: input.ageConfirmed,
+      canCall: input.consentCall,
+      canText: input.consentText,
+      acceptedAt: now,
+    },
+    availability: existing?.availability ?? { isAvailable: false },
+    stats: existing?.stats ?? {
+      tasksCompleted: 0,
+      tasksRequested: 0,
+      avgRating: null,
+      ratingCount: 0,
+    },
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  let saved: User;
+  let wasExisting: boolean;
+  try {
+    ({ user: saved, wasExisting } = await upsertUser(user));
+  } catch (err) {
+    if (err instanceof PhoneAlreadyRegisteredError) {
+      return fail(err.message, 409);
+    }
+    throw err;
+  }
+
+  // Saving the person is not the same as joining the marketplace: give them a
+  // worker profile and let their agent introduce itself. Deliberately after the
+  // save, and deliberately unable to fail it.
+  await activateParticipant({
+    personId: saved.uuid,
+    phone: saved.phone,
+    displayName: [saved.firstName, saved.lastName].filter(Boolean).join(" ") || null,
+    blurb: saved.preferenceText,
+  });
+
+  const jar = await cookies();
+  jar.set(IDENTITY_COOKIE, identityCookieValue({ auth0Sub: user.auth0Sub, cmuEmail: input.cmuEmail }), {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 30,
+  });
+
+  return ok(
+    { user: publicUser(saved), needsVerification: !emailVerified, wasExisting, phoneChanged },
+    wasExisting ? 200 : 201,
+  );
 }

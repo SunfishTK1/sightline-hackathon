@@ -1,311 +1,266 @@
-/**
- * @owner Will (Auth0 + signup wired by Thomas)
- *
- * Signup, in two steps. Step one creates the account and sends a code to the
- * number given; step two proves the number is theirs. The number matters more
- * here than an email does - it is the channel the agent actually uses - so it
- * is not trusted until a code comes back through it.
- */
+/** @owner Will */
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { PreferenceField } from "./PreferenceField";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { toast } from "sonner";
+import { PhoneField } from "./PhoneField";
+import { PhotoField } from "./PhotoField";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { cn } from "@/lib/utils";
+import { formatPhoneMask } from "@/lib/phone";
+import {
+  onboardingSchema,
+  type OnboardingInput,
+} from "@/lib/validate";
+import type { UserConsents } from "@/lib/types/user";
 
-/** The vocabulary the matcher already sorts work by. */
-const CATEGORIES = [
-  { id: "food", label: "Food runs" },
-  { id: "pickup", label: "Pickups" },
-  { id: "errand", label: "Errands" },
-  { id: "moving", label: "Moving & lifting" },
-  { id: "tutoring", label: "Tutoring" },
-  { id: "design", label: "Design & making" },
-  { id: "other", label: "Anything else" },
-];
-
-export type ExistingProfile = {
+type ExistingProfile = {
+  uuid: string;
+  firstName: string;
+  lastName: string;
+  cmuEmail: string;
   phone: string;
-  display_name: string | null;
-  phone_verified: boolean;
-  blurb: string | null;
-  categories: string[] | null;
-  min_price_usd: string | null;
-} | null;
-
-type Props = {
-  email: string;
-  suggestedName: string;
-  existing: ExistingProfile;
+  emailVerified: boolean;
+  photoDataUrl?: string;
+  consents: UserConsents;
 };
 
-export function OnboardingForm({ email, suggestedName, existing }: Props) {
-  const router = useRouter();
-  const [first = "", last = ""] = (existing?.display_name || suggestedName).split(" ");
+export function OnboardingForm({ existing }: { existing: ExistingProfile | null }) {
+  const [savedUuid, setSavedUuid] = useState<string | null>(existing?.uuid ?? null);
+  const [submitting, setSubmitting] = useState(false);
+  const [emailVerified, setEmailVerified] = useState(existing?.emailVerified ?? false);
 
-  const [firstName, setFirstName] = useState(first);
-  const [lastName, setLastName] = useState(last);
-  const [phone, setPhone] = useState(existing?.phone ?? "");
-  const [preferenceText, setPreferenceText] = useState(existing?.blurb ?? "");
-  const [categories, setCategories] = useState<string[]>(existing?.categories ?? []);
-  const [minPrice, setMinPrice] = useState(
-    existing?.min_price_usd ? String(Math.round(Number(existing.min_price_usd))) : "",
-  );
-  const [wantsWork, setWantsWork] = useState(true);
+  // While a submission is pending Auth0's verification-email click,
+  // poll our own profile so a link clicked on another device (phone,
+  // another tab) flips this screen without a manual refresh.
+  useEffect(() => {
+    if (!savedUuid || emailVerified) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch("/api/me");
+        const json = (await res.json()) as { data?: { user?: { emailVerified?: boolean } | null } };
+        if (json.data?.user?.emailVerified) {
+          setEmailVerified(true);
+          toast.success("Email confirmed. You're in.");
+        }
+      } catch {
+        // ignore transient errors; next tick retries
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [savedUuid, emailVerified]);
 
-  // "details" until the code is sent, then "code", then done.
-  const [stage, setStage] = useState<"details" | "code">(
-    existing && !existing.phone_verified ? "code" : "details",
-  );
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const form = useForm<OnboardingInput>({
+    resolver: zodResolver(onboardingSchema),
+    defaultValues: {
+      firstName: existing?.firstName ?? "",
+      lastName: existing?.lastName ?? "",
+      phone: existing ? formatPhoneMask(existing.phone) : "",
+      cmuEmail: existing?.cmuEmail ?? "",
+      ageConfirmed: existing?.consents.age18 ?? false,
+      consentCall: existing?.consents.canCall ?? false,
+      consentText: existing?.consents.canText ?? false,
+      photoDataUrl: existing?.photoDataUrl,
+    },
+  });
 
-  function toggle(id: string) {
-    setCategories((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
-  }
-
-  async function submitDetails(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    setNotice(null);
+  async function onSubmit(values: OnboardingInput) {
+    setSubmitting(true);
     try {
       const res = await fetch("/api/onboarding", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          firstName,
-          lastName,
-          phone,
-          preferenceText,
-          categories,
-          minPriceUsd: minPrice ? Number(minPrice) : undefined,
-          wantsWork,
-        }),
+        body: JSON.stringify(values),
       });
-      const json = await res.json();
-      if (!res.ok || !json.ok) {
-        setError(messageFor(json));
+      const json = (await res.json()) as {
+        ok: boolean;
+        data?: {
+          user: {
+            uuid: string;
+            firstName: string;
+            lastName: string;
+            phone: string;
+            cmuEmail: string;
+            photoDataUrl?: string;
+          };
+          needsVerification: boolean;
+          wasExisting: boolean;
+          phoneChanged: boolean;
+        };
+        error?: string;
+      };
+      if (!json.ok || !json.data?.user) {
+        toast.error(json.error ?? "Could not save profile");
         return;
       }
-      if (json.data?.verified) {
-        router.push("/feed");
-        return;
+      const { user, needsVerification, wasExisting, phoneChanged } = json.data;
+      setSavedUuid(user.uuid);
+      setEmailVerified(!needsVerification);
+      window.dispatchEvent(new Event("gotchu:user-updated"));
+      form.reset({
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: formatPhoneMask(user.phone),
+        cmuEmail: user.cmuEmail,
+        ageConfirmed: true,
+        consentCall: true,
+        consentText: true,
+        photoDataUrl: user.photoDataUrl,
+      });
+      if (needsVerification && wasExisting) {
+        toast.success(
+          phoneChanged
+            ? `Updated — we'll reach you at ${formatPhoneMask(user.phone)}. Confirm the new email we just sent to keep using Gotchu.`
+            : "Updated — confirm the new email sent from Auth0 to keep using Gotchu.",
+        );
+      } else if (needsVerification) {
+        toast.success("Check your CMU inbox to confirm your email.");
+      } else {
+        toast.success("You're in.");
       }
-      setStage("code");
-      setNotice(
-        json.data?.code_sent
-          ? `We texted a six digit code to ${phone}.`
-          : "Your account is saved, but the code could not be sent. Check the number and try again.",
-      );
     } catch {
-      setError("Could not reach the server. Try again.");
+      toast.error("Could not save profile");
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   }
 
-  async function submitCode(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/onboarding/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.ok) {
-        setError(json.message ?? messageFor(json));
-        return;
-      }
-      router.push("/feed");
-      router.refresh();
-    } catch {
-      setError("Could not reach the server. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const errors = form.formState.errors;
 
-  if (stage === "code") {
-    return (
-      <form className="space-y-5" onSubmit={submitCode}>
-        {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
-        <div className="space-y-2">
-          <Label htmlFor="code">Six digit code</Label>
-          <Input
-            id="code"
-            name="code"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            maxLength={6}
-            value={code}
-            onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-            className="font-mono text-lg tracking-[0.3em] tabular-nums"
-            required
-          />
-          <p className="text-sm text-muted-foreground">
-            Sent to {phone}. Until you enter it, nobody can offer you work.
-          </p>
-        </div>
-        {error && <p className="text-sm text-[var(--stop)]">{error}</p>}
-        <div className="flex items-center gap-3">
-          <Button type="submit" disabled={busy || code.length !== 6}>
-            {busy ? "Checking…" : "Finish signing up"}
-          </Button>
-          <button
-            type="button"
-            className="text-sm text-muted-foreground underline-offset-4 hover:underline"
-            onClick={() => {
-              setStage("details");
-              setError(null);
-              setNotice(null);
-            }}
-          >
-            Wrong number?
-          </button>
-        </div>
-      </form>
-    );
-  }
+  const fieldClass =
+    "!h-11 !rounded-xl !border-[var(--border)] !bg-white !px-3.5 !text-base !shadow-none";
 
   return (
-    <form className="space-y-5" onSubmit={submitDetails}>
-      <div className="grid gap-4 sm:grid-cols-2">
+    <form className="space-y-9" onSubmit={form.handleSubmit(onSubmit)} noValidate>
+      <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label htmlFor="firstName">First name</Label>
           <Input
             id="firstName"
-            name="firstName"
-            value={firstName}
-            onChange={(e) => setFirstName(e.target.value)}
-            required
+            autoComplete="given-name"
+            className={fieldClass}
+            {...form.register("firstName")}
           />
+          {errors.firstName ? (
+            <p className="text-sm text-destructive">{errors.firstName.message}</p>
+          ) : null}
         </div>
+
         <div className="space-y-2">
           <Label htmlFor="lastName">Last name</Label>
           <Input
             id="lastName"
-            name="lastName"
-            value={lastName}
-            onChange={(e) => setLastName(e.target.value)}
+            autoComplete="family-name"
+            className={fieldClass}
+            {...form.register("lastName")}
           />
+          {errors.lastName ? (
+            <p className="text-sm text-destructive">{errors.lastName.message}</p>
+          ) : null}
         </div>
       </div>
 
+      <PhotoField
+        value={form.watch("photoDataUrl")}
+        onChange={(next) => form.setValue("photoDataUrl", next, { shouldValidate: true })}
+        error={errors.photoDataUrl?.message}
+      />
+
       <div className="space-y-2">
-        <Label htmlFor="phone">Phone</Label>
+        <Label htmlFor="cmuEmail">School email</Label>
         <Input
-          id="phone"
-          name="phone"
-          type="tel"
-          autoComplete="tel"
-          placeholder="+1 412 555 0123"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          required
+          id="cmuEmail"
+          type="email"
+          autoComplete="email"
+          placeholder="you@andrew.cmu.edu"
+          className={fieldClass}
+          {...form.register("cmuEmail")}
         />
-        <p className="text-sm text-muted-foreground">
-          This is where your agent texts you. We send a code to check it is yours.
+        <p className="text-xs text-muted-foreground">
+          Must end in @andrew.cmu.edu
         </p>
+        {errors.cmuEmail ? (
+          <p className="text-sm text-destructive">{errors.cmuEmail.message}</p>
+        ) : null}
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="cmuEmail">CMU email</Label>
-        <Input id="cmuEmail" name="cmuEmail" readOnly value={email} className="text-muted-foreground" />
-      </div>
+      <PhoneField
+        value={form.watch("phone")}
+        onChange={(next) => form.setValue("phone", next, { shouldValidate: true })}
+        error={errors.phone?.message}
+        inputClassName={fieldClass}
+      />
 
-      <PreferenceField value={preferenceText} onChange={setPreferenceText} />
-
-      <div className="space-y-2">
-        <Label>What work will you take?</Label>
-        <div className="flex flex-wrap gap-2">
-          {CATEGORIES.map((c) => {
-            const on = categories.includes(c.id);
-            return (
-              <button
-                key={c.id}
-                type="button"
-                aria-pressed={on}
-                onClick={() => toggle(c.id)}
-                className={cn(
-                  "rounded-full border px-3 py-1.5 text-sm transition-colors",
-                  on
-                    ? "border-[var(--broker)] bg-[var(--broker)] text-white"
-                    : "border-border text-muted-foreground hover:border-foreground hover:text-foreground",
-                )}
-              >
-                {c.label}
-              </button>
-            );
-          })}
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Leave all of these off if you only want to ask for things, not do them.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="minPrice">Lowest you will work for</Label>
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">$</span>
-          <Input
-            id="minPrice"
-            name="minPrice"
-            inputMode="numeric"
-            placeholder="8"
-            value={minPrice}
-            onChange={(e) => setMinPrice(e.target.value.replace(/[^\d]/g, ""))}
-            className="w-24 font-mono tabular-nums"
-          />
-          <span className="text-sm text-muted-foreground">
-            Your agent will not take less without asking you.
-          </span>
-        </div>
-      </div>
-
-      <label className="flex items-start gap-3 text-sm">
-        <input
-          id="wantsWork"
-          type="checkbox"
-          checked={wantsWork}
-          onChange={(e) => setWantsWork(e.target.checked)}
-          className="mt-0.5 accent-[var(--broker)]"
+      <fieldset className="space-y-4 border-t border-[var(--ink)]/10 pt-7">
+        <legend className="mb-1 text-sm font-medium text-[var(--ink)]">
+          You&apos;ll need to agree to all of these
+        </legend>
+        <ConsentCheck
+          id="ageConfirmed"
+          label="I am 18 or older"
+          checked={form.watch("ageConfirmed")}
+          onChange={(next) => form.setValue("ageConfirmed", next, { shouldValidate: true })}
+          error={errors.ageConfirmed?.message}
         />
-        <span className="text-muted-foreground">
-          I am willing to be texted about jobs that match what I picked above. I can turn this off
-          any time by replying STOP or from the header.
-        </span>
-      </label>
+        <ConsentCheck
+          id="consentCall"
+          label="Gotchu can call me at this number"
+          checked={form.watch("consentCall")}
+          onChange={(next) => form.setValue("consentCall", next, { shouldValidate: true })}
+          error={errors.consentCall?.message}
+        />
+        <ConsentCheck
+          id="consentText"
+          label="Gotchu can text me at this number"
+          checked={form.watch("consentText")}
+          onChange={(next) => form.setValue("consentText", next, { shouldValidate: true })}
+          error={errors.consentText?.message}
+        />
+      </fieldset>
 
-      {error && <p className="text-sm text-[var(--stop)]">{error}</p>}
-
-      <Button type="submit" disabled={busy}>
-        {busy ? "Saving…" : existing ? "Save and send me a code" : "Sign up"}
+      <Button
+        type="submit"
+        disabled={submitting}
+        className="!h-12 w-full !rounded-xl !text-base sm:w-auto sm:!px-8"
+      >
+        {submitting ? "Saving…" : savedUuid ? "Update my info" : "Join Gotchu"}
       </Button>
     </form>
   );
 }
 
-function messageFor(json: { error?: string; message?: string }): string {
-  switch (json.error) {
-    case "phone_in_use":
-      return "That number already belongs to another account.";
-    case "cmu_email_required":
-      return "Gotchu is CMU only, and that email is not a CMU address.";
-    case "market_not_configured":
-    case "not_configured":
-      return "The marketplace is not connected yet. Tell whoever is running the demo.";
-    case "unreachable":
-      return "The marketplace is not responding. Try again in a moment.";
-    default:
-      return json.message ?? json.error ?? "Something went wrong.";
-  }
+function ConsentCheck({
+  id,
+  label,
+  checked,
+  onChange,
+  error,
+}: {
+  id: string;
+  label: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  error?: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <label
+        htmlFor={id}
+        className="flex items-start gap-3 text-sm text-[var(--ink)]"
+      >
+        <input
+          id={id}
+          type="checkbox"
+          checked={checked}
+          onChange={(event) => onChange(event.target.checked)}
+          className="mt-0.5 size-4 accent-[var(--broker)]"
+        />
+        <span>{label}</span>
+      </label>
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+    </div>
+  );
 }

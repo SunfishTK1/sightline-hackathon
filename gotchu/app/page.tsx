@@ -1,17 +1,11 @@
 /** @owner Will — landing + login CTA */
 import Link from "next/link";
 import { buttonVariants } from "@/components/ui/button";
-import { getIdentity } from "@/lib/identity";
-import { getSignupStatus, marketConfigured } from "@/lib/market";
+import { getAuth0 } from "@/lib/auth0";
 import { cn } from "@/lib/utils";
 
 export default async function HomePage() {
-  const identity = await getIdentity();
-  const account =
-    identity && marketConfigured()
-      ? await getSignupStatus(identity.sub).catch(() => null)
-      : null;
-  const signedUp = Boolean(account?.phone_verified);
+  const session = (await getAuth0()?.getSession()) ?? null;
 
   return (
     <main className="flex flex-1 flex-col justify-center gap-6 px-6 py-16">
@@ -21,29 +15,25 @@ export default async function HomePage() {
         Need something? Type it. Your agent finds someone. You only approve the deal.
       </p>
       <div className="flex flex-wrap gap-3">
-        {!identity ? (
-          <Link href="/auth/login" className={cn(buttonVariants())}>
-            Log in with CMU email
-          </Link>
-        ) : signedUp ? (
-          <Link href="/compose" className={cn(buttonVariants())}>
-            Ask for something
-          </Link>
+        {session?.user ? (
+          <a href="/auth/logout" className={cn(buttonVariants({ variant: "outline" }))}>
+            Log out {session.user.email}
+          </a>
         ) : (
-          <Link href="/onboarding" className={cn(buttonVariants())}>
-            Finish signing up
-          </Link>
+          <a href="/auth/login?returnTo=/onboarding" className={cn(buttonVariants())}>
+            Log in with CMU email
+          </a>
         )}
-        <Link href="/feed" className={cn(buttonVariants({ variant: "outline" }))}>
-          See open tasks
+        <Link
+          href={session?.user ? "/onboarding" : "/auth/login?returnTo=/onboarding"}
+          className={cn(buttonVariants({ variant: "outline" }))}
+        >
+          Join
+        </Link>
+        <Link href="/compose" className={cn(buttonVariants({ variant: "outline" }))}>
+          Compose a task
         </Link>
       </div>
-      {identity && !signedUp && (
-        <p className="max-w-md text-sm text-muted-foreground">
-          You&apos;re signed in as {identity.email}. One more step: we need a phone number to text
-          you at.
-        </p>
-      )}
     </main>
   );
 }
