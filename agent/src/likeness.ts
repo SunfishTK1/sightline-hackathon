@@ -18,6 +18,8 @@ import { market } from "./mcp.js";
 /** Sora rejects a reference whose dimensions differ from the requested size. */
 const REFERENCE_WIDTH = 720;
 const REFERENCE_HEIGHT = 1280;
+/** The image model is asked for a square, so its reference is square too. */
+const IMAGE_REFERENCE = 1024;
 
 export type Likeness = { png: Buffer } | null;
 
@@ -32,7 +34,10 @@ function decodeDataUrl(dataUrl: string): { bytes: Buffer; mime: string } | null 
  * the exact frame the video model wants. Returns null for every failure: a
  * missing likeness must never stop a film being made.
  */
-export async function likenessFor(phone: string | null | undefined): Promise<Likeness> {
+export async function likenessFor(
+  phone: string | null | undefined,
+  shape: "video" | "image" = "video",
+): Promise<Likeness> {
   if (!phone) return null;
   try {
     const info = await market.likeness(phone);
@@ -42,9 +47,11 @@ export async function likenessFor(phone: string | null | undefined): Promise<Lik
     if (!decoded) return null;
 
     // Cover rather than contain: letterbox bars would be baked into the
-    // opening frame of the clip.
+    // opening frame of the clip. "attention" keeps the face when cropping.
+    const [w, h] =
+      shape === "image" ? [IMAGE_REFERENCE, IMAGE_REFERENCE] : [REFERENCE_WIDTH, REFERENCE_HEIGHT];
     const png = await sharp(decoded.bytes)
-      .resize(REFERENCE_WIDTH, REFERENCE_HEIGHT, { fit: "cover", position: "attention" })
+      .resize(w, h, { fit: "cover", position: "attention" })
       .png()
       .toBuffer();
 
