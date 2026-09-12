@@ -463,6 +463,12 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "counter_released") {
     return `They moved on from your counter on "${handoff.payload?.title}", so I'm asking someone else.`;
   }
+  if (handoff.kind === "counter_revised") {
+    return `They changed the terms on "${handoff.payload?.title}", so your $${handoff.payload?.asked_usd} counter is no longer pending. I'll send the revised offer separately.`;
+  }
+  if (handoff.kind === "offer_released") {
+    return `They moved on from your offer for "${handoff.payload?.title}", so you're off the hook.`;
+  }
   return null;
 }
 
@@ -832,11 +838,6 @@ async function expireStaleOffers(): Promise<void> {
           state: "dropped",
         });
       }
-      await sayTo(
-        offer.phone,
-        `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
-        `gotchu-timeout-${offer.id}`,
-      );
       log(`timed out offer ${offer.id} for ${offer.phone}`);
     } catch (err) {
       log(`timeout failed on offer ${offer.id}: ${(err as Error).message}`);
@@ -1079,13 +1080,6 @@ async function chaseStuckItems(): Promise<void> {
           log(`offer ${item.offer_id} changed before escalation could release it`);
           continue;
         }
-        await sayTo(
-          item.phone,
-          `No reply on "${item.about}", so I've released it - it's going to someone else.`,
-          `gotchu-released-${item.offer_id}`,
-          "offer_released",
-          item.offer_id,
-        );
         if (item.order_id) {
           await postLiveEvent({
             orderId: item.order_id,

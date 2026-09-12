@@ -143,7 +143,21 @@ async function claimPayment(
     return { kind: "already", signature: row.solana_signature || "paid" };
   }
   if (row?.status === "paying" && row.stale) {
-    return { kind: "stale" };
+    // Reclaim here, before any caller checks Solana. PostgreSQL rechecks this
+    // predicate after a concurrent row lock, so only one stale verifier wins.
+    const reclaimed = await pool.query<{ id: string }>(
+      `UPDATE payments
+          SET updated_at = now()
+        WHERE order_id = $1
+          AND status = 'paying'
+          AND solana_signature IS NULL
+          AND updated_at < now() - ($2 || ' minutes')::interval
+        RETURNING id`,
+      [orderId, String(STALE_CLAIM_MINUTES)],
+    );
+    return reclaimed.rows[0]
+      ? { kind: "stale" }
+      : { kind: "busy", reason: "settlement already in progress" };
   }
   if (row?.status === "paying") {
     return { kind: "busy", reason: "settlement already in progress" };
@@ -227,21 +241,6 @@ export async function payForTask(input: {
       }
     }
 
-    // The chain has no matching successful transfer. Only one verifier may
-    // reclaim the stale row and proceed to send.
-    const reclaimed = await pool.query<{ id: string }>(
-      `UPDATE payments
-          SET updated_at = now()
-        WHERE order_id = $1
-          AND status = 'paying'
-          AND solana_signature IS NULL
-          AND updated_at < now() - ($2 || ' minutes')::interval
-        RETURNING id`,
-      [input.orderId, String(STALE_CLAIM_MINUTES)],
-    );
-    if (!reclaimed.rows[0]) {
-      return { settled: false, reason: "settlement already in progress", railcoins };
-    }
   }
   if (claim.kind === "busy") {
     return { settled: false, reason: claim.reason, railcoins };

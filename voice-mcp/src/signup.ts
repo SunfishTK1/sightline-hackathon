@@ -7,7 +7,7 @@
  * is not live until a code sent to it comes back. Until then the person exists
  * but is not in the pool, and nothing automated ever reaches them.
  */
-import { pool, normalizePhone, upsertPerson } from "./db.js";
+import { pool, normalizePhone } from "./db.js";
 
 const CODE_TTL_MINUTES = 15;
 const MAX_ATTEMPTS = 5;
@@ -53,58 +53,111 @@ async function textCode(phone: string, code: string): Promise<boolean> {
  */
 export async function registerSignup(input: SignupInput) {
   const e164 = normalizePhone(input.phone);
-
-  // A phone already in use by a different account is a conflict, not an
-  // update: it would quietly hand one person's thread to another.
-  const clash = await pool.query(
-    `SELECT auth0_sub FROM people WHERE phone = $1 AND auth0_sub IS NOT NULL AND auth0_sub <> $2`,
-    [e164, input.auth0_sub],
-  );
-  if (clash.rowCount) {
-    return { error: "phone_in_use" as const };
-  }
-
-  const person = await upsertPerson(e164, input.display_name);
-  const { rows } = await pool.query(
-    `UPDATE people
-        SET auth0_sub = $2,
-            email = COALESCE($3, email),
-            signed_up_at = COALESCE(signed_up_at, now()),
-            phone_verified = CASE WHEN phone = $4 AND phone_verified THEN true ELSE false END,
-            doc = jsonb_set(
-              COALESCE(doc, '{}'::jsonb),
-              '{emailVerified}',
-              COALESCE(doc->'emailVerified', 'false'::jsonb)
-            )
-      WHERE id = $1
-      RETURNING id, phone, display_name, email, phone_verified`,
-    [person.id, input.auth0_sub, input.email || null, e164],
-  );
-  const saved = rows[0];
-
-  // A worker profile exists from the moment they say they want work, but it is
-  // unavailable until the number is proven - an unverified number must never
-  // be offered a job.
-  if (input.wants_work !== false) {
-    await pool.query(
-      `INSERT INTO worker_profiles (person_id, phone, is_available, blurb, categories, min_price_usd, updated_at)
-       VALUES ($1,$2,$3,$4,$5::text[],$6, now())
-       ON CONFLICT (person_id) DO UPDATE
-         SET phone = EXCLUDED.phone,
-             is_available = worker_profiles.is_available AND EXCLUDED.is_available,
-             blurb = COALESCE(EXCLUDED.blurb, worker_profiles.blurb),
-             categories = EXCLUDED.categories,
-             min_price_usd = COALESCE(EXCLUDED.min_price_usd, worker_profiles.min_price_usd),
-             updated_at = now()`,
-      [
-        saved.id,
-        e164,
-        Boolean(saved.phone_verified),
-        input.blurb ?? null,
-        input.categories ?? [],
-        input.min_price_usd ?? null,
-      ],
+  const client = await pool.connect();
+  let saved: any;
+  try {
+    await client.query("BEGIN");
+    // A phone already in use by a different account is a conflict, not an
+    // update: it would quietly hand one person's thread to another.
+    const clash = await client.query(
+      `SELECT auth0_sub FROM people
+        WHERE phone = $1 AND auth0_sub IS NOT NULL AND auth0_sub <> $2`,
+      [e164, input.auth0_sub],
     );
+    if (clash.rowCount) {
+      await client.query("ROLLBACK");
+      return { error: "phone_in_use" as const };
+    }
+
+    // New web-only numbers start unverified. A pre-existing phone identity
+    // keeps its proof, because that thread has already called or signed up.
+    const targetResult = await client.query(
+      `INSERT INTO people (phone, display_name, phone_verified)
+       VALUES ($1,$2,false)
+       ON CONFLICT (phone) DO UPDATE
+         SET display_name = COALESCE(EXCLUDED.display_name, people.display_name)
+       RETURNING *`,
+      [e164, input.display_name ?? null],
+    );
+    const target = targetResult.rows[0];
+    const previous = await client.query(
+      `SELECT id FROM people WHERE auth0_sub = $1 AND id <> $2 FOR UPDATE`,
+      [input.auth0_sub, target.id],
+    );
+    const previousId = previous.rows[0]?.id as string | undefined;
+    const profileSource = await client.query(
+      `SELECT is_available, blurb, categories, min_price_usd,
+              auto_counter, auto_accept, stripe_account_id, payouts_ready
+         FROM worker_profiles
+        WHERE person_id = $1`,
+      [previousId ?? target.id],
+    );
+
+    if (previousId) {
+      // Free the unique Auth0 binding before moving it, and retire the old
+      // phone's worker profile so automated work cannot keep going there.
+      await client.query(`DELETE FROM worker_profiles WHERE person_id = $1`, [previousId]);
+      await client.query(`UPDATE people SET auth0_sub = NULL WHERE id = $1`, [previousId]);
+    }
+
+    const savedResult = await client.query(
+      `UPDATE people
+          SET auth0_sub = $2,
+              email = COALESCE($3, email),
+              signed_up_at = COALESCE(signed_up_at, now()),
+              doc = jsonb_set(
+                COALESCE(doc, '{}'::jsonb),
+                '{emailVerified}',
+                COALESCE(doc->'emailVerified', 'false'::jsonb)
+              )
+        WHERE id = $1
+        RETURNING id, phone, display_name, email, phone_verified`,
+      [target.id, input.auth0_sub, input.email || null],
+    );
+    saved = savedResult.rows[0];
+
+    // A worker profile exists from the moment they say they want work, but it
+    // remains unavailable until a new number is proven.
+    const oldProfile = profileSource.rows[0];
+    if (input.wants_work !== false || oldProfile) {
+      await client.query(
+        `INSERT INTO worker_profiles
+           (person_id, phone, is_available, blurb, categories, min_price_usd,
+            auto_counter, auto_accept, stripe_account_id, payouts_ready, updated_at)
+         VALUES ($1,$2,$3,$4,$5::text[],$6,$7,$8,$9,$10, now())
+         ON CONFLICT (person_id) DO UPDATE
+           SET phone = EXCLUDED.phone,
+               is_available = worker_profiles.is_available AND EXCLUDED.is_available,
+               blurb = COALESCE(EXCLUDED.blurb, worker_profiles.blurb),
+               categories = EXCLUDED.categories,
+               min_price_usd = COALESCE(EXCLUDED.min_price_usd, worker_profiles.min_price_usd),
+               auto_counter = EXCLUDED.auto_counter,
+               auto_accept = EXCLUDED.auto_accept,
+               stripe_account_id = COALESCE(EXCLUDED.stripe_account_id, worker_profiles.stripe_account_id),
+               payouts_ready = worker_profiles.payouts_ready OR EXCLUDED.payouts_ready,
+               updated_at = now()`,
+        [
+          saved.id,
+          e164,
+          Boolean(saved.phone_verified) &&
+            input.wants_work !== false &&
+            Boolean(oldProfile?.is_available ?? true),
+          input.blurb ?? oldProfile?.blurb ?? null,
+          input.categories ?? oldProfile?.categories ?? [],
+          input.min_price_usd ?? oldProfile?.min_price_usd ?? null,
+          Boolean(oldProfile?.auto_counter ?? true),
+          Boolean(oldProfile?.auto_accept ?? false),
+          oldProfile?.stripe_account_id ?? null,
+          Boolean(oldProfile?.payouts_ready ?? false),
+        ],
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
 
   if (saved.phone_verified) {

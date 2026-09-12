@@ -1,10 +1,35 @@
-# Ethics & Arbitration Agent — Daphne (standalone)
+# Ethics & Arbitration Agent — Daphne
 
-Addendum. Implementation in `gotchu/`. The overall team spec is `gotchu-hackathon-spec.md` (updated to match this file).
+**Shipped on `main`.** Implementation: `gotchu/lib/agents/ethics.ts`. Teammate wiring: `ETHICS-INTEGRATION.md`. The overall product spec is `gotchu-hackathon-spec.md`.
 
-Build this as its own module. Thomas (personal agent) and Divya/you (market-making / negotiate loop) **call your functions**. They do not reimplement the rubric.
+Thomas, Divya, and `voice-mcp` **call this agent**. They do not copy the deny-list or rewrite the rubric.
 
-Until the main app is wired, you can run this with fake tasks and a script. Same input/output later.
+Smoke test (from `gotchu/`):
+
+```bash
+npm run ethics-smoke
+```
+
+---
+
+## What shipped
+
+Daphne owns Gotchu’s ethics and arbitration agent end to end: policy (a distilled Student Handbook / Academic Integrity), the deny-list, the four functions, the HTTP routes other services hit in production, and the canned tests.
+
+| Surface | Where |
+|---|---|
+| Gate + referee | `gotchu/lib/agents/ethics.ts` — `reviewTask`, `reviewAmendment`, `arbitrateMove`, `reviewComment`, `parseEthicsStructured` |
+| Policy | `gotchu/lib/prompts/ethics-handbook.ts`, `ethics-denylist.ts`, `ethics-rubric.ts`, `ethics-arbitrate.ts` |
+| HTTP | `POST /api/ethics/review`, `/amendment`, `/arbitrate` |
+| Types | `gotchu/lib/types/ethics.ts` |
+| Fixtures + tests | `gotchu/mocks/ethics.ts`, `gotchu/scripts/ethics-smoke.ts` |
+
+**Live callers**
+
+- **`voice-mcp`** (text and voice) — `reviewTask` before a request opens; `reviewAmendment` when the requester changes *what the job is*. If the amendment is `REJECT`, the original listing stays; they post a new request instead of rewriting someone else’s offer.
+- **`market-maker`** — `ethics-gate.ts` POSTs review on quote and `arbitrateMove` on each evaluate turn.
+
+The agent is deny-list plus handbook-backed heuristics (fail closed on identity, fail open on cosmetics). Rubric/arbitrate prompts exist for a model; they are not required for the live gate. On HTTP parse failure the route 400s; callers must not treat that as “no verdict.”
 
 ---
 
@@ -15,21 +40,21 @@ Two jobs, one agent:
 1. **Ethics (gate)** — Is this allowed on a CMU student marketplace at all?
 2. **Arbitration (referee)** — During matching and negotiation, is this still the *same job*, and is **price the only thing being traded**?
 
-Agents may **tweak details** of the same job (paint the fence *navy* instead of *white*). They may **not** morph it into a different job (paint the fence → write my 15-213 lab). They may **not** barter extra work, locations, or people — only dollars.
+Agents may **tweak details** of the same job (paint the fence *navy* instead of *white*). They may **not** morph it into a different job (paint the fence → drive me to the airport, or write my 15-213 lab). They may **not** barter extra work, locations, or people — only dollars.
 
 ---
 
-## Who calls you (do not wait for them)
+## Who calls it
 
-| Caller | When | Function |
+| Caller | When | Function / HTTP |
 |---|---|---|
-| **Personal AI (Thomas)** | After `parseTask`, before the task is `OPEN` | `reviewTask(structured)` |
-| **Personal AI (Thomas)** | User (or agent) edits structured fields on the compose card | `reviewAmendment(original, proposed)` |
-| **Personal AI (Thomas)** | Each `nextMove` *before* it is appended to the transcript | `arbitrateMove(...)` |
-| **Market-making (negotiate loop)** | Same: after each `nextMove`, before save | `arbitrateMove(...)` |
-| **Will (completion)** | After a review comment is posted | `reviewComment(comment)` |
+| **`voice-mcp`** (`submit_order`) | After intake, before the order can be matched | `POST /api/ethics/review` |
+| **`voice-mcp`** (`update_order`, details change) | Requester rewrites the job over text or a call | `POST /api/ethics/amendment` |
+| **`market-maker`** (quote) | Before a task is priced / offered | `POST /api/ethics/review` |
+| **`market-maker`** (evaluate) | Each offer / counter, once per turn | `POST /api/ethics/arbitrate` |
+| **Will (completion)** | After a review comment is posted | `reviewComment(comment)` — function is shipped; wire when ratings land |
 
-Export **plain functions**. Also expose HTTP routes so you can demo the agent alone. Callers should import the function, not HTTP, in production.
+Gotchu-internal code may import the functions. Other packages **must** HTTP — they must not reimplement the rubric.
 
 ---
 
@@ -40,14 +65,14 @@ Export **plain functions**. Also expose HTTP routes so you can demo the agent al
 ### Same task (allow)
 
 - Fence: white → navy, satin → matte, “front yard” → “front + gate”
-- Pickup: UC mailroom → UC loading dock (same building / same errand)
+- Pickup pin: UC desk → UC loading dock (same building / same errand) — *package pickup itself is still BLOCKED at the gate*
 - Time: “before 6” → “before 6:30” if still the same deadline window
 - ETA minutes changing with the price offer
 
 ### Different task (reject the move, keep the original job)
 
 - Fence painting → also take my 15-213 exam
-- Package UC → Gates becomes “drive me to the airport”
+- Fence painting becomes “drive me to the airport”
 - Food run becomes “buy beer with my ID”
 - Adding a second, unrelated chore as payment-in-kind (“I’ll paint if you also walk my dog”)
 
@@ -68,7 +93,7 @@ Snapshot `originalStructured` the moment ethics first **ALLOW**s the task. That 
 | `category` | Color, size, brand, flavor, notes in `requirements` that don’t add a new chore |
 | Core action in `title` (pickup vs paint vs tutor) | Exact shade / finish / count within the same action |
 | Requester identity / who the work is for | Pickup/dropoff *pin* inside the same place (UC desk vs UC dock) |
-| “Do my graded work” vs “explain a concept” | Deadline slip of a small amount (your prompt: not more than ~2 hours, never past the original day if it was same-day) |
+| “Do my graded work” vs “explain a concept” | Deadline slip of a small amount (not more than ~2 hours, never past the original day if it was same-day) |
 
 If you’re unsure, **reject the amendment, keep the original, let price still move.** Fail closed on identity; fail open on cosmetics.
 
@@ -76,11 +101,13 @@ If you’re unsure, **reject the amendment, keep the original, let price still m
 
 ## Functions (contract)
 
-All return `{ ok: true, data }` shape from routes; functions themselves return the `data` object. Zod-validate. On LLM failure, return the **fallback** below — never throw to the caller.
+Routes return `{ ok: true, data }` / `{ ok: false, error }`. Functions return the `data` object. They do not throw to the caller.
+
+HTTP bodies from `voice-mcp` often send `description` (the order details) and snake_case locations. `parseEthicsStructured` folds `description` / `details` into `requirements` so the same-job check sees what the person said, defaults a missing price to `0`, and maps unknown categories to `other`.
 
 ### 1. `reviewTask(structured) → EthicsVerdict`
 
-Gate before the pool. Same spirit as the original ethics agent.
+Gate before the pool.
 
 ```ts
 type EthicsVerdict = {
@@ -102,19 +129,19 @@ type EthicsCategory =
   | "none"
 ```
 
-**BLOCK:** graded work done *for* them; **package pickup**; **alcohol at any age**; **barter / non-money pay** (5 coffees, pizza, dining swipes — USD only); tobacco/controlled substances; impersonation / “use my ID”; illegal; real physical danger.
+**BLOCK:** graded work done *for* them; **package pickup**; **alcohol at any age** (including 21+ delivery); **barter / non-money pay** (5 coffees, pizza, dining swipes, a hoodie — USD only, even mixed with a dollar price); tobacco/controlled substances; impersonation / “use my ID”; illegal; real physical danger.
 
 Decisions cite a distilled Student Handbook (“The Word”) in `gotchu/lib/prompts/ethics-handbook.ts`, not the full copyrighted handbook.
 
 **ALLOW_WITH_CONDITIONS:** private residence, tutoring for *concepts* not *doing the work*. No dollar cap — price size is not an ethics issue.
 
-**ALLOW:** food, moving, errands, campus delivery, event help, painting a fence, etc.
+**ALLOW:** food, moving, errands, campus delivery, event help, painting a fence, etc. A coffee *run* paid in USD is ALLOW; coffee *as payment* is BLOCK.
 
-**Fallback if the model dies:** `ALLOW_WITH_CONDITIONS`, condition `Manual review recommended — ethics model unavailable.`, reason explaining that. *Exception:* deny-list prefilter still **BLOCK**s instantly (exam, homework submission, package pickup, **any alcohol regardless of age**, prescription, weapons, “use my ID”).
+**If the model is unused or dies:** deny-list still **BLOCK**s instantly (exam, homework, package pickup, **any alcohol regardless of age**, prescription, weapons, “use my ID”, barter). Otherwise heuristics: tutoring / private home → `ALLOW_WITH_CONDITIONS`; routine campus help → `ALLOW`.
 
 ### 2. `reviewAmendment(originalStructured, proposedStructured) → AmendmentVerdict`
 
-Used when Thomas’s compose card is edited, or when a negotiate move includes a proposed field change.
+Used when a live request’s details change (voice or text `update_order`), or when a negotiate move includes a proposed field change.
 
 ```ts
 type AmendmentVerdict = {
@@ -126,13 +153,20 @@ type AmendmentVerdict = {
 }
 ```
 
-If `REJECT`, callers must keep `originalStructured` (or last allowed structured). They may still change `maxPriceUsd` / offer price without calling this — price is not an amendment to the job.
+If `REJECT`, callers **keep the original listing**. They do not rewrite an offered job into a different one. They may still change `maxPriceUsd` / deadline without calling this — price and time are not a job amendment.
 
-**Fallback:** `REJECT` everything except price-shaped fields (`maxPriceUsd`, `estimatedMinutes`). `sameTask: true` only if non-price fields are identical.
+**HTTP body (both shapes accepted):**
+
+```http
+POST /api/ethics/amendment
+{ "originalStructured": {…}, "proposedStructured": {…} }
+```
+
+or `{ "original": {…}, "proposed": {…} }`. `voice-mcp` posts the `*Structured` names (and now both). A 400 here must not be treated as “skip the same-job check.”
 
 ### 3. `arbitrateMove(input) → ArbitrationVerdict`
 
-Called on **every** agent turn in the negotiate loop (and Thomas should run it inside `nextMove` *or* you run it in `runNegotiation` — **once per turn, not twice**. Team rule: **the negotiate loop owns the call**. Thomas’s `nextMove` just proposes. You referee.
+Called **once per turn** in the market-maker evaluate loop, before save or outreach. Do not also call it from the personal agent.
 
 ```ts
 type ArbitrateInput = {
@@ -144,7 +178,6 @@ type ArbitrateInput = {
     etaMinutes: number
     rationale: string
     accept: boolean
-    // optional job tweaks this turn — may be empty
     amendments?: { path: string; to: unknown }[]
   }
   transcript: NegotiationMessage[]
@@ -152,95 +185,73 @@ type ArbitrateInput = {
 
 type ArbitrationVerdict = {
   verdict: "ALLOW" | "STRIP_AMENDMENTS" | "REJECT_MOVE" | "BLOCK_TASK"
-  priceUsd: number          // echo, or clamp note — you do not set the price, you only pass it through
-  structured: StructuredTask // currentStructured, plus allowed amendments only
+  priceUsd: number
+  structured: StructuredTask
   stripped: { path: string; why: string }[]
-  reason: string            // one sentence for the replay UI
+  reason: string
 }
 ```
 
 | Verdict | Meaning | Caller does |
 |---|---|---|
 | `ALLOW` | Price offer + any tweaks are still the same job | Append move; save `structured` |
-| `STRIP_AMENDMENTS` | Price OK; job tweaks not OK | Append move **with price/ETA/accept only**; ignore amendments |
-| `REJECT_MOVE` | The turn itself is nonsense (e.g. tried to trade non-price) | Do **not** append; same agent retries once, then skip turn |
-| `BLOCK_TASK` | Ethics problem appeared mid-deal (buy alcohol, do my homework) | Stop negotiation; task `BLOCKED` or `NO_MATCH`; do not approve |
+| `STRIP_AMENDMENTS` | Price OK; job tweaks not OK | Append **price/ETA/accept only**; ignore amendments |
+| `REJECT_MOVE` | The turn itself is nonsense (tried to trade non-price) | Do **not** append; same agent retries once, then skip |
+| `BLOCK_TASK` | Ethics problem appeared mid-deal (alcohol, homework, dining ID) | Stop; task `blocked`; do not approve |
 
-You **do not** decide whether $9 vs $11 is fair. Reservation clamping stays in Thomas’s code. You only care: is this still a price offer on the same job, and is the job still allowed.
+This agent **does not** decide whether $9 vs $11 is fair. It only cares: is this still a price offer on the same job, and is the job still allowed.
 
-**Fallback:** `STRIP_AMENDMENTS`, pass `priceUsd` through, `structured = currentStructured`.
+**Fallback if needed:** `STRIP_AMENDMENTS`, pass `priceUsd` through, keep `currentStructured`.
 
-### 4. `reviewComment(comment: string) → { ethicsFlag: string | null }`
+### 4. `reviewComment(comment: string) → string | null`
 
-Same as before. Deny-list or LLM. Fallback: `null`.
-
----
-
-## Implementation order (build this first, alone)
-
-1. **Types + zod** in `lib/types/ethics.ts` (verdicts above). Don’t wait for Will if you’re solo — keep names identical so you can drop them in.
-2. **Deny-list** `lib/prompts/ethics-denylist.ts` — regex, no LLM, used by `reviewTask` and `arbitrateMove` (if rationale or amendment text trips it → `BLOCK` / `BLOCK_TASK`).
-3. **Mocks** `mocks/ethics.ts` — canned examples below. Your first demo can run 100% on mocks.
-4. **`reviewTask`** with Gemini or Claude JSON mode (Will’s `lib/llm.ts` when it exists; until then your own thin client).
-5. **`reviewAmendment` + `arbitrateMove`** — one prompt that sees original vs proposed.
-6. **HTTP for solo demo:**
-   - `POST /api/ethics/review` `{ structured }`
-   - `POST /api/ethics/amendment` `{ original, proposed }`
-   - `POST /api/ethics/arbitrate` `{ ...ArbitrateInput }`
-7. **Log** every call to `ethics_log`: input, output, latency, which function. Judges like an audit trail.
-8. **Wire later:** Thomas calls `reviewTask` / `reviewAmendment`. Negotiate loop calls `arbitrateMove` after each `nextMove`.
-
-Hard caps: 8s per LLM call, 1 retry, then fallback. Arbitration must not blow the negotiate 20s budget — if you’re over ~4s, use the strip-amendments fallback.
+Deny-list over a star-rating comment. Returns an `EthicsCategory` or `null`. Fallback: `null`.
 
 ---
 
-## Prompt sketch (arbitration)
+## HTTP (solo demo and live services)
 
-```
-You are the ethics and arbitration agent for Gotchu, a CMU student task marketplace.
+| Route | Body | Function |
+|---|---|---|
+| `POST /api/ethics/review` | `{ structured }` | `reviewTask` |
+| `POST /api/ethics/amendment` | `{ original, proposed }` **or** `{ originalStructured, proposedStructured }` | `reviewAmendment` |
+| `POST /api/ethics/arbitrate` | `ArbitrateInput` | `arbitrateMove` |
 
-The ORIGINAL task is the identity of the job. It must not become a different job.
-Cosmetic or parametric tweaks to the SAME job are allowed (e.g. fence color).
-The ONLY thing agents may exchange or bargain is price (USD). ETA may accompany a price.
-Reject barter, extra unrelated chores, impersonation, graded academic work, alcohol/IDs, illegal or dangerous work.
-
-Return JSON only:
-{ "verdict": "ALLOW" | "STRIP_AMENDMENTS" | "REJECT_MOVE" | "BLOCK_TASK",
-  "sameTask": true/false,
-  "stripped": [{ "path": "...", "why": "..." }],
-  "reason": "one sentence" }
-```
+Point `ETHICS_BASE_URL` at the Gotchu app (market-maker defaults to `http://127.0.0.1:3001`). Production: `gotchu.velroi.com`.
 
 ---
 
-## Canned tests (use these in `mocks/` and in a `scripts/ethics-smoke.ts`)
+## Canned tests (`npm run ethics-smoke`)
 
 | # | Input | Expected |
 |---|---|---|
 | 1 | “Pick up package UC → Gates, $10” | `reviewTask` BLOCK, `credential_misuse` |
 | 2 | “Write my 15-213 lab for $50” | `reviewTask` BLOCK, `academic_integrity` |
-| 3 | Original: paint fence white. Proposed: paint fence navy | `reviewAmendment` ALLOW, `sameTask: true` |
-| 4 | Original: paint fence. Proposed: paint fence AND write my essay | `REJECT`, `sameTask: false` |
+| 2b | Beer delivery, buyer 21+ | BLOCK, `controlled_substances` |
+| 2c–2i | Coffees / cookies / hoodie / mixed $40+coffees as **pay** | BLOCK, `financial_risk`; USD coffee *run* ALLOW |
+| 3 | Fence white → navy | `reviewAmendment` ALLOW, `sameTask: true` |
+| 4 | Fence + write my essay | `REJECT`, `sameTask: false` |
 | 5 | Worker move: `$12`, no amendments | `arbitrateMove` ALLOW |
-| 6 | Worker move: `$8` + amendment “also walk the dog” | STRIP_AMENDMENTS or REJECT_MOVE; job unchanged |
-| 7 | Requester move: pay `$0` if worker “uses my dining ID” | BLOCK_TASK, `credential_misuse` |
-| 8 | Color change + price `$40` → `$35` | ALLOW both |
+| 6 | `$8` + “also walk the dog” | STRIP_AMENDMENTS (or REJECT_MOVE); job unchanged |
+| 7 | Pay `$0` if worker “uses my dining ID” | BLOCK_TASK |
+| 8 | Navy + `$35` | ALLOW both |
+| 9 | voice-mcp payload: same title, details “drive me to the airport” | `reviewAmendment` REJECT |
 
-If the model fails tests 2, 4, or 7, tighten the prompt; do not “be nicer.”
-
----
-
-## What you do **not** build in this folder of work
-
-- The negotiate loop UI / transcript replay (still your other workstream, later)
-- Matching / vector search (Divya)
-- `parseTask` / `nextMove` (Thomas) — they call you
-- Auth0 / seed users (Will)
-
-When you merge: one folder `lib/agents/ethics.ts` plus prompts. Will stops owning `reviewTask`; he still *calls* `reviewComment`.
+If tests 2, 4, or 7 fail, tighten the deny-list; do not “be nicer.”
 
 ---
 
-## Demo line (when it’s wired)
+## What this workstream does **not** own
 
-After the 15-213 block: “And if two agents try to quietly change the job — paint my fence becoming write my lab — arbitration strips that. They can change the color. They can only trade on price.”
+- Matching / live board / SMS outreach (Divya / Thomas)
+- `parseTask` / personal-agent prompts (Thomas) — they call the gate
+- Auth0 / onboarding / wallet (Will)
+- Completing or paying a task (Will / voice-mcp)
+
+Web screens that are still Daphne’s in the Next app: campus map (`/map`, `/api/map`), feed and approval/replay stubs (`/feed`, `/tasks/[taskId]`).
+
+---
+
+## Demo line
+
+After the 15-213 block: “And if two agents try to quietly change the job — paint my fence becoming write my lab, or an airport ride — arbitration keeps the original listing. They can change the color. They can only trade on price.”
