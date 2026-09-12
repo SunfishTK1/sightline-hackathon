@@ -100,12 +100,18 @@ export const tools: ToolDef[] = [
       const [orders, openCall, worker, pastCalls, offers, counters, askedOfThem, theyAsked] =
         await Promise.all([
           pool.query(
+            // Live requests first, then recent history. Ordering purely by
+            // recency let a busy person's still-open task fall off the end of
+            // the limit, and the agent then told them it had no record of a
+            // request it had messaged them about minutes earlier.
             `SELECT o.id, o.title, o.status, o.budget_usd, o.category, o.deadline_at,
                     o.created_at, w.phone AS being_done_by
                FROM orders o
                LEFT JOIN people w ON w.id = o.accepted_by
               WHERE o.person_id = $1
-              ORDER BY o.created_at DESC LIMIT 8`,
+              ORDER BY (o.status IN ('submitted','offered','accepted','done_pending','no_takers')) DESC,
+                       o.created_at DESC
+              LIMIT 16`,
             [person.id],
           ),
           pool.query(
@@ -137,7 +143,10 @@ export const tools: ToolDef[] = [
       ]);
 
       const live = orders.rows.filter((o: { status: string }) =>
-        ["submitted", "offered", "accepted"].includes(o.status),
+        // no_takers belongs here: the task is paused, not gone, and the agent
+        // told them so. Leaving it out made the agent deny the existence of a
+        // request it had announced pausing one message earlier.
+        ["submitted", "offered", "accepted", "no_takers"].includes(o.status),
       );
 
       return {
@@ -744,6 +753,9 @@ tools.push({
           SET budget_usd = COALESCE($3, o.budget_usd),
               deadline_at = COALESCE($4::timestamptz, o.deadline_at),
               details = COALESCE($5, o.details),
+              -- New terms put a parked task back in front of people, and reset
+              -- the misses that parked it. The agent already promises exactly
+              -- this when it pauses one.
               status = CASE WHEN o.status = 'no_takers' THEN 'submitted' ELSE o.status END,
               match_attempts = CASE WHEN o.status = 'no_takers' THEN 0 ELSE o.match_attempts END,
               updated_at = now()
