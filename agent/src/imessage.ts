@@ -92,11 +92,12 @@ export async function sendText(
   text: string,
   idempotencyKey: string,
   attachmentIds?: string[],
+  service: "iMessage" | "SMS" | "auto" = "iMessage",
 ): Promise<SendResult> {
   const payload: Record<string, unknown> = {
     to,
     text,
-    service: "iMessage",
+    service,
     consent: true,
   };
   // Bare ids; a list of objects is rejected.

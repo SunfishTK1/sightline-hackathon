@@ -20,6 +20,7 @@ import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } 
 import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
+import { ackLiveSkip, listLiveSkips, postLiveEvent, postLiveMedia, startLiveBoard } from "./live.js";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
@@ -323,6 +324,13 @@ async function matchOpenOrders(): Promise<void> {
     }
     const pick = picks[0];
     if (!pick) continue;
+    const live = await startLiveBoard({
+      orderId: order.id,
+      title: order.title,
+      category: order.category,
+      deadlineAt: order.deadline_at,
+      slots: Math.max(picks.length, 2),
+    });
     const travelNote = pick.travel
       ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
       : undefined;
@@ -335,6 +343,16 @@ async function matchOpenOrders(): Promise<void> {
     );
     if (offer) {
       log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
+      const offerId = String((offer as { id?: string }).id ?? "");
+      await postLiveEvent({
+        orderId: order.id,
+        kind: "considering",
+        message: live && !live.created ? "Moving to the next person." : "Asking someone now.",
+        offerId,
+        state: "considering",
+        addSlot: Boolean(live && !live.created),
+        slot: live && !live.created ? undefined : 0,
+      });
       if (order.requester_phone && pick.offerUsd != null) {
         const hop = pick.travel
           ? ` ${pick.travel.distanceMi} mi: walk ${pick.travel.walkMin} min, bus ${pick.travel.busMin} min, drive ${pick.travel.driveMin} min.`
@@ -350,6 +368,16 @@ async function matchOpenOrders(): Promise<void> {
           `I'll ask someone for "${order.title}" at $${pick.offerUsd} — typical for this job.${hop}${timeWarn} Reply if you want a different cap or more time.`,
           `gotchu-prime-${order.id}-${pick.offerUsd}`,
         );
+        if (live?.url) {
+          await sayTo(
+            order.requester_phone,
+            `On your "${order.title}" — already matching. Watch it live: ${live.url}`,
+            `gotchu-live-${order.id}`,
+            "agent_action",
+            null,
+            "SMS",
+          );
+        }
       }
     }
   }
@@ -424,6 +452,15 @@ async function sendOutreach(): Promise<void> {
 
     if (sent.accepted || sent.permanent) {
       await market.markOutreachSent(offer.id);
+      if (offer.order_id) {
+        await postLiveEvent({
+          orderId: offer.order_id,
+          kind: "waiting",
+          message: "Waiting to hear back.",
+          offerId: String(offer.id),
+          state: "waiting",
+        });
+      }
       if (sent.accepted) {
         // The offer has to land in their thread, or a later "I'll take the
         // fridge one" refers to a message the agent has no record of sending.
@@ -524,9 +561,10 @@ async function sayTo(
   key: string,
   kind = "agent_action",
   refId: string | null = null,
+  service: "iMessage" | "SMS" | "auto" = "iMessage",
 ): Promise<boolean> {
   const message = shorten(text);
-  const sent = await sendText(phone, message, key);
+  const sent = await sendText(phone, message, key, undefined, service);
   await recordSent(sent.requestId, phone, kind, refId, message);
   if (sent.accepted) {
     const history = await loadTurns(phone);
@@ -536,6 +574,22 @@ async function sayTo(
     ]);
   }
   return sent.accepted;
+}
+
+async function applyLiveSkips(): Promise<void> {
+  for (const skip of await listLiveSkips()) {
+    if (skip.offerId) {
+      await market.respond(skip.offerId, false).catch(() => null);
+      await postLiveEvent({
+        orderId: skip.orderId,
+        kind: "skipped",
+        message: "You asked to move on. Trying the next person.",
+        offerId: skip.offerId,
+        state: "dropped",
+      });
+    }
+    await ackLiveSkip(skip.token);
+  }
 }
 
 const EXCLUSIVE_OFFER_TIMEOUT_MS = 10 * 60 * 1000;
@@ -556,6 +610,15 @@ async function expireStaleOffers(): Promise<void> {
       });
       if (verdict && verdict.action !== "TRY_NEXT") continue;
       await market.respond(offer.id, false);
+      if (offer.order_id) {
+        await postLiveEvent({
+          orderId: offer.order_id,
+          kind: "timeout",
+          message: "No reply in time. Trying the next person.",
+          offerId: String(offer.id),
+          state: "dropped",
+        });
+      }
       await sayTo(
         offer.phone,
         `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
@@ -577,6 +640,15 @@ async function expireStaleOffers(): Promise<void> {
       });
       if (verdict && verdict.action !== "TRY_NEXT") continue;
       await market.respondToCounter(counter.id, counter.requester_phone, false);
+      if (counter.order_id) {
+        await postLiveEvent({
+          orderId: counter.order_id,
+          kind: "timeout",
+          message: "No decision in time. Trying the next person.",
+          offerId: String(counter.id),
+          state: "dropped",
+        });
+      }
       await sayTo(
         counter.requester_phone,
         `No decision on "${counter.title}" in time, so I'm asking someone else.`,
@@ -627,6 +699,15 @@ async function autoNegotiate(): Promise<void> {
       });
       if (verdict?.action === "TRY_NEXT") {
         await market.respond(offer.id, false);
+        if (offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "declined",
+            message: "Declined. Trying the next person.",
+            offerId: String(offer.id),
+            state: "declined",
+          });
+        }
         log(`broker said try next on offer ${offer.id}`);
         continue;
       }
@@ -639,6 +720,15 @@ async function autoNegotiate(): Promise<void> {
         verdict.nextOfferUsd,
         verdict.messageHint,
       );
+      if (offer.order_id) {
+        await postLiveEvent({
+          orderId: offer.order_id,
+          kind: "countered",
+          message: "Counter offer sent.",
+          offerId: String(offer.id),
+          state: "countered",
+        });
+      }
       const paid = pays > 0 ? `$${pays}` : "no set price";
       await sayTo(
         offer.phone,
@@ -671,6 +761,15 @@ async function autoNegotiate(): Promise<void> {
       });
       if (verdict?.action === "TRY_NEXT") {
         await market.respondToCounter(counter.id, counter.requester_phone, false);
+        if (counter.order_id) {
+          await postLiveEvent({
+            orderId: counter.order_id,
+            kind: "declined",
+            message: "Declined. Trying the next person.",
+            offerId: String(counter.id),
+            state: "declined",
+          });
+        }
         log(`broker said try next on counter ${counter.id}`);
         continue;
       }
@@ -678,6 +777,15 @@ async function autoNegotiate(): Promise<void> {
         continue;
       }
       await market.respondToCounter(counter.id, counter.requester_phone, true);
+      if (counter.order_id) {
+        await postLiveEvent({
+          orderId: counter.order_id,
+          kind: "accepted",
+          message: "Someone took the job.",
+          offerId: String(counter.id),
+          state: "accepted",
+        });
+      }
       await sayTo(
         counter.requester_phone,
         `Someone asked $${asking} for "${counter.title}", inside the $${budget} you set, so I agreed for you. They're on it.`,
@@ -792,6 +900,13 @@ async function illustrateOrders(): Promise<void> {
       imgKey ? { storage_key: imgKey, bytes: made.png.length } : { png_base64: made.png.toString("base64") },
       made.prompt,
     );
+    await postLiveMedia({
+      orderId: order.id,
+      kind: "image",
+      storageKey: imgKey ?? undefined,
+      pngBase64: imgKey ? undefined : made.png.toString("base64"),
+      prompt: made.prompt,
+    });
     log(`illustrated "${order.title}" (${made.png.length} bytes)`);
 
     // Show the requester what the agent understood, in a picture.
@@ -846,6 +961,13 @@ async function filmOrder(order: FilmableOrder & { id: string; title: string }): 
       made.prompt,
       made.seconds,
     );
+    await postLiveMedia({
+      orderId: order.id,
+      kind: "video",
+      storageKey: key ?? undefined,
+      mp4Base64: key ? undefined : made.mp4.toString("base64"),
+      prompt: made.prompt,
+    });
     log(`filmed "${order.title}" (${made.mp4.length} bytes, ${made.seconds}s${key ? `, ${key}` : ", inline"})`);
     return true;
   } finally {
@@ -1055,6 +1177,7 @@ async function main() {
   loop("outreach", sendOutreach, 5);
   loop("negotiate", autoNegotiate, 8);
   loop("expire", expireStaleOffers, 30);
+  loop("live-skip", applyLiveSkips, 5);
   loop("chase", chaseStuckItems, 60);
   loop("illustrate", illustrateOrders, 30);
   loop("film", filmOpenTasks, 120);

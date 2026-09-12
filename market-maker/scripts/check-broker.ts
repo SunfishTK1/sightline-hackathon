@@ -5,6 +5,10 @@ import {
 } from "../src/lib/market/quote-price";
 import { estimateJobTravel, estimateTravel } from "../src/lib/market/campus-travel";
 import { evaluateBrokerDecision } from "../src/lib/market/evaluate-broker";
+import {
+  arbitrationBlocksDeal,
+  ethicsStructuredFromOrder,
+} from "../src/lib/market/ethics-gate";
 import { looksLikeScopeChange } from "../src/lib/market/scope-change";
 import { looksLikeTimeAsk } from "../src/lib/market/time-ask";
 import { evaluateWorkerResponse } from "../src/lib/market/evaluate-response";
@@ -29,6 +33,7 @@ function check(name: string, ok: boolean) {
   }
 }
 
+async function main() {
 check("floor median", categoryFloor([8, 10, 12], 1) === 10);
 check(
   "clearing overlap at min",
@@ -40,7 +45,7 @@ check(
   !clearingPrice({ requesterMax: 10, workerMin: 18, categoryFloor: 0 }).overlap,
 );
 
-const auto = evaluateBrokerDecision({
+const auto = await evaluateBrokerDecision({
   order: { title: "Fridge move", budget_usd: 15, category: "moving" },
   current_offer_usd: 10,
   decision: "AUTO_WORKER",
@@ -67,7 +72,7 @@ check(
 );
 check("prime beats floor close-rate", primed.pDeal > 0.25);
 
-const accept = evaluateBrokerDecision({
+const accept = await evaluateBrokerDecision({
   order: { title: "Fridge move", budget_usd: 15 },
   current_offer_usd: 12,
   decision: "AUTO_REQUESTER",
@@ -75,7 +80,7 @@ const accept = evaluateBrokerDecision({
 });
 check("auto requester accepts at quote", accept.action === "ACCEPT");
 
-const ask = evaluateBrokerDecision({
+const ask = await evaluateBrokerDecision({
   order: { title: "Fridge move", budget_usd: 15 },
   current_offer_usd: 10,
   decision: "AUTO_REQUESTER",
@@ -95,7 +100,7 @@ const rounds = evaluateWorkerResponse(
 );
 check("round cap after 2 counters", rounds.action === "TRY_NEXT_CANDIDATE");
 
-const timed = evaluateBrokerDecision({
+const timed = await evaluateBrokerDecision({
   order: { title: "Fridge move", budget_usd: 15 },
   current_offer_usd: 12,
   decision: "TIMEOUT",
@@ -119,7 +124,7 @@ check("five minutes is infeasible for a pickup", tight.feasibility === "INFEASIB
 
 check("time ask note", looksLikeTimeAsk("I can do it but need 20 more min"));
 
-const needTime = evaluateBrokerDecision({
+const needTime = await evaluateBrokerDecision({
   order: {
     title: "Fridge move",
     budget_usd: 15,
@@ -138,7 +143,7 @@ check(
     Boolean(needTime.suggestedDeadline),
 );
 
-const lateYes = evaluateBrokerDecision({
+const lateYes = await evaluateBrokerDecision({
   order: {
     title: "Fridge move",
     budget_usd: 15,
@@ -152,4 +157,25 @@ const lateYes = evaluateBrokerDecision({
 });
 check("yes but late asks for time", lateYes.action === "ASK_REQUESTER" && lateYes.askRequester);
 
+const packageJob = ethicsStructuredFromOrder({
+  title: "Pick up my package at the UC",
+  details: "Need pickup authorization",
+  category: "pickup",
+  budget_usd: 10,
+});
+check("package maps to ethics pickup", packageJob.category === "pickup");
+check("food maps to ethics food", ethicsStructuredFromOrder({
+  title: "Tepper food run",
+  category: "food",
+  budget_usd: 8,
+}).category === "food");
+check("reject and block stop the deal", arbitrationBlocksDeal("REJECT_MOVE") && arbitrationBlocksDeal("BLOCK_TASK"));
+check("allow does not stop the deal", !arbitrationBlocksDeal("ALLOW"));
+
 if (failed > 0) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
