@@ -4,9 +4,9 @@
 
 A text-first task marketplace for verified CMU students. You type what you need in plain English; your personal AI agent structures it, an **ethics and arbitration agent** (The Word / Academic Integrity) gates it and referees the deal, a market-making agent finds candidates and negotiates with *their* agents, and humans only come back in to approve the deal.
 
-**Team:** Will (onboarding + auth + completion) · Thomas (personal AI agent) · Divya (market-making: matching + live negotiate loop in `agent/`) · Daphne (ethics + arbitration; web feed / approval UI)
+**Team:** Will (onboarding + auth + completion) · Thomas (personal AI agent) · Divya (market-making: matching + live negotiate loop in `agent/`) · Daphne (ethics + arbitration; campus map)
 
-**Ethics addendum:** `ethics-arbitration-spec.md`. Price is the only thing agents exchange. Same-job tweaks are allowed. Package pickup is **BLOCKED** (needs someone else's ID). No dollar cap. Daphne owns the agent; others call her functions.
+**Ethics addendum:** `ethics-arbitration-spec.md`. Price is the only thing agents exchange. Same-job tweaks are allowed. Package pickup, alcohol at any age, and barter are **BLOCKED**. No dollar cap. Daphne owns the agent; others call her functions (or HTTP).
 
 ---
 
@@ -263,9 +263,10 @@ All routes are `app/api/**/route.ts`. All return `{ ok: true, data }` or `{ ok: 
 | `POST /api/onboarding` | Will | `{firstName, lastName, phone, preferenceText}` → `{user}` — creates user, embeds preference |
 | `PATCH /api/me/availability` | Will | `{isAvailable, until?}` → `{user}` |
 | `POST /api/tasks` | Thomas | `{rawText}` → `{task}` — parses to `structured`, then calls ethics internally |
-| `POST /api/ethics/review` | Daphne | `{taskId}` *or* `{structured}` → `{verdict, categories, conditions, reason}` — Thomas calls the **function**, not HTTP |
+| `POST /api/ethics/review` | Daphne | `{structured}` → `{verdict, categories, conditions, reason}` |
 | `POST /api/ethics/amendment` | Daphne | `{original, proposed}` → `{verdict, sameTask, allowedChanges, rejectedChanges, reason}` |
-| `POST /api/ethics/arbitrate` | Daphne | move + original/current structured → `{verdict, structured, stripped, reason}` — Divya's `agent/` loop may HTTP this |
+| `POST /api/ethics/arbitrate` | Daphne | move + original/current structured → `{verdict, structured, stripped, reason}` — Divya's loop may HTTP this |
+| `GET /api/map` | Daphne | → outdoor pins for open campus jobs |
 | `POST /api/tasks/:taskId/match` | Divya | `{}` → `{candidates: [{uuid, matchScore, reasons[]}]}` — sets status `MATCHING` |
 | `POST /api/tasks/:taskId/negotiate` | Divya (live loop in `agent/`; web stub may remain) | `{workerUuid}` → `{offer}` |
 | `POST /api/offers/:offerId/approve` | Daphne | `{role: "requester"\|"worker"}` → `{agreement?}` |
@@ -467,19 +468,19 @@ exports.onExecutePostLogin = async (event, api) => {
 
 ---
 
-### Daphne — ethics + arbitration (standalone first)
+### Daphne — ethics + arbitration; campus map
 
-Contract: `ethics-arbitration-spec.md`. Build in `gotchu/lib/agents/ethics.ts`. Branch: `daphne/ethics-arbitrate`.
+Contract: `ethics-arbitration-spec.md`. Code: `gotchu/lib/agents/ethics.ts`. Branch: `daphne/ethics-arbitrate`.
 
-The live haggle loop is **Divya's** (`agent/` `autoNegotiate`). Do not treat `gotchu/lib/agents/negotiate.ts` as your job; leave the stub unless the team deletes it later. You still own web **feed / approval / replay UI** if those screens stay in Next.js.
+The live haggle loop is **Divya's**. You referee via HTTP (`ETHICS-INTEGRATION.md`). Leave `gotchu/lib/agents/negotiate.ts` as a stub.
 
 **T+0 → T+6 — ethics + arbitration**
-0. Types, deny-list (include package pickup → `credential_misuse`), distilled The Word (`ethics-handbook.ts`), the 8 canned tests, `npm run ethics-smoke`.
+0. Types, deny-list (package pickup, alcohol at any age, barter), distilled The Word (`ethics-handbook.ts`), canned tests, `npm run ethics-smoke`.
 1. `reviewTask`, `reviewAmendment`, `arbitrateMove`, `reviewComment`. Routes under `/api/ethics/*`.
-2. Tell Thomas: call `reviewTask` / `reviewAmendment`. Tell Divya: call `arbitrateMove` once per offer/counter (HTTP from `agent/` is fine). Tell Will: call `reviewComment`; keep the badge UI.
+2. Tell Thomas / `voice-mcp`: call `reviewTask` / `reviewAmendment`. Tell Divya / `market-maker`: call `arbitrateMove` once per offer/counter. Tell Will: call `reviewComment`; keep the badge UI.
 
-**Then — feed / approval / replay (web)**
-3. `/feed`, approval card, transcript replay as before if those screens are still yours. Ethics badge data comes from your verdicts.
+**Then — map / feed / approval (web)**
+3. `/map` + `GET /api/map` — outdoor campus pins for open jobs. `/feed`, approval card, and transcript replay if those screens stay yours.
 
 **T+20 → T+24** — Integration + rehearsal. Demo happy path = food/fence, not package pickup.
 
@@ -634,6 +635,7 @@ gotchu/
 │   ├── onboarding/page.tsx                   Will
 │   ├── compose/page.tsx                      Thomas    the "type what you need" screen
 │   ├── feed/page.tsx                         Daphne    open task pool
+│   ├── map/page.tsx                          Daphne    outdoor campus map
 │   ├── tasks/[taskId]/page.tsx               Daphne    negotiation replay + approval
 │   ├── tasks/[taskId]/matches/page.tsx       Divya     candidate ranking view
 │   └── api/
@@ -645,6 +647,7 @@ gotchu/
 │       ├── ethics/amendment/route.ts         Daphne
 │       ├── ethics/arbitrate/route.ts         Daphne
 │       ├── feed/route.ts                     Daphne
+│       ├── map/route.ts                      Daphne
 │       ├── offers/[offerId]/approve/route.ts Daphne
 │       └── tasks/
 │           ├── route.ts                      Thomas    POST create, GET mine
@@ -663,7 +666,8 @@ gotchu/
 │   ├── task/                                 Thomas    ComposeBox, StructuredCard, FieldEditor
 │   ├── match/                                Divya     CandidateList, ScoreBars, MatchReason
 │   ├── negotiate/                            Daphne    TranscriptView, OfferLedger, ApprovalCard
-│   └── feed/                                 Daphne    TaskCard, FeedList, EmptyState
+│   ├── feed/                                 Daphne    TaskCard, FeedList, EmptyState
+│   └── map/                                  Daphne    CampusMap (OpenStreetMap)
 │
 ├── lib/
 │   ├── types/                                ◆ one file per entity — see note below
@@ -681,6 +685,8 @@ gotchu/
 │   ├── llm.ts                                Will      shared JSON-mode call + zod validate
 │   ├── embed.ts                              Will
 │   ├── ids.ts                                Will      usr_ / tsk_ / ofr_ generators
+│   ├── campus-buildings.ts                   Daphne    outdoor CMU lat/lng + aliases
+│   ├── map-pins.ts                           Daphne    open tasks → map pins
 │   ├── agents/
 │   │   ├── personal.ts                       Thomas    parseTask, nextMove
 │   │   ├── ethics.ts                         Daphne    reviewTask, reviewAmendment, arbitrateMove, reviewComment
@@ -699,11 +705,13 @@ gotchu/
 │   ├── task.ts                               Thomas    a valid StructuredTask
 │   ├── candidates.ts                         Divya     5 fake ranked candidates
 │   ├── negotiation.ts                        leftover web ladder
-│   └── ethics.ts                             Daphne    gate + amendment + arbitrate fixtures
+│   ├── ethics.ts                             Daphne    gate + amendment + arbitrate fixtures
+│   └── map-tasks.ts                          Daphne    demo map pins
 │
 ├── scripts/
 │   ├── seed.ts                               Will      25 users + embeddings
-│   └── create-indexes.ts                     Will
+│   ├── create-indexes.ts                     Will
+│   └── ethics-smoke.ts                       Daphne
 │
 ├── middleware.ts                             ◆ Will
 ├── components.json                           ◆ shadcn config — Will only
@@ -741,4 +749,4 @@ Will still writes the first version of every type file at T+1 so nobody is block
 - **Will** — everything under `lib/` that isn't an agent, `app/api/auth|onboarding|me`, `components/onboarding|ethics|shell`, both scripts, and the shared config. Integration owner: if two workstreams disagree about a shape, he decides. He **calls** Daphne's `reviewComment`; he does not own the ethics model.
 - **Thomas** — `lib/agents/personal.ts`, `lib/prompts/personal-*`, `app/api/tasks/route.ts` + `[taskId]/route.ts`, `app/compose`, `components/task`. Calls `reviewTask` and `reviewAmendment`.
 - **Divya** — `lib/agents/market.ts`, matching UI, Atlas index, and the live negotiate loop in `agent/`. Calls `arbitrateMove` (function or HTTP) once per offer/counter.
-- **Daphne** — ethics + arbitration (`lib/agents/ethics.ts`, `lib/types/ethics.ts`, `lib/prompts/ethics-*`, `app/api/ethics/*`); web feed / approval / replay screens if still in Next.js.
+- **Daphne** — ethics + arbitration (`lib/agents/ethics.ts`, `lib/types/ethics.ts`, `lib/prompts/ethics-*`, `app/api/ethics/*`); campus map (`/map`); web feed / approval / replay screens if still in Next.js.
