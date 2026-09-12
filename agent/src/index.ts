@@ -621,8 +621,9 @@ async function sendOutreach(): Promise<void> {
     if (attempt >= MAX_OUTREACH_ATTEMPTS) {
       // They never got the text. Marking it sent would hold the exclusive
       // slot for ten minutes; decline so rematch can move on now.
-      await market.respond(offer.id, false).catch(() => null);
-      if (offer.order_id) {
+      const released = await market.respond(offer.id, false).catch(() => null);
+      if (released && offer.order_id) {
+        await market.noMatch(String(offer.order_id));
         await postLiveEvent({
           orderId: offer.order_id,
           kind: "timeout",
@@ -631,7 +632,11 @@ async function sendOutreach(): Promise<void> {
           state: "dropped",
         });
       }
-      log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
+      log(
+        released
+          ? `outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`
+          : `outreach offer ${offer.id} changed before give-up could release it`,
+      );
       continue;
     }
     log(`outreach offer ${offer.id} attempt ${attempt} failed: ${sent.detail}`);
