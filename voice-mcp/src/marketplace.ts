@@ -1,5 +1,7 @@
 import { pool, normalizePhone, upsertPerson } from "./db.js";
 import { payForTask, recordSettlement, type Settlement } from "./pay.js";
+import { getWallet } from "./wallet.js";
+import { RAILCOINS_PER_SOL } from "./pay.js";
 
 /** Every job this person is being asked about. They may hold several at once. */
 export async function listOpenOffers(phone: string) {
@@ -431,7 +433,19 @@ export async function confirmTaskDone(
 
   // The requester never heard anything after confirming, so money left their
   // wallet silently. Only sent when it actually moved.
+  // Every simulated user asked the same question after being paid: how much do
+  // I have now. Read both balances once, after the transfer, so each side can
+  // be told theirs rather than being sent off to go and look.
+  let payerBalance: number | null = null;
+  let payeeBalance: number | null = null;
   if (settlement?.settled) {
+    const [payer, payee] = await Promise.all([
+      getWallet(e164).catch(() => null),
+      getWallet(order.worker_phone).catch(() => null),
+    ]);
+    payerBalance = payer ? Math.round(payer.balance_sol * RAILCOINS_PER_SOL) : null;
+    payeeBalance = payee ? Math.round(payee.balance_sol * RAILCOINS_PER_SOL) : null;
+
     await pool.query(
       `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
        VALUES ($1,$2,$3,'payment_sent',$4::jsonb)`,
@@ -439,7 +453,11 @@ export async function confirmTaskDone(
         order.person_id,
         e164,
         order.id,
-        JSON.stringify({ title: order.title, railcoins: settlement.railcoins }),
+        JSON.stringify({
+          title: order.title,
+          railcoins: settlement.railcoins,
+          balance: payerBalance,
+        }),
       ],
     );
   }
@@ -456,6 +474,7 @@ export async function confirmTaskDone(
         amount_usd: amount,
         payouts_ready: Boolean(order.payouts_ready),
         railcoins: settlement?.railcoins ?? null,
+        balance: payeeBalance,
         paid: settlement?.settled ?? false,
         settlement_error: settlement && !settlement.settled ? settlement.reason : null,
       }),
