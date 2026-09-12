@@ -18,6 +18,8 @@ function voiceHeaders(): Record<string, string> {
 const RAILCOINS_PER_SOL = 50_000;
 /** Work must be marked done before the requester can release payment. */
 const CLOSEABLE = new Set(["done_pending"]);
+/** Films are pitches for tasks that are still active. */
+const FILMABLE = new Set(["submitted", "offered", "accepted", "done_pending"]);
 
 type OrderDetail = {
   pickup_location: string | null;
@@ -118,13 +120,15 @@ export default async function LivePage({
         needsRetry,
       }}
     />
-    <div className="mx-auto w-full max-w-md px-5 pb-10">
-      <FilmButton
-        token={token}
-        fee={filmFee}
-        alreadyRequested={Boolean(order?.film_requested_at)}
-      />
-    </div>
+    {FILMABLE.has(order?.status ?? "") ? (
+      <div className="mx-auto w-full max-w-md px-5 pb-10">
+        <FilmButton
+          token={token}
+          fee={filmFee}
+          alreadyRequested={Boolean(order?.film_requested_at)}
+        />
+      </div>
+    ) : null}
     </>
   );
 }

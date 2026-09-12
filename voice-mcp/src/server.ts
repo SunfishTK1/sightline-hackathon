@@ -528,6 +528,7 @@ app.get("/v1/orders/needing-video", async (_req, res) => {
        LEFT JOIN order_videos v ON v.order_id = o.id
       WHERE v.order_id IS NULL
         AND o.film_requested_at IS NOT NULL
+        AND o.film_paid_signature IS NOT NULL
         AND o.status IN ('submitted', 'offered', 'accepted', 'done_pending')
         AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
@@ -959,31 +960,68 @@ app.post("/v1/orders/:id/received", async (req, res) => {
  */
 app.post("/v1/orders/:id/film", async (req, res) => {
   const fee = Number(process.env.FILM_FEE_RAILCOINS || 5);
-  const { rows } = await pool.query(
-    `SELECT o.id, o.title, o.film_requested_at, p.phone AS requester_phone
-       FROM orders o JOIN people p ON p.id = o.person_id
-      WHERE o.id = $1`,
+  const claimed = await pool.query(
+    `UPDATE orders o
+        SET film_requested_at = now(), updated_at = now()
+       FROM people p
+      WHERE o.id = $1 AND p.id = o.person_id
+        AND o.status IN ('submitted', 'offered', 'accepted', 'done_pending')
+        AND (
+          o.film_requested_at IS NULL
+          OR (
+            o.film_paid_signature IS NULL
+            AND o.film_requested_at < now() - interval '5 minutes'
+          )
+        )
+      RETURNING o.id, o.title, p.phone AS requester_phone`,
     [req.params.id],
   );
-  const order = rows[0];
-  if (!order) return res.status(404).json({ ok: false, error: "no_such_task" });
-  if (order.film_requested_at) {
-    return res.status(409).json({ ok: false, error: "already_requested" });
+  const order = claimed.rows[0];
+  if (!order) {
+    const existing = await pool.query(
+      `SELECT o.id, o.status, o.film_requested_at, o.film_paid_signature
+         FROM orders o WHERE o.id = $1`,
+      [req.params.id],
+    );
+    if (!existing.rows[0]) {
+      return res.status(404).json({ ok: false, error: "no_such_task" });
+    }
+    if (!["submitted", "offered", "accepted", "done_pending"].includes(existing.rows[0].status)) {
+      return res.status(409).json({ ok: false, error: "task_not_filmable" });
+    }
+    return res.status(409).json({
+      ok: false,
+      error: existing.rows[0].film_paid_signature ? "already_requested" : "request_in_progress",
+    });
   }
   if (!order.requester_phone) {
+    await pool.query(
+      `UPDATE orders SET film_requested_at = NULL
+        WHERE id = $1 AND film_paid_signature IS NULL`,
+      [order.id],
+    );
     return res.status(409).json({ ok: false, error: "no_requester" });
   }
 
-  const charge = await chargeToTreasury(order.requester_phone, fee);
+  const charge = await chargeToTreasury(order.requester_phone, fee, `film:${order.id}`);
   if (!charge.settled) {
+    await pool.query(
+      `UPDATE orders SET film_requested_at = NULL, updated_at = now()
+        WHERE id = $1 AND film_paid_signature IS NULL`,
+      [order.id],
+    );
     return res.status(402).json({ ok: false, error: "payment_failed", reason: charge.reason });
   }
 
-  await pool.query(
+  const saved = await pool.query(
     `UPDATE orders SET film_requested_at = now(), film_paid_signature = $2, updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING id`,
     [order.id, charge.signature],
   );
+  if (!saved.rows[0]) {
+    return res.status(500).json({ ok: false, error: "could_not_record_film_payment" });
+  }
   console.log(`film requested for "${order.title}" - charged ${fee} railcoins`);
   res.json({
     ok: true,
@@ -1100,6 +1138,7 @@ app.get("/v1/orders/:id", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
             o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
+            o.film_requested_at, o.film_paid_signature,
             p.phone AS requester_phone,
             pay.status AS payment_status, pay.solana_signature
        FROM orders o

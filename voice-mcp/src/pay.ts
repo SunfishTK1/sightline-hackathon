@@ -39,6 +39,7 @@ export type Settlement =
  */
 const UNRECORDED_PREFIX = "unrecorded:";
 const SETTLEMENT_MEMO_PREFIX = "gotchu:";
+const FEE_MEMO_PREFIX = "gotchu-fee:";
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const STALE_CLAIM_MINUTES = 5;
 
@@ -57,8 +58,8 @@ function settlementMemo(orderId: string): string {
  * signature. Every payment carries its order id as a memo, so a stale claim
  * can prove whether that transfer already landed before it sends another.
  */
-async function findSettlementOnChain(input: {
-  orderId: string;
+async function findTransferOnChain(input: {
+  memo: string;
   payerPublicKey: string;
   payeePublicKey: string;
   lamports: number;
@@ -67,7 +68,6 @@ async function findSettlementOnChain(input: {
   const signatures = (
     await connection.getSignaturesForAddress(payer, { limit: 1_000 }, "confirmed")
   ).filter((entry) => !entry.err);
-  const memo = settlementMemo(input.orderId);
 
   for (let offset = 0; offset < signatures.length; offset += 100) {
     const batch = signatures.slice(offset, offset + 100);
@@ -80,7 +80,7 @@ async function findSettlementOnChain(input: {
       let hasMemo = false;
       let hasTransfer = false;
       for (const instruction of instructions as any[]) {
-        if (instruction.program === "spl-memo" && instruction.parsed === memo) {
+        if (instruction.program === "spl-memo" && instruction.parsed === input.memo) {
           hasMemo = true;
         }
         const info = instruction.parsed?.info;
@@ -193,8 +193,8 @@ export async function payForTask(input: {
         ensureWallet(input.payerPhone),
         ensureWallet(input.payeePhone),
       ]);
-      recovered = await findSettlementOnChain({
-        orderId: input.orderId,
+      recovered = await findTransferOnChain({
+        memo: settlementMemo(input.orderId),
         payerPublicKey: payer.public_key,
         payeePublicKey: payee.public_key,
         lamports,
@@ -336,6 +336,7 @@ export async function payForTask(input: {
 export async function chargeToTreasury(
   phone: string,
   railcoins: number,
+  reference?: string,
 ): Promise<Settlement> {
   if (!(railcoins > 0)) return { settled: false, reason: "nothing to charge", railcoins: 0 };
   try {
@@ -344,6 +345,17 @@ export async function chargeToTreasury(
     if (!from) return { settled: false, reason: "no usable wallet", railcoins };
 
     const lamports = railcoinsToLamports(railcoins);
+    const treasury = treasuryKeypair().publicKey;
+    const memo = reference ? `${FEE_MEMO_PREFIX}${reference}` : null;
+    if (memo) {
+      const previous = await findTransferOnChain({
+        memo,
+        payerPublicKey: from.publicKey.toBase58(),
+        payeePublicKey: treasury.toBase58(),
+        lamports,
+      });
+      if (previous) return { settled: true, signature: previous, railcoins };
+    }
     const balance = await connection.getBalance(from.publicKey);
     if (balance < lamports + 5_000) {
       return {
@@ -356,10 +368,19 @@ export async function chargeToTreasury(
     const tx = new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: from.publicKey,
-        toPubkey: treasuryKeypair().publicKey,
+        toPubkey: treasury,
         lamports,
       }),
     );
+    if (memo) {
+      tx.add(
+        new TransactionInstruction({
+          keys: [],
+          programId: MEMO_PROGRAM_ID,
+          data: Buffer.from(memo, "utf8"),
+        }),
+      );
+    }
     const signature = await sendAndConfirmTransaction(connection, tx, [from]);
     return { settled: true, signature, railcoins };
   } catch (err) {

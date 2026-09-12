@@ -478,38 +478,52 @@ export async function confirmTaskDone(
     return { status: "disputed" };
   }
 
-  const completed = await pool.query(
-    `UPDATE orders SET status = 'completed', completed_at = now(), updated_at = now()
-      WHERE id = $1 AND status = 'done_pending'
-      RETURNING id`,
-    [order.id],
-  );
-  if (!completed.rows[0]) {
-    return { status: "unchanged", error: "That task is no longer waiting to be confirmed." };
-  }
-
-  // Record what is owed. Nothing moves until a verified Connect account exists.
   const amount = Number(order.budget_usd ?? 0);
   const fee = Math.round(amount * PLATFORM_FEE_RATE * 100) / 100;
   const payState = order.payouts_ready ? "ready_to_capture" : "awaiting_payout_setup";
-  const payment = await pool.query(
-    `INSERT INTO payments (order_id, payer_id, payee_id, amount_usd, platform_fee_usd,
-                           status, stripe_mode, note)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (order_id) DO UPDATE SET
-       status = CASE
-         WHEN payments.solana_signature IS NOT NULL OR payments.status IN ('paid', 'paying')
-           THEN payments.status
-         ELSE EXCLUDED.status
-       END,
-       updated_at = now()
-     RETURNING id, amount_usd, platform_fee_usd, status`,
-    [
-      order.id, order.person_id, order.accepted_by, amount, fee, payState,
-      process.env.STRIPE_MODE ?? "test",
-      order.payouts_ready ? null : "worker has not set up payouts yet",
-    ],
-  );
+  let paymentRow: Record<string, unknown> | undefined;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const completed = await client.query(
+      `UPDATE orders SET status = 'completed', completed_at = now(), updated_at = now()
+        WHERE id = $1 AND status = 'done_pending'
+        RETURNING id`,
+      [order.id],
+    );
+    if (!completed.rows[0]) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That task is no longer waiting to be confirmed." };
+    }
+
+    // Completion and its payment row are one state change. A crash cannot
+    // leave a completed task with nothing for retry to claim.
+    const payment = await client.query(
+      `INSERT INTO payments (order_id, payer_id, payee_id, amount_usd, platform_fee_usd,
+                             status, stripe_mode, note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (order_id) DO UPDATE SET
+         status = CASE
+           WHEN payments.solana_signature IS NOT NULL OR payments.status IN ('paid', 'paying')
+             THEN payments.status
+           ELSE EXCLUDED.status
+         END,
+         updated_at = now()
+       RETURNING id, amount_usd, platform_fee_usd, status`,
+      [
+        order.id, order.person_id, order.accepted_by, amount, fee, payState,
+        process.env.STRIPE_MODE ?? "test",
+        order.payouts_ready ? null : "worker has not set up payouts yet",
+      ],
+    );
+    paymentRow = payment.rows[0] as Record<string, unknown> | undefined;
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 
   // Both sides have now agreed the work is done, which is the only honest
   // moment to move money. A failed settlement does not un-complete the task -
@@ -578,7 +592,7 @@ export async function confirmTaskDone(
       }),
     ],
   );
-  return { status: "completed", payment: payment.rows[0], settlement };
+  return { status: "completed", payment: paymentRow, settlement };
 }
 
 /**
