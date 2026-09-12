@@ -9,6 +9,35 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, night — onboarding page doubles as a no-login account view
+
+**What this agent added directly:**
+- The `/onboarding` page now shows a verified returning visitor their own
+  account - request history, work history, live railcoin balance -
+  instead of the same blank onboarding form every visit. No new login
+  step: the existing httpOnly `gotchu_identity` cookie (set once, at first
+  onboarding submission, already gated behind a real Auth0-verified CMU
+  email) is the only credential. First-timers and anyone still mid-email-
+  verification see the form exactly as before; "Edit your info" from the
+  account view drops back to that same form.
+- New: `gotchu/lib/history.ts` (reads `orders`/`wallets` straight off the
+  shared Postgres - no new HTTP dependency on voice-mcp),
+  `gotchu/lib/wallet-balance.ts` (a live devnet RPC balance check, no new
+  `@solana/web3.js` dependency needed since gotchu never signs anything),
+  `GET /api/me/history`, `components/account/AccountOverview.tsx`,
+  `components/onboarding/AccountOrForm.tsx`.
+- Verified live end-to-end against a real account (own request + work
+  history, real counterpart name, live balance) via the running dev
+  server - not just typechecked.
+
+**Merged in from teammates during this pass:**
+- One-tap payment from the live board (`market-maker/src/app/live/[token]/task-money.tsx`,
+  a new `received` route, `voice-mcp/src/marketplace.ts` additions).
+
+**Conflicts resolved this pass:** none - clean merge.
+
+---
+
 ## 2026-09-12, evening — railcoin/wallet_link tool was uncallable by the model
 
 **What this agent added directly:**
