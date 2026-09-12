@@ -1,4 +1,4 @@
-import { quoteOrder } from "./broker.js";
+import { quoteOrder, type BrokerTravel } from "./broker.js";
 import { config } from "./config.js";
 import { CAMPUS_GEOGRAPHY } from "./campus.js";
 
@@ -24,7 +24,14 @@ export type Candidate = {
   min_price_usd: string | null;
 };
 
-export type Pick = { phone: string; reason: string; offerUsd?: number };
+export type Pick = {
+  phone: string;
+  reason: string;
+  offerUsd?: number;
+  pDeal?: number;
+  askTime?: boolean;
+  travel?: BrokerTravel;
+};
 
 const INSTRUCTIONS = [
   "You are the marketplace agent for a task service at Carnegie Mellon University.",
@@ -48,6 +55,9 @@ export async function pickWorkers(order: OpenOrder, candidates: Candidate[]): Pr
       phone: pick.phone,
       reason: pick.reason,
       offerUsd: pick.offerUsd,
+      pDeal: pick.pDeal,
+      askTime: pick.askTime,
+      travel: quoted.travel,
     }));
   }
 

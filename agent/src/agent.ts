@@ -69,7 +69,7 @@ const TOOL_SCHEMAS = [
     type: "function",
     name: "respond_to_job",
     description:
-      "Accept or turn down one job they were offered. They may be holding several at once, so pass the offer id of the one they mean. If it is unclear which, ask them first.",
+      "Accept or turn down one job they were offered. They may be holding several at once, so pass the offer id of the one they mean. If it is unclear which, ask them first. If they can do it but need more time, do not accept — use counter_offer at the same price with a note about the time.",
     parameters: {
       type: "object",
       properties: {
@@ -147,7 +147,7 @@ const TOOL_SCHEMAS = [
     type: "function",
     name: "counter_offer",
     description:
-      "Propose a different price for a job they were offered, instead of taking it or passing. Use it whenever they name a price they would do it for. The person who asked for the task then decides.",
+      "Propose different terms for a job they were offered — a different price, more time, or both. Use it when they name a price they would do it for, or when they say they cannot make the deadline. The person who asked for the task then decides.",
     parameters: {
       type: "object",
       properties: {
@@ -337,6 +337,7 @@ function systemPrompt(
       ? `${replyContext} Treat that as what they are answering - do not ask which one they mean.`
       : "",
     "If they name a price they would do an offered job for, that is a counter-offer: call counter_offer with the offer id and the amount, and tell them it is with the requester. Do not talk them into passing when they are really haggling.",
+    "If they can do the job but need more time, call counter_offer at the offered price and put the extra time in the note. Do not accept a job they said they cannot finish by the deadline.",
     "Photos they send are attached for you to look at, so describe or use what you actually see. If a note says an attachment could not be opened, say so plainly rather than guessing.",
     "You only ever see and act on this one person's information. Never mention other users, other requests, or anything about the wider system.",
     "This is an early beta. If you cannot do something, say so plainly in one sentence.",

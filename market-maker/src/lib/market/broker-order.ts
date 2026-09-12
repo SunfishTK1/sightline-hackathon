@@ -1,3 +1,4 @@
+import { estimateJobTravel } from "./campus-travel";
 import { asNumber, money } from "./quote-price";
 import { mapCategory } from "./map-category";
 import type { BrokerOrderInput } from "./schemas";
@@ -19,6 +20,13 @@ export function taskFromBrokerOrder(
   const deadline = order.deadline_at ? new Date(order.deadline_at) : new Date(now.getTime() + 60 * 60_000);
   const category = mapCategory(order.category);
   const budget = requesterBudget(order);
+  const travel = estimateJobTravel({
+    pickup: order.pickup_location,
+    dropoff: order.dropoff_location,
+    category: order.category,
+    deadlineAt: order.deadline_at,
+    now,
+  });
   return {
     taskId: order.id ?? `broker-${now.getTime()}`,
     requesterUuid: "broker-requester",
@@ -30,7 +38,7 @@ export function taskFromBrokerOrder(
       pickupLocation: order.pickup_location ?? undefined,
       dropoffLocation: order.dropoff_location ?? undefined,
       deadline: Number.isNaN(deadline.getTime()) ? new Date(now.getTime() + 60 * 60_000) : deadline,
-      estimatedMinutes: 30,
+      estimatedMinutes: travel.totalMin,
       requirements: [],
     },
     pricing: {

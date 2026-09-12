@@ -120,6 +120,7 @@ export async function ensureSchema(): Promise<void> {
     -- Haggling has to end: counted so a negotiation cannot run forever.
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_rounds int NOT NULL DEFAULT 0;
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS offered_usd numeric(10,2);
+    ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS travel_note text;
 
     -- A worker's agent asking the requester something about the job, rather
     -- than the job stalling on a detail nobody clarified.

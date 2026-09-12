@@ -15,7 +15,7 @@ Internal board: [http://localhost:3000](http://localhost:3000)
 
 Broker API (personal agent is the only SMS sender):
 
-- `POST /api/broker/quote` — rank workers + clearing price
-- `POST /api/broker/evaluate` — accept / counter / ask requester / next
+- `POST /api/broker/quote` — rank workers + prime price (max P(deal)) + walk/bus/drive quote
+- `POST /api/broker/evaluate` — accept / counter / ask requester / next; closed deals write `market_comps`
 
 Set `MARKET_MAKER_URL=http://localhost:3000` on the agent. Keep `IMESSAGE_LIVE=false` here.

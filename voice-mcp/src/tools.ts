@@ -488,7 +488,7 @@ tools.push({
   name: "counter_offer",
   title: "Counter a job offer",
   description:
-    "Propose a different price for a job this person was offered, instead of taking it or passing. The person who asked for the task then decides.",
+    "Propose different terms for a job this person was offered — a different price, more time, or both. The person who asked for the task then decides.",
   shape: {
     phone: z.string(),
     offer_id: z.union([z.string(), z.number()]),

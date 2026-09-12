@@ -5,7 +5,18 @@ export * from "./contracts";
 export { evaluateWorkerResponse } from "./evaluate-response";
 export { quoteBrokerOrder } from "./broker-quote";
 export { evaluateBrokerDecision } from "./evaluate-broker";
-export { clearingPrice, categoryFloor, quoteForWorker } from "./quote-price";
+export {
+  clearingPrice,
+  categoryFloor,
+  quoteForWorker,
+  primePrice,
+  pDealAtPrice,
+} from "./quote-price";
+export {
+  estimateTravel,
+  estimateJobTravel,
+  formatTravelSms,
+} from "./campus-travel";
 export { transitionTask } from "./transition";
 export { findCandidates } from "./find-candidates";
 export { createMatchingRun } from "./create-matching-run";

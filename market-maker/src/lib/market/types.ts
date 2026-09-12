@@ -491,7 +491,10 @@ export interface InboundSms {
 export type EvaluateWorkerAction =
   | { action: "TRY_NEXT_CANDIDATE" }
   | { action: "PROPOSE_FINAL_AGREEMENT" }
-  | { action: "ASK_REQUESTER"; reason: "PRICE_OUTSIDE_AUTO_APPROVAL" }
+  | {
+      action: "ASK_REQUESTER";
+      reason: "PRICE_OUTSIDE_AUTO_APPROVAL" | "TIME_OUTSIDE_DEADLINE";
+    }
   | { action: "TRY_RELAXATION_OR_NEXT_CANDIDATE" };
 
 export type NextAction =

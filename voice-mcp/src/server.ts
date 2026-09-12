@@ -191,7 +191,7 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
 
 /** The marketplace agent decided this person is eligible: put it to them. */
 app.post("/v1/offers", async (req, res) => {
-  const { order_id, phone, reason, offered_usd } = req.body ?? {};
+  const { order_id, phone, reason, offered_usd, travel_note } = req.body ?? {};
   if (!order_id || !phone) {
     return res.status(400).json({ ok: false, error: "order_id and phone are required" });
   }
@@ -199,13 +199,14 @@ app.post("/v1/offers", async (req, res) => {
   const person = await upsertPerson(e164);
   const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
   const { rows } = await pool.query(
-    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd)
-     VALUES ($1,$2,$3,$4,$5)
+    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
+     VALUES ($1,$2,$3,$4,$5,$6)
      ON CONFLICT (order_id, phone) DO UPDATE
        SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
-           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd)
-     RETURNING id, order_id, phone, status, offered_usd`,
-    [order_id, person.id, e164, reason ?? null, offered],
+           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
+           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note)
+     RETURNING id, order_id, phone, status, offered_usd, travel_note`,
+    [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
   );
   await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
     order_id,
@@ -248,7 +249,7 @@ app.post("/v1/offers/:id/price", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT j.id, j.phone, j.reason, j.offered_usd, j.created_at, o.id AS order_id,
+    `SELECT j.id, j.phone, j.reason, j.offered_usd, j.travel_note, j.created_at, o.id AS order_id,
             o.title, o.details, o.budget_usd, o.deadline_at,
             o.pickup_location, o.dropoff_location, o.category
        FROM job_offers j

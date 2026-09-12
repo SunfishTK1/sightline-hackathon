@@ -29,6 +29,16 @@ const cases: Array<[string, WorkerResponse, string]> = [
     { decision: "COUNTER", priceUsd: 20, estimatedCompletionAt: deadline, confidence: 1 },
     "TRY_RELAXATION_OR_NEXT_CANDIDATE",
   ],
+  [
+    "accept but late",
+    {
+      decision: "ACCEPT",
+      priceUsd: 10,
+      estimatedCompletionAt: new Date(deadline.getTime() + 45 * 60_000),
+      confidence: 1,
+    },
+    "ASK_REQUESTER",
+  ],
 ];
 
 let failed = 0;

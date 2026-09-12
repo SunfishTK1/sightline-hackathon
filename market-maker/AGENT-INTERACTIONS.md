@@ -21,11 +21,11 @@ Human  <--- SMS only --->  Personal agent  <--quote/evaluate-->  Market-maker
 1. Human texts a request. Personal agent files it in voice-mcp (`submit_order`).
 2. Personal agent loads open orders + worker candidates from voice-mcp.
 3. Personal agent calls **market-maker** `POST /api/broker/quote`.
-4. Market-maker returns who to ask and at what `offerUsd`.
-5. Personal agent writes `job_offers.offered_usd` (not the requester’s budget) and **sends the SMS**.
-6. Human replies YES / NO / COUNTER. Personal agent calls **`POST /api/broker/evaluate`**.
-7. Market-maker returns `ACCEPT` | `COUNTER` | `ASK_REQUESTER` | `TRY_NEXT` | `REJECT_SCOPE`.
-8. Personal agent sends **one** follow-up text. It does not invent a second price.
+4. Market-maker returns who to ask, a **prime** `offerUsd` (max P(deal)), and a **travel quote** (distance + walk / bus / drive minutes). Typical prices come from `market_comps` keyed by category + hop length + duration. `pDeal` stays on the payload, not in SMS.
+5. Personal agent writes **one** exclusive `job_offers.offered_usd` (top pick only), texts both sides the same price **and** the hop times, and asks the worker if they can make the deadline. Do not text three people the same job.
+6. Human replies YES / NO / COUNTER / need more time. Personal agent calls **`POST /api/broker/evaluate`**.
+7. Market-maker returns `ACCEPT` | `COUNTER` | `ASK_REQUESTER` | `TRY_NEXT` | `REJECT_SCOPE`. Time asks return `ASK_REQUESTER` plus `suggestedDeadline`.
+8. Personal agent sends **one** follow-up text. It does not invent a second price. On `ACCEPT`, market-maker stores the paid price as a comp.
 
 Market-maker keeps `IMESSAGE_LIVE=false`. Worker invitations from this package stay dry-run. The internal board at `:3000` is for us, not users.
 
@@ -37,10 +37,13 @@ Set `MARKET_MAKER_URL=http://localhost:3000` (already defaulted in `agent/src/co
 
 | When | Endpoint | Then |
 |---|---|---|
-| Open order, have candidates | `POST /api/broker/quote` | `createOffer(..., offered_usd)` then text `offered_usd` |
+| Open order, have candidates | `POST /api/broker/quote` | `createOffer` **only `picks[0]`**, then text that `offerUsd` |
+| Offer or counter silent 10 minutes | `evaluate` `TIMEOUT` | Decline/cancel that offer; rematch picks the next ranked phone |
+| Two counters, still no deal | `evaluate` with `round: 2` | `TRY_NEXT` — same as timeout |
 | Auto-counter (offer under worker min) | `POST /api/broker/evaluate` `AUTO_WORKER` | Only counter if action is `COUNTER` |
 | Auto-accept a worker counter | `evaluate` `AUTO_REQUESTER` | Only accept if action is `ACCEPT` |
 | Human YES / NO / COUNTER | `evaluate` `ACCEPT` / `DECLINE` / `COUNTER` / `REQUESTER_YES` / `REQUESTER_NO` | Follow `action`; do not relay free-form haggling |
+| Worker needs more time | `evaluate` `NEED_TIME` (or `COUNTER` with a time note) | `ASK_REQUESTER` + `suggestedDeadline` — do not accept a late job |
 
 **Must not**
 
@@ -79,16 +82,36 @@ Set `MARKET_MAKER_URL=http://localhost:3000` (already defaulted in `agent/src/co
 
 ```json
 {
-  "suggestedOfferUsd": 12,
+  "suggestedOfferUsd": 14,
   "maximumUsd": 15,
+  "travel": {
+    "from": "Morewood",
+    "to": "Donner",
+    "distanceMi": 0.2,
+    "walkMin": 5,
+    "busMin": 8,
+    "driveMin": 5,
+    "recommended": "walk",
+    "line": "0.2 mi · walk 5 min · bus 8 min · drive 5 min",
+    "totalMin": 25,
+    "feasibility": "OK",
+    "suggestedDeadline": null
+  },
   "picks": [
-    { "phone": "+14125551004", "reason": "Offers moving; market offer $12", "offerUsd": 12, "score": 0.71 }
+    {
+      "phone": "+14125551004",
+      "reason": "Offers moving; $14 (~46% both sides say yes); 0.2 mi · walk 5 min",
+      "offerUsd": 14,
+      "score": 0.71,
+      "pDeal": 0.46,
+      "askTime": false
+    }
   ],
   "skip": [{ "phone": "+14125551001", "reason": "CATEGORY_NOT_OFFERED" }]
 }
 ```
 
-Ask at most two picks (same as today). Text the per-pick `offerUsd`.
+Quote may return several ranked picks. **Text only the first.** When that offer dies (timeout, two counters, decline), voice-mcp excludes that phone and `matchOpenOrders` asks the next one. Parallel blast (3 texts at once) means two people get cancelled when one accepts — campus workers then ignore us.
 
 **Evaluate body**
 
@@ -115,22 +138,24 @@ Ask at most two picks (same as today). Text the per-pick `offerUsd`.
 | `TRY_NEXT` | Drop this worker. Quote again or take the next pick. |
 | `REJECT_SCOPE` | Do not forward the note. Treat as a new task or the next worker. |
 
-Round cap is 3 (`MAX_NEGOTIATION_ROUNDS`). After that, evaluate returns `TRY_NEXT`.
+Round cap is **2 counters** (`MAX_NEGOTIATION_ROUNDS`). Silence cap is **10 minutes** (`TIMEOUT`). Either one returns `TRY_NEXT`. Voice-mcp still hard-cancels around 3 rounds if something bypasses the broker.
 
 ## Market-maker contract
 
 Deterministic. No LLM chooses the dollar amount.
 
-Clearing price is the lowest number in `[max(workerMin, categoryFloor), requesterMax]`:
+The first text is a **prime**, not the worker floor. For each $1 in `[workerMin, requesterMax]` we score P(worker accepts) × P(requester accepts) and take the max (ties go cheaper):
 
-- **Current request** — `budget_usd`, deadline, category, pickup/dropoff
-- **Worker** — min / preferred price, availability, categories
+- **Worker curve** — 0 under their min, rises toward preferred, reliability nudges it
+- **Requester curve** — high below ~70% of `budget_usd`, fades toward their max so we do not always quote the cap
+- **History** — `market_comps` (category + distance + duration) plus older task prices. Farther / longer hops price above a next-door campus job.
 - **Ratings** — `workerAvgRating / 5` if at least 3 ratings, else 0.7 prior
-- **History** — median paid for the same category on accepted/completed tasks, plus optional `comps` from the agent
+
+`clearingPrice()` is still the floor helper. Ranking multiplies fit by close-rate so a slightly worse match who will actually say yes can beat a cheap mismatch.
 
 If the ranges do not overlap, skip that worker (`skip[]`) or return `TRY_NEXT` / `ASK_REQUESTER`. Never invent a deal outside the requester’s max.
 
-Auto band: `agentMayIncreaseToUsd` = the quoted offer. `maximumUsd` = requester budget (or a higher cap they published). A counter inside the quote auto-agrees. Between quote and max → ask the requester. Over max or a scope-change note → next candidate.
+Auto band: `agentMayIncreaseToUsd` = the primed offer. `maximumUsd` = requester budget (or a higher cap they published). A counter inside the quote auto-agrees. Between quote and max → ask the requester. Over max or a scope-change note → next candidate.
 
 Workers are upserted by phone so later quotes see the same person.
 

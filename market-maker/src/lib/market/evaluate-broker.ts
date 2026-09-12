@@ -1,8 +1,11 @@
+import { estimateJobTravel } from "./campus-travel";
+import { MAX_NEGOTIATION_ROUNDS } from "./constants";
 import { requesterMaximum, taskFromBrokerOrder } from "./broker-order";
 import { reviewBrokerAction } from "./ethics-gate";
 import { evaluateWorkerResponse } from "./evaluate-response";
 import { asNumber, money, quoteForWorker } from "./quote-price";
 import { looksLikeScopeChange } from "./scope-change";
+import { looksLikeTimeAsk, minutesFromTimeNote } from "./time-ask";
 import type { BrokerEvaluateRequest } from "./schemas";
 import type { User } from "./types";
 
@@ -19,6 +22,8 @@ export interface BrokerEvaluateResult {
   nextOfferUsd?: number;
   messageHint: string;
   askRequester: boolean;
+  suggestedDeadline?: string;
+  neededMinutes?: number;
 }
 
 function blocked(): BrokerEvaluateResult {
@@ -102,6 +107,14 @@ export function evaluateBrokerDecision(
   });
   if (!ethics.allowed) return blocked();
 
+  if (input.decision === "TIMEOUT") {
+    return {
+      action: "TRY_NEXT",
+      messageHint: "No reply in time. Cancel this offer and ask the next worker.",
+      askRequester: false,
+    };
+  }
+
   if (looksLikeScopeChange(input.note) && input.decision !== "DECLINE") {
     return {
       action: "REJECT_SCOPE",
@@ -143,7 +156,18 @@ export function evaluateBrokerDecision(
     };
   }
 
+  if (input.decision === "NEED_TIME" || looksLikeTimeAsk(input.note)) {
+    return askForTime(input, current);
+  }
+
   if (input.decision === "AUTO_WORKER") {
+    if ((input.round ?? 0) >= MAX_NEGOTIATION_ROUNDS) {
+      return {
+        action: "TRY_NEXT",
+        messageHint: "Two counters already. Move to the next worker.",
+        askRequester: false,
+      };
+    }
     if (current >= workerMin && workerMin > 0) {
       return {
         action: "ACCEPT",
@@ -154,6 +178,7 @@ export function evaluateBrokerDecision(
     }
     const quoted = quoteForWorker({
       requesterMax: maximumUsd,
+      requesterBudget: maximumUsd,
       worker: stubWorker(workerMin),
       comps: input.order.comps ?? [],
     });
@@ -167,7 +192,7 @@ export function evaluateBrokerDecision(
     return {
       action: "COUNTER",
       nextOfferUsd: quoted.offerUsd,
-      messageHint: `Counter at the clearing price $${quoted.offerUsd}.`,
+      messageHint: `Counter at the suggested market price $${quoted.offerUsd}.`,
       askRequester: false,
     };
   }
@@ -198,5 +223,35 @@ export function evaluateBrokerDecision(
     },
     { roundsUsed: input.round, counterNote: input.note ?? undefined },
   );
-  return fromPolicy(policy.action, priceUsd ?? current);
+  const result = fromPolicy(policy.action, priceUsd ?? current);
+  if (policy.action === "ASK_REQUESTER" && policy.reason === "TIME_OUTSIDE_DEADLINE") {
+    return { ...result, ...askForTime(input, priceUsd ?? current) };
+  }
+  return result;
+}
+
+function askForTime(
+  input: BrokerEvaluateRequest,
+  currentUsd: number,
+): BrokerEvaluateResult {
+  const travel = estimateJobTravel({
+    pickup: input.order.pickup_location,
+    dropoff: input.order.dropoff_location,
+    category: input.order.category,
+    deadlineAt: input.order.deadline_at,
+  });
+  const needed =
+    input.estimated_minutes ??
+    minutesFromTimeNote(input.note) ??
+    travel.totalMin + 15;
+  const suggested =
+    travel.suggestedDeadline ?? new Date(Date.now() + needed * 60_000);
+  return {
+    action: "ASK_REQUESTER",
+    nextOfferUsd: money(currentUsd),
+    suggestedDeadline: suggested.toISOString(),
+    neededMinutes: needed,
+    messageHint: `Ask the requester for more time. Hop is ${travel.line}; typical completion ~${travel.totalMin} min. Suggest ${suggested.toLocaleString("en-US", { hour: "numeric", minute: "2-digit" })}.`,
+    askRequester: true,
+  };
 }

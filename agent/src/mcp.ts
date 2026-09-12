@@ -66,6 +66,7 @@ export type OpenJob = {
   pickup_location: string | null;
   dropoff_location: string | null;
   reason: string | null;
+  travel_note?: string | null;
 };
 
 export type Outreach = OpenJob & {
@@ -73,6 +74,7 @@ export type Outreach = OpenJob & {
   category: string | null;
   offered_usd?: string | null;
   created_at?: string;
+  travel_note?: string | null;
 };
 
 /** A worker's proposed price, waiting on the requester. */
@@ -89,8 +91,20 @@ export type OpenCounter = {
 export const market = {
   openOrders: () => get<any[]>("/v1/orders/open"),
   candidates: (orderId: string) => get<any[]>(`/v1/orders/${orderId}/candidates`),
-  createOffer: (order_id: string, phone: string, reason: string, offered_usd?: number) =>
-    post<{ id: string } | null>("/v1/offers", { order_id, phone, reason, offered_usd }),
+  createOffer: (
+    order_id: string,
+    phone: string,
+    reason: string,
+    offered_usd?: number,
+    travel_note?: string,
+  ) =>
+    post<{ id: string } | null>("/v1/offers", {
+      order_id,
+      phone,
+      reason,
+      offered_usd,
+      travel_note,
+    }),
   pendingOutreach: () => get<Outreach[]>("/v1/offers/outreach"),
   markOutreachSent: (id: string) => post(`/v1/offers/${id}/sent`),
   /** A person can be holding several offers at once. */
@@ -190,6 +204,7 @@ export type PendingOffer = {
   min_price_usd: string | null;
   auto_counter: boolean | null;
   auto_accept: boolean | null;
+  counter_rounds?: number | null;
 };
 
 export type PendingCounter = {
@@ -200,6 +215,7 @@ export type PendingCounter = {
   title: string;
   order_budget_usd: string | null;
   offered_usd?: string | null;
+  counter_rounds?: number | null;
   requester_phone: string;
 };
 

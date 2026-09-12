@@ -304,9 +304,36 @@ async function matchOpenOrders(): Promise<void> {
       log(`no suitable worker for "${order.title}" among ${candidates.length} available`);
       continue;
     }
-    for (const pick of picks) {
-      const offer = await market.createOffer(order.id, pick.phone, pick.reason, pick.offerUsd);
-      if (offer) log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"}: ${pick.reason}`);
+    const pick = picks[0];
+    if (!pick) continue;
+    const travelNote = pick.travel
+      ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
+      : undefined;
+    const offer = await market.createOffer(
+      order.id,
+      pick.phone,
+      pick.reason,
+      pick.offerUsd,
+      travelNote,
+    );
+    if (offer) {
+      log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
+      if (order.requester_phone && pick.offerUsd != null) {
+        const hop = pick.travel
+          ? ` ${pick.travel.distanceMi} mi: walk ${pick.travel.walkMin} min, bus ${pick.travel.busMin} min, drive ${pick.travel.driveMin} min.`
+          : "";
+        const timeWarn =
+          pick.travel?.feasibility === "INFEASIBLE"
+            ? " That deadline looks short for the hop — want a later time?"
+            : pick.travel?.feasibility === "TIGHT"
+              ? " It's tight on time."
+              : "";
+        await sayTo(
+          order.requester_phone,
+          `I'll ask someone for "${order.title}" at $${pick.offerUsd} — typical for this job.${hop}${timeWarn} Reply if you want a different cap or more time.`,
+          `gotchu-prime-${order.id}-${pick.offerUsd}`,
+        );
+      }
     }
   }
 }
@@ -324,7 +351,8 @@ async function sendOutreach(): Promise<void> {
     const call = config.voiceCallNumber
       ? `, or call ${config.voiceCallNumber} to talk it through`
       : "";
-    const text = `Job for you: ${offer.title} (${pay})${due}. Reply YES to take it or NO to pass${call}.`;
+    const hop = offer.travel_note ? ` ${offer.travel_note}` : "";
+    const text = `Job for you: ${offer.title} (${pay} — typical for this job)${due}.${hop} Can you make that? Reply YES, NO, or say you need more time${call}.`;
 
     const attempt = await bumpOutreachAttempt(offer.id);
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
@@ -467,6 +495,57 @@ async function sayTo(
   return sent.accepted;
 }
 
+const EXCLUSIVE_OFFER_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** One exclusive worker at a time: silence for 10 minutes means try the next pick. */
+async function expireStaleOffers(): Promise<void> {
+  const { offers, counters } = await market.pendingNegotiation();
+  const now = Date.now();
+
+  for (const offer of offers) {
+    if (!offer.outreach_sent_at) continue;
+    if (now - new Date(offer.outreach_sent_at).getTime() < EXCLUSIVE_OFFER_TIMEOUT_MS) continue;
+    try {
+      const verdict = await evaluateDeal({
+        order: { title: offer.title, budget_usd: offer.budget_usd, category: offer.category },
+        current_offer_usd: Number(offer.offered_usd ?? offer.budget_usd ?? 0),
+        decision: "TIMEOUT",
+      });
+      if (verdict && verdict.action !== "TRY_NEXT") continue;
+      await market.respond(offer.id, false);
+      await sayTo(
+        offer.phone,
+        `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
+        `gotchu-timeout-${offer.id}`,
+      );
+      log(`timed out offer ${offer.id} for ${offer.phone}`);
+    } catch (err) {
+      log(`timeout failed on offer ${offer.id}: ${(err as Error).message}`);
+    }
+  }
+
+  for (const counter of counters) {
+    if (now - new Date(counter.countered_at).getTime() < EXCLUSIVE_OFFER_TIMEOUT_MS) continue;
+    try {
+      const verdict = await evaluateDeal({
+        order: { title: counter.title, budget_usd: counter.order_budget_usd },
+        current_offer_usd: Number(counter.offered_usd ?? counter.order_budget_usd ?? 0),
+        decision: "TIMEOUT",
+      });
+      if (verdict && verdict.action !== "TRY_NEXT") continue;
+      await market.respondToCounter(counter.id, counter.requester_phone, false);
+      await sayTo(
+        counter.requester_phone,
+        `No decision on "${counter.title}" in time, so I'm asking someone else.`,
+        `gotchu-timeout-counter-${counter.id}`,
+      );
+      log(`timed out counter ${counter.id} for ${counter.requester_phone}`);
+    } catch (err) {
+      log(`timeout failed on counter ${counter.id}: ${(err as Error).message}`);
+    }
+  }
+}
+
 /**
  * Each side's agent acting for its principal, inside the bounds they set.
  *
@@ -501,7 +580,13 @@ async function autoNegotiate(): Promise<void> {
         current_offer_usd: pays,
         decision: "AUTO_WORKER",
         worker_min_usd: min,
+        round: Number(offer.counter_rounds ?? 0),
       });
+      if (verdict?.action === "TRY_NEXT") {
+        await market.respond(offer.id, false);
+        log(`broker said try next on offer ${offer.id}`);
+        continue;
+      }
       if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
         continue;
       }
@@ -539,7 +624,13 @@ async function autoNegotiate(): Promise<void> {
         current_offer_usd: Number(counter.offered_usd ?? counter.order_budget_usd ?? asking),
         decision: "AUTO_REQUESTER",
         price_usd: asking,
+        round: Number(counter.counter_rounds ?? 0),
       });
+      if (verdict?.action === "TRY_NEXT") {
+        await market.respondToCounter(counter.id, counter.requester_phone, false);
+        log(`broker said try next on counter ${counter.id}`);
+        continue;
+      }
       if (!verdict || verdict.action !== "ACCEPT") {
         continue;
       }
@@ -802,6 +893,7 @@ async function main() {
   loop("match", matchOpenOrders, 10);
   loop("outreach", sendOutreach, 5);
   loop("negotiate", autoNegotiate, 8);
+  loop("expire", expireStaleOffers, 30);
   loop("chase", chaseStuckItems, 60);
   loop("illustrate", illustrateOrders, 30);
 }

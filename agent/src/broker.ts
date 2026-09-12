@@ -1,16 +1,39 @@
 import { config } from "./config.js";
 import type { Candidate, OpenOrder } from "./matcher.js";
 
+export type BrokerTravel = {
+  from: string;
+  to: string;
+  known: boolean;
+  distanceM: number;
+  distanceMi: number;
+  walkMin: number;
+  driveMin: number;
+  busMin: number;
+  recommended: string;
+  line: string;
+  workMin: number;
+  totalMin: number;
+  slackMin: number | null;
+  feasibility: "OK" | "TIGHT" | "INFEASIBLE";
+  suggestedDeadline: string | null;
+};
+
 export type BrokerPick = {
   phone: string;
   reason: string;
   offerUsd: number;
   score: number;
+  pDeal?: number;
+  pWorker?: number;
+  pRequester?: number;
+  askTime?: boolean;
 };
 
 export type BrokerQuote = {
   suggestedOfferUsd: number;
   maximumUsd: number;
+  travel?: BrokerTravel;
   picks: BrokerPick[];
   skip: { phone: string; reason: string }[];
 };
@@ -21,6 +44,8 @@ export type BrokerEvaluate = {
   nextOfferUsd?: number;
   messageHint: string;
   askRequester: boolean;
+  suggestedDeadline?: string;
+  neededMinutes?: number;
 };
 
 function orderPayload(order: OpenOrder) {
@@ -81,11 +106,14 @@ export async function evaluateDeal(input: {
     | "REQUESTER_YES"
     | "REQUESTER_NO"
     | "AUTO_WORKER"
-    | "AUTO_REQUESTER";
+    | "AUTO_REQUESTER"
+    | "TIMEOUT"
+    | "NEED_TIME";
   price_usd?: number;
   worker_min_usd?: number;
   note?: string;
   round?: number;
+  estimated_minutes?: number;
 }): Promise<BrokerEvaluate | null> {
   try {
     const res = await fetch(`${config.marketMakerUrl}/api/broker/evaluate`, {

@@ -277,6 +277,8 @@ export const brokerEvaluateRequestSchema = z.object({
     "REQUESTER_NO",
     "AUTO_WORKER",
     "AUTO_REQUESTER",
+    "TIMEOUT",
+    "NEED_TIME",
   ]),
   price_usd: moneyLike,
   worker_min_usd: moneyLike,

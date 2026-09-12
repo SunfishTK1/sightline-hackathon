@@ -109,3 +109,20 @@ CREATE TABLE IF NOT EXISTS app_state (
   value JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Closed deals: what this kind of hop usually pays.
+CREATE TABLE IF NOT EXISTS market_comps (
+  comp_id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  pickup TEXT,
+  dropoff TEXT,
+  distance_m INTEGER,
+  duration_min INTEGER,
+  paid_usd NUMERIC(10,2) NOT NULL,
+  order_id TEXT,
+  source TEXT NOT NULL DEFAULT 'broker',
+  agreed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS market_comps_lookup_idx
+  ON market_comps (category, distance_m, duration_min, agreed_at DESC);

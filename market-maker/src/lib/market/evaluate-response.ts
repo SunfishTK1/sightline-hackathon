@@ -32,17 +32,20 @@ export function evaluateWorkerResponse(
     return { action: "TRY_RELAXATION_OR_NEXT_CANDIDATE" };
   }
 
-  if (
-    priceUsd <= task.pricing.agentMayIncreaseToUsd &&
-    estimatedCompletionAt <= task.structured.deadline
-  ) {
+  const onTime = estimatedCompletionAt <= task.structured.deadline;
+
+  if (priceUsd <= task.pricing.agentMayIncreaseToUsd && onTime) {
     return { action: "PROPOSE_FINAL_AGREEMENT" };
   }
 
-  if (
-    priceUsd <= task.pricing.maximumUsd &&
-    estimatedCompletionAt <= task.structured.deadline
-  ) {
+  if (priceUsd <= task.pricing.maximumUsd && !onTime) {
+    return {
+      action: "ASK_REQUESTER",
+      reason: "TIME_OUTSIDE_DEADLINE",
+    };
+  }
+
+  if (priceUsd <= task.pricing.maximumUsd && onTime) {
     return {
       action: "ASK_REQUESTER",
       reason: "PRICE_OUTSIDE_AUTO_APPROVAL",

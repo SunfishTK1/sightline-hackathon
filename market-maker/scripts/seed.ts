@@ -1,7 +1,9 @@
+import { insertMarketComp, replaceSeedComps } from "../src/lib/db/comps";
 import { closePool } from "../src/lib/db/client";
 import { ensureSchema } from "../src/lib/db/schema";
 import { upsertTask } from "../src/lib/db/tasks";
 import { upsertUser } from "../src/lib/db/users";
+import { estimateJobTravel } from "../src/lib/market/campus-travel";
 import { loadEnv } from "./load-env";
 import { DEMO_REQUESTER_UUID, DEMO_TASK_ID } from "../src/lib/market/constants";
 import type {
@@ -737,7 +739,40 @@ async function main() {
     await upsertTask(seeded);
   }
 
-  console.log(`Seeded ${users.length} users and ${tasks.length} tasks.`);
+  await replaceSeedComps();
+  const hops: Array<{
+    category: Task["structured"]["category"];
+    pickup: string;
+    dropoff: string;
+    paid: number[];
+  }> = [
+    { category: "PACKAGE_PICKUP", pickup: "UC", dropoff: "Gates", paid: [8, 10, 12] },
+    { category: "FOOD_RUN", pickup: "Tepper", dropoff: "Wean", paid: [7, 8, 9] },
+    { category: "MOVING", pickup: "Morewood", dropoff: "Donner", paid: [20, 22, 25] },
+    { category: "CAMPUS_ERRAND", pickup: "Morewood", dropoff: "Gates", paid: [10, 12] },
+    { category: "FOOD_RUN", pickup: "Craig", dropoff: "Gates", paid: [8, 9] },
+    { category: "PACKAGE_PICKUP", pickup: "Squirrel Hill", dropoff: "Gates", paid: [15, 18] },
+  ];
+  for (const hop of hops) {
+    const travel = estimateJobTravel({
+      pickup: hop.pickup,
+      dropoff: hop.dropoff,
+      category: hop.category,
+    });
+    for (const paid of hop.paid) {
+      await insertMarketComp({
+        category: hop.category,
+        pickup: hop.pickup,
+        dropoff: hop.dropoff,
+        distanceM: travel.distanceM,
+        durationMin: travel.totalMin,
+        paidUsd: paid,
+        source: "seed",
+      });
+    }
+  }
+
+  console.log(`Seeded ${users.length} users, ${tasks.length} tasks, and ${hops.reduce((n, hop) => n + hop.paid.length, 0)} price comps.`);
   console.log(`Demo task: ${DEMO_TASK_ID} requested by ${DEMO_REQUESTER_UUID}`);
 }
 

@@ -4,7 +4,9 @@ export const OUTREACH_BATCH_SIZE = 3;
 export const DEMO_EXPIRATION_SECONDS = 45;
 export const PROD_EXPIRATION_SECONDS = 5 * 60;
 export const MAX_MARKET_ATTEMPTS = 3;
-export const MAX_NEGOTIATION_ROUNDS = 3;
+export const MAX_NEGOTIATION_ROUNDS = 2;
+/** Exclusive offer: if they go quiet, try the next ranked worker. */
+export const WORKER_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
 export const SMS_PARSE_MIN_CONFIDENCE = 0.7;
 export const EMBEDDING_MODEL = "text-embedding-3-small";
 export const EMBEDDING_DIMENSIONS = 1536;
