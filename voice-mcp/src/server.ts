@@ -385,8 +385,8 @@ app.get("/v1/offers", async (req, res) => {
  */
 app.post("/v1/offers/:id/price", async (req, res) => {
   const offered = Number(req.body?.offered_usd);
-  if (!Number.isFinite(offered)) {
-    return res.status(400).json({ ok: false, error: "offered_usd must be a number" });
+  if (!Number.isFinite(offered) || offered <= 0) {
+    return res.status(400).json({ ok: false, error: "offered_usd must be greater than zero" });
   }
   const { rows } = await pool.query(
     `UPDATE job_offers SET offered_usd = $2 WHERE id = $1 AND status IN ('offered','countered')

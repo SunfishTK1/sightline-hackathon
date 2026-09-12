@@ -744,10 +744,12 @@ tools.push({
           SET budget_usd = COALESCE($3, o.budget_usd),
               deadline_at = COALESCE($4::timestamptz, o.deadline_at),
               details = COALESCE($5, o.details),
+              status = CASE WHEN o.status = 'no_takers' THEN 'submitted' ELSE o.status END,
+              match_attempts = CASE WHEN o.status = 'no_takers' THEN 0 ELSE o.match_attempts END,
               updated_at = now()
         FROM people p
        WHERE o.id = $1 AND o.person_id = p.id AND p.phone = $2
-         AND o.status IN ('submitted', 'offered')
+         AND o.status IN ('submitted', 'offered', 'no_takers')
        RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status`,
       [order_id, e164, budget_usd ?? null, deadline_at ?? null, details ?? null],
     );

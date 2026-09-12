@@ -79,7 +79,7 @@ export async function resolveOffer(
   const order = await pool.query(
     `UPDATE orders
         SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now(),
-            budget_usd = COALESCE($3, budget_usd)
+            budget_usd = COALESCE(NULLIF($3, 0), budget_usd)
       WHERE id = $1
         AND accepted_by IS NULL
         AND status IN ('submitted', 'offered')
