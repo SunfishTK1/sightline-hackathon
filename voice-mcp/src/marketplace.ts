@@ -562,7 +562,8 @@ export async function listMyQuestions(phone: string) {
  */
 export async function pendingNegotiation() {
   const offers = await pool.query(
-    `SELECT j.id, j.phone, j.outreach_sent_at, j.offered_usd, j.counter_rounds, o.title, o.budget_usd,
+    `SELECT j.id, j.phone, j.outreach_sent_at, j.offered_usd, j.counter_rounds, o.id AS order_id,
+            o.title, o.budget_usd,
             o.category, o.details, o.deadline_at, o.pickup_location, o.dropoff_location,
             w.min_price_usd, w.auto_counter, w.auto_accept, w.blurb
        FROM job_offers j
@@ -574,7 +575,7 @@ export async function pendingNegotiation() {
   );
   const counters = await pool.query(
     `SELECT j.id, j.phone AS worker_phone, j.counter_price_usd, j.countered_at,
-            j.offered_usd, j.counter_rounds, o.title, o.budget_usd AS order_budget_usd, p.phone AS requester_phone
+            j.offered_usd, j.counter_rounds, o.id AS order_id, o.title, o.budget_usd AS order_budget_usd, p.phone AS requester_phone
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
        JOIN people p ON p.id = o.person_id

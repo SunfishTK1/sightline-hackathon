@@ -126,3 +126,57 @@ CREATE TABLE IF NOT EXISTS market_comps (
 
 CREATE INDEX IF NOT EXISTS market_comps_lookup_idx
   ON market_comps (category, distance_m, duration_min, agreed_at DESC);
+
+-- Public requester progress page. Token is the URL; no names or phones.
+CREATE TABLE IF NOT EXISTS live_boards (
+  token TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  category TEXT,
+  deadline_at TIMESTAMPTZ,
+  offer_timeout_ms INTEGER NOT NULL DEFAULT 600000,
+  status TEXT NOT NULL DEFAULT 'matching',
+  skip_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS live_candidates (
+  id TEXT PRIMARY KEY,
+  token TEXT NOT NULL REFERENCES live_boards(token) ON DELETE CASCADE,
+  slot INTEGER NOT NULL,
+  color TEXT NOT NULL,
+  state TEXT NOT NULL,
+  offer_id TEXT,
+  waiting_until TIMESTAMPTZ,
+  UNIQUE (token, slot)
+);
+
+CREATE TABLE IF NOT EXISTS live_events (
+  id TEXT PRIMARY KEY,
+  token TEXT NOT NULL REFERENCES live_boards(token) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  message TEXT NOT NULL,
+  slot INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS live_events_token_idx
+  ON live_events (token, created_at DESC);
+CREATE INDEX IF NOT EXISTS live_boards_skip_idx
+  ON live_boards (skip_requested) WHERE skip_requested;
+
+CREATE TABLE IF NOT EXISTS live_media (
+  token TEXT NOT NULL REFERENCES live_boards(token) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  content_type TEXT,
+  storage_key TEXT,
+  bytes BYTEA,
+  prompt TEXT,
+  progress INTEGER,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (token, kind)
+);
+
+ALTER TABLE live_media ADD COLUMN IF NOT EXISTS storage_key TEXT;

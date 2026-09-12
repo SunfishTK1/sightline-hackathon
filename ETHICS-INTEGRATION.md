@@ -122,9 +122,9 @@ Content-Type: application/json
 | `REJECT_MOVE` | Do not save. Retry that side once, then skip. |
 | `BLOCK_TASK` | Stop. No approval. |
 
-`market-maker/src/lib/market/ethics-gate.ts` is still a stub that always allows. Replace it with a call to `reviewTask` / `arbitrateMove` (or the HTTP above). Do not leave the stub as the real gate.
+`market-maker/src/lib/market/ethics-gate.ts` POSTs to these routes on quote and evaluate. The personal agent does not call ethics. If Gotchu is down, review falls back to ALLOW_WITH_CONDITIONS and a price-only move is allowed.
 
-If the Gotchu app is on another port, point `ETHICS_BASE_URL` at it (e.g. `http://localhost:3000`).
+If the Gotchu app is on another port, point `ETHICS_BASE_URL` at it (market-maker defaults to `http://127.0.0.1:3001`).
 
 ---
 

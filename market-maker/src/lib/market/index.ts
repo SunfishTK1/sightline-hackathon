@@ -6,6 +6,11 @@ export { evaluateWorkerResponse } from "./evaluate-response";
 export { quoteBrokerOrder } from "./broker-quote";
 export { evaluateBrokerDecision } from "./evaluate-broker";
 export {
+  reviewBrokerAction,
+  arbitrateBrokerMove,
+  ethicsStructuredFromOrder,
+} from "./ethics-gate";
+export {
   clearingPrice,
   categoryFloor,
   quoteForWorker,

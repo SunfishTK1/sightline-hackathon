@@ -235,6 +235,7 @@ export type JobQuestion = {
 export type PendingOffer = {
   id: string;
   phone: string;
+  order_id?: string;
   outreach_sent_at: string;
   title: string;
   budget_usd: string | null;
@@ -255,6 +256,7 @@ export type PendingCounter = {
   worker_phone: string;
   counter_price_usd: string | null;
   countered_at: string;
+  order_id?: string;
   title: string;
   order_budget_usd: string | null;
   offered_usd?: string | null;

@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     if (!parsed.success) {
       throw new HttpError(400, parsed.error.issues[0]?.message ?? "Invalid evaluate request");
     }
-    const result = evaluateBrokerDecision(parsed.data);
+    const result = await evaluateBrokerDecision(parsed.data);
     if (result.action === "ACCEPT" && result.agreedUsd && result.agreedUsd > 0) {
       const travel = estimateJobTravel({
         pickup: parsed.data.order.pickup_location,
