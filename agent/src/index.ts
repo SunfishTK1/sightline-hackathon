@@ -3,10 +3,13 @@ import { config } from "./config.js";
 import {
   ensureAgentSchema, getCursor, setCursor, claimEvent, completeEvent, loadTurns,
   saveTurns, pool, getAttempt, recordAttempt, bumpOutreachAttempt,
-  recordSent, findSent, type Turn,
+  recordSent, findSent, bumpNudge, minutesSinceNudge, type Turn,
 } from "./db.js";
+import { buildNudgeHtml } from "./nudge.js";
+import { generateTaskImage } from "./illustrate.js";
 import {
-  pollEvents, sendText, shorten, fetchAttachment, getDelivery, type RelayEvent,
+  pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
+  type RelayEvent,
 } from "./imessage.js";
 import { prepareImage } from "./images.js";
 import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } from "./mcp.js";
@@ -87,6 +90,10 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     const result = await respond(
       phone, text, history, images, skipped, openJobs,
       who?.display_name, who?.recent_orders ?? [], openCounters, replyContext, questions,
+      {
+        doing: who?.jobs_in_progress ?? [],
+        awaitingConfirmation: who?.awaiting_their_confirmation ?? [],
+      },
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;
@@ -251,6 +258,20 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "counter_accepted") {
     return `Your price was accepted: "${handoff.payload?.title}" at $${handoff.payload?.agreed_usd}. It's yours.`;
   }
+  if (handoff.kind === "task_done_pending") {
+    const amount = handoff.payload?.amount_usd ? ` The $${handoff.payload.amount_usd} is released when you do.` : "";
+    return `"${handoff.payload?.title}" is marked done. Reply YES to confirm, or tell me what's still outstanding.${amount}`;
+  }
+  if (handoff.kind === "task_completed") {
+    const setup = handoff.payload?.payouts_ready === false
+      ? " You'll need to set up payouts before it can actually be paid out."
+      : "";
+    return `Confirmed - "${handoff.payload?.title}" is done and $${handoff.payload?.amount_usd} is recorded as owed to you.${setup}`;
+  }
+  if (handoff.kind === "task_disputed") {
+    const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
+    return `They didn't confirm "${handoff.payload?.title}" as finished.${note} It's back on your list.`;
+  }
   if (handoff.kind === "question_asked") {
     return `About "${handoff.payload?.title}" - someone considering it asks: ${handoff.payload?.question} Reply with the answer and I'll pass it straight back.`;
   }
@@ -307,8 +328,16 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
+    // Send the task's picture with the offer, so they can see the job.
+    let attachments: string[] | undefined;
+    const stored = await market.orderImage(String(offer.order_id ?? "")).catch(() => null);
+    if (stored?.png_base64) {
+      const id = await uploadAttachment(Buffer.from(stored.png_base64, "base64"), "image/png");
+      if (id) attachments = [id];
+    }
+
     const message = shorten(text);
-    const sent = await sendText(offer.phone, message, key);
+    const sent = await sendText(offer.phone, message, key, attachments);
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
     if (sent.accepted || sent.permanent) {
@@ -516,6 +545,127 @@ async function autoNegotiate(): Promise<void> {
   }
 }
 
+const NUDGE_AFTER_MINUTES = 10;
+const NUDGE_REPEAT_MINUTES = 10;
+const FINAL_NOTICE_STRIKE = 3;
+
+/**
+ * Chase anything that has sat unanswered, with a card loud enough to notice.
+ * The ladder climbs: two notices, a final one, and then the stated consequence
+ * actually happens - the offer is released and goes back to the pool. A warning
+ * the system will not carry out is just a lie with a red X on it.
+ */
+async function chaseStuckItems(): Promise<void> {
+  const stuck = await market.escalations(NUDGE_AFTER_MINUTES);
+
+  for (const item of stuck) {
+    const key = `${item.reason}:${item.phone}:${item.offer_id ?? item.question_id ?? item.about}`;
+    const since = await minutesSinceNudge(key);
+    if (since !== null && since < NUDGE_REPEAT_MINUTES) continue;
+
+    const strike = await bumpNudge(key, item.phone);
+
+    // Past the final notice, do the thing the card said would happen.
+    if (strike > FINAL_NOTICE_STRIKE) {
+      if (item.reason === "offer_unanswered" && item.offer_id) {
+        await market.respond(item.offer_id, false).catch(() => null);
+        await sayTo(
+          item.phone,
+          `No reply on "${item.about}", so I've released it - it's going to someone else.`,
+          `gotchu-released-${item.offer_id}`,
+          "offer_released",
+          item.offer_id,
+        );
+        log(`released offer ${item.offer_id} after ${strike - 1} notices`);
+      } else if (item.reason === "counter_undecided" && item.offer_id) {
+        await market.respondToCounter(item.offer_id, item.phone, false).catch(() => null);
+        await sayTo(
+          item.phone,
+          `No answer on that counter-offer for "${item.about}", so it's expired. The job stays open at your price.`,
+          `gotchu-counterexpired-${item.offer_id}`,
+          "counter_expired",
+          item.offer_id,
+        );
+        log(`expired counter ${item.offer_id} after ${strike - 1} notices`);
+      }
+      continue;
+    }
+
+    const html = buildNudgeHtml({
+      name: item.name,
+      reason: item.reason,
+      about: item.about,
+      callingAbout: item.calling_about,
+      minutesWaiting: item.minutes_waiting,
+      strike,
+      finalNotice: strike >= FINAL_NOTICE_STRIKE,
+    });
+
+    const attachmentId = await uploadAttachment(html, "text/html");
+    const headline = strike >= FINAL_NOTICE_STRIKE ? "Final notice" : "Still waiting on you";
+    const text = `${headline}: ${item.calling_about}. Reply and I'll take it from there.`;
+
+    const sent = await sendText(
+      item.phone,
+      shorten(text),
+      `gotchu-nudge-${key.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 90)}-${strike}`,
+      attachmentId ? [attachmentId] : undefined,
+    );
+    await recordSent(sent.requestId, item.phone, "nudge", item.offer_id ?? item.question_id ?? null, text);
+
+    if (sent.accepted) {
+      const history = await loadTurns(item.phone);
+      await saveTurns(item.phone, [
+        ...history,
+        { role: "assistant", content: text, at: new Date().toISOString() },
+      ]);
+    }
+    log(
+      `nudge ${strike}${strike >= FINAL_NOTICE_STRIKE ? " (final)" : ""} -> ${item.phone} ` +
+        `[${item.reason}, ${item.minutes_waiting}m] ${attachmentId ? "with card" : "text only"}: ${sent.detail}`,
+    );
+  }
+}
+
+/**
+ * Draw each new task and send it to whoever asked for it. Generation takes
+ * about 20 seconds, which is why this runs on its own loop instead of blocking
+ * a reply: the text lands immediately, the picture follows.
+ */
+async function illustrateOrders(): Promise<void> {
+  const pending = await market.ordersNeedingImage();
+
+  for (const order of pending.slice(0, 2)) {
+    const made = await generateTaskImage(order);
+    if (!made) {
+      log(`could not illustrate "${order.title}"`);
+      continue;
+    }
+    await market.storeOrderImage(order.id, made.png.toString("base64"), made.prompt);
+    log(`illustrated "${order.title}" (${made.png.length} bytes)`);
+
+    // Show the requester what the agent understood, in a picture.
+    const attachmentId = await uploadAttachment(made.png, "image/png");
+    if (!attachmentId) continue;
+    const caption = `Here's how I pictured it: ${order.title}. Tell me if that's not the job.`;
+    const sent = await sendText(
+      order.requester_phone,
+      shorten(caption),
+      `gotchu-illustration-${order.id}`,
+      [attachmentId],
+    );
+    await recordSent(sent.requestId, order.requester_phone, "illustration", order.id, caption);
+    if (sent.accepted) {
+      const history = await loadTurns(order.requester_phone);
+      await saveTurns(order.requester_phone, [
+        ...history,
+        { role: "assistant", content: caption, at: new Date().toISOString() },
+      ]);
+    }
+    log(`illustration -> ${order.requester_phone}: ${sent.detail}`);
+  }
+}
+
 async function loop(name: string, fn: () => Promise<void>, seconds: number) {
   for (;;) {
     try {
@@ -628,6 +778,8 @@ async function main() {
   loop("match", matchOpenOrders, 10);
   loop("outreach", sendOutreach, 5);
   loop("negotiate", autoNegotiate, 8);
+  loop("chase", chaseStuckItems, 60);
+  loop("illustrate", illustrateOrders, 30);
 }
 
 main().catch((err) => {

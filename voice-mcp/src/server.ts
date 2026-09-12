@@ -7,6 +7,7 @@ import {
   resolveOffer, seedDemoData, purgeDemoData, removeWorker,
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
+  callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 
@@ -14,7 +15,9 @@ const PORT = Number(process.env.PORT || 3000);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+// Generated illustrations arrive base64-encoded and run past a megabyte, so
+// the limit has to clear the relay's own 16MB attachment ceiling.
+app.use(express.json({ limit: "25mb" }));
 
 // Every request is logged: without this there is no way to tell whether a
 // voice agent ever reached us, or what it asked for.
@@ -227,8 +230,8 @@ app.get("/v1/offers", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT j.id, j.phone, j.reason, j.offered_usd, o.title, o.details, o.budget_usd, o.deadline_at,
-            o.pickup_location, o.dropoff_location, o.category
+    `SELECT j.id, j.phone, j.reason, j.offered_usd, o.id AS order_id, o.title, o.details,
+            o.budget_usd, o.deadline_at, o.pickup_location, o.dropoff_location, o.category
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
       WHERE j.outreach_sent_at IS NULL AND j.status = 'offered'
@@ -302,6 +305,91 @@ app.post("/v1/dev/seed", async (_req, res) => {
   }
 });
 
+/** Tasks that still have no illustration. */
+app.get("/v1/orders/needing-image", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.budget_usd, o.deadline_at, p.phone AS requester_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN order_images i ON i.order_id = o.id
+      WHERE i.order_id IS NULL
+        AND o.status IN ('submitted','offered','accepted')
+      ORDER BY o.created_at DESC
+      LIMIT 5`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/orders/:id/image", async (req, res) => {
+  const { png_base64, prompt } = req.body ?? {};
+  if (!png_base64) return res.status(400).json({ ok: false, error: "png_base64 is required" });
+  await pool.query(
+    `INSERT INTO order_images (order_id, png, prompt)
+     VALUES ($1, decode($2,'base64'), $3)
+     ON CONFLICT (order_id) DO UPDATE SET png = EXCLUDED.png, prompt = EXCLUDED.prompt`,
+    [req.params.id, png_base64, prompt ?? null],
+  );
+  res.json({ ok: true, data: { order_id: req.params.id, bytes: Buffer.from(png_base64, "base64").length } });
+});
+
+app.get("/v1/orders/:id/image", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT encode(png,'base64') AS png_base64 FROM order_images WHERE order_id = $1`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ ok: false, error: "no image for that order" });
+  res.json({ ok: true, data: rows[0] });
+});
+
+/** The person doing a job says it is finished. */
+app.post("/v1/orders/:id/done", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const result = await markTaskDone(req.params.id, String(phone));
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** The requester confirms it - this is what records payment as due. */
+app.post("/v1/orders/:id/confirm", async (req, res) => {
+  const { phone, confirmed, note } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const result = await confirmTaskDone(
+    req.params.id, String(phone), confirmed !== false, note,
+  );
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+app.get("/v1/work", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  res.json({
+    ok: true,
+    data: {
+      doing: await listJobsInProgress(phone),
+      awaiting_their_confirmation: await listAwaitingConfirmation(phone),
+    },
+  });
+});
+
+/** What is owed, and whether it can actually be paid yet. */
+app.get("/v1/payments", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT pay.id, pay.amount_usd, pay.platform_fee_usd, pay.status, pay.stripe_mode,
+            pay.note, pay.created_at, o.title,
+            payer.phone AS payer_phone, payee.phone AS payee_phone
+       FROM payments pay
+       JOIN orders o ON o.id = pay.order_id
+       LEFT JOIN people payer ON payer.id = pay.payer_id
+       LEFT JOIN people payee ON payee.id = pay.payee_id
+      ORDER BY pay.created_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
 /** A worker's agent asks the requester something about the job. */
 app.post("/v1/offers/:id/question", async (req, res) => {
   const { phone, question } = req.body ?? {};
@@ -333,6 +421,15 @@ app.get("/v1/questions/open", async (req, res) => {
       they_asked: await listMyQuestions(phone),
     },
   });
+});
+
+/**
+ * Who is worth phoning, and why. Poll this from the voice platform: each entry
+ * is a number to dial plus what the call is about.
+ */
+app.get("/v1/escalations", async (req, res) => {
+  const stale = Number(req.query.stale_minutes) || 20;
+  res.json({ ok: true, data: await callWorthy(stale) });
 });
 
 /** What each side's agent could act on right now. */

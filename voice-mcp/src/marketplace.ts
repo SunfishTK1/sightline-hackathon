@@ -302,6 +302,157 @@ export async function respondToCounter(
   return { status: "accepted" };
 }
 
+// ---------------------------------------------------------------- completion
+
+/** Cut of each job the platform keeps. Zero until someone decides otherwise. */
+const PLATFORM_FEE_RATE = 0;
+
+/** The person doing the job says it is finished. The requester still has to agree. */
+export async function markTaskDone(
+  orderId: string,
+  workerPhone: string,
+): Promise<{ status: string; error?: string; title?: string }> {
+  const e164 = normalizePhone(workerPhone);
+  const { rows } = await pool.query(
+    `UPDATE orders o
+        SET status = 'done_pending', done_marked_at = now(), updated_at = now()
+       FROM people w
+      WHERE o.id = $1 AND o.status = 'accepted'
+        AND w.id = o.accepted_by AND w.phone = $2
+      RETURNING o.id, o.title, o.budget_usd, o.person_id`,
+    [orderId, e164],
+  );
+  const order = rows[0];
+  if (!order) {
+    return { status: "unchanged", error: "That job is not one they are currently doing." };
+  }
+  const requester = await pool.query(`SELECT id, phone FROM people WHERE id = $1`, [
+    order.person_id,
+  ]);
+  if (requester.rows[0]) {
+    await pool.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'task_done_pending',$4::jsonb)`,
+      [
+        requester.rows[0].id,
+        requester.rows[0].phone,
+        order.id,
+        JSON.stringify({ title: order.title, amount_usd: order.budget_usd }),
+      ],
+    );
+  }
+  return { status: "awaiting_confirmation", title: order.title };
+}
+
+/**
+ * The requester agrees it is done, which is what releases payment. Saying no
+ * puts the job back to accepted so it can be sorted out rather than silently
+ * failing.
+ */
+export async function confirmTaskDone(
+  orderId: string,
+  requesterPhone: string,
+  confirmed: boolean,
+  note?: string,
+): Promise<{ status: string; error?: string; payment?: Record<string, unknown> }> {
+  const e164 = normalizePhone(requesterPhone);
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.budget_usd, o.person_id, o.accepted_by, o.status,
+            w.phone AS worker_phone, wp.payouts_ready, wp.stripe_account_id
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+       LEFT JOIN worker_profiles wp ON wp.person_id = o.accepted_by
+      WHERE o.id = $1 AND p.phone = $2 AND o.status = 'done_pending'`,
+    [orderId, e164],
+  );
+  const order = rows[0];
+  if (!order) {
+    return { status: "unchanged", error: "No task of theirs is waiting to be confirmed." };
+  }
+
+  if (!confirmed) {
+    await pool.query(
+      `UPDATE orders SET status = 'accepted', done_marked_at = NULL, updated_at = now()
+        WHERE id = $1`,
+      [order.id],
+    );
+    await pool.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'task_disputed',$4::jsonb)`,
+      [order.accepted_by, order.worker_phone, order.id,
+       JSON.stringify({ title: order.title, note: note ?? null })],
+    );
+    return { status: "disputed" };
+  }
+
+  await pool.query(
+    `UPDATE orders SET status = 'completed', completed_at = now(), updated_at = now()
+      WHERE id = $1`,
+    [order.id],
+  );
+
+  // Record what is owed. Nothing moves until a verified Connect account exists.
+  const amount = Number(order.budget_usd ?? 0);
+  const fee = Math.round(amount * PLATFORM_FEE_RATE * 100) / 100;
+  const payState = order.payouts_ready ? "ready_to_capture" : "awaiting_payout_setup";
+  const payment = await pool.query(
+    `INSERT INTO payments (order_id, payer_id, payee_id, amount_usd, platform_fee_usd,
+                           status, stripe_mode, note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (order_id) DO UPDATE SET status = EXCLUDED.status, updated_at = now()
+     RETURNING id, amount_usd, platform_fee_usd, status`,
+    [
+      order.id, order.person_id, order.accepted_by, amount, fee, payState,
+      process.env.STRIPE_MODE ?? "test",
+      order.payouts_ready ? null : "worker has not set up payouts yet",
+    ],
+  );
+
+  await pool.query(
+    `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+     VALUES ($1,$2,$3,'task_completed',$4::jsonb)`,
+    [
+      order.accepted_by,
+      order.worker_phone,
+      order.id,
+      JSON.stringify({
+        title: order.title,
+        amount_usd: amount,
+        payouts_ready: Boolean(order.payouts_ready),
+      }),
+    ],
+  );
+  return { status: "completed", payment: payment.rows[0] };
+}
+
+/** Jobs marked done that the requester has not answered yet. */
+export async function listAwaitingConfirmation(requesterPhone: string) {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.budget_usd, o.done_marked_at, w.phone AS worker_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+      WHERE o.status = 'done_pending' AND p.phone = $1
+      ORDER BY o.done_marked_at`,
+    [normalizePhone(requesterPhone)],
+  );
+  return rows;
+}
+
+/** Jobs this person is doing right now. */
+export async function listJobsInProgress(workerPhone: string) {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.budget_usd, o.status, o.accepted_at
+       FROM orders o
+       JOIN people w ON w.id = o.accepted_by
+      WHERE w.phone = $1 AND o.status IN ('accepted', 'done_pending')
+      ORDER BY o.accepted_at DESC`,
+    [normalizePhone(workerPhone)],
+  );
+  return rows;
+}
+
 // ---------------------------------------------------------------- questions
 
 /** A worker's side asks the requester something about the job. */
@@ -432,6 +583,85 @@ export async function pendingNegotiation() {
       LIMIT 20`,
   );
   return { offers: offers.rows, counters: counters.rows };
+}
+
+/**
+ * Who is worth phoning, and why. A call is more intrusive than a text, so this
+ * only lists things a text has already failed to move: an offer sitting
+ * unanswered, a counter nobody has decided, a question blocking a job.
+ *
+ * `stale_minutes` sets how long counts as stuck.
+ */
+export async function callWorthy(staleMinutes = 20) {
+  const stale = `${Math.max(1, Math.min(staleMinutes, 1440))} minutes`;
+
+  const offers = await pool.query(
+    `SELECT j.id AS offer_id, j.phone, p.display_name, o.title, o.budget_usd, j.outreach_sent_at,
+            EXTRACT(EPOCH FROM (now() - j.outreach_sent_at))/60 AS minutes_waiting
+       FROM job_offers j
+       JOIN orders o ON o.id = j.order_id
+       LEFT JOIN people p ON p.phone = j.phone
+      WHERE j.status = 'offered' AND j.outreach_sent_at IS NOT NULL
+        AND j.outreach_sent_at < now() - $1::interval
+      ORDER BY j.outreach_sent_at
+      LIMIT 10`,
+    [stale],
+  );
+
+  const counters = await pool.query(
+    `SELECT j.id AS offer_id, p.phone, p.display_name, o.title, j.counter_price_usd, o.budget_usd,
+            EXTRACT(EPOCH FROM (now() - j.countered_at))/60 AS minutes_waiting
+       FROM job_offers j
+       JOIN orders o ON o.id = j.order_id
+       JOIN people p ON p.id = o.person_id
+      WHERE j.status = 'countered' AND j.countered_at < now() - $1::interval
+      ORDER BY j.countered_at
+      LIMIT 10`,
+    [stale],
+  );
+
+  const questions = await pool.query(
+    `SELECT q.id AS question_id, p.phone, p.display_name, o.title, q.question,
+            EXTRACT(EPOCH FROM (now() - q.asked_at))/60 AS minutes_waiting
+       FROM job_questions q
+       JOIN orders o ON o.id = q.order_id
+       JOIN people p ON p.id = o.person_id
+      WHERE q.answered_at IS NULL AND q.asked_at < now() - $1::interval
+      ORDER BY q.asked_at
+      LIMIT 10`,
+    [stale],
+  );
+
+  const round = (n: unknown) => Math.round(Number(n));
+  return [
+    ...offers.rows.map((r) => ({
+      phone: r.phone,
+      name: r.display_name,
+      offer_id: String(r.offer_id),
+      reason: "offer_unanswered",
+      minutes_waiting: round(r.minutes_waiting),
+      about: r.title,
+      calling_about: `a job they were offered: ${r.title}${r.budget_usd ? ` for $${r.budget_usd}` : ""}`,
+    })),
+    ...counters.rows.map((r) => ({
+      phone: r.phone,
+      name: r.display_name,
+      offer_id: String(r.offer_id),
+      reason: "counter_undecided",
+      minutes_waiting: round(r.minutes_waiting),
+      about: r.title,
+      calling_about: `someone will do "${r.title}" for $${r.counter_price_usd} instead of $${r.budget_usd}, and it needs a yes or no`,
+    })),
+    ...questions.rows.map((r) => ({
+      phone: r.phone,
+      name: r.display_name,
+      question_id: String(r.question_id),
+      reason: "question_unanswered",
+      minutes_waiting: round(r.minutes_waiting),
+      about: r.title,
+      calling_about: `a question about "${r.title}" is blocking someone: ${r.question}`,
+    })),
+  ].sort((a, b) => b.minutes_waiting - a.minutes_waiting);
 }
 
 // ---------------------------------------------------------------- seed data

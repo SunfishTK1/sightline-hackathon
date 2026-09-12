@@ -4,6 +4,7 @@ import {
   listOpenOffers, listOpenTasks, resolveOffer,
   counterOffer, respondToCounter, listOpenCounters,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
+  markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
 } from "./marketplace.js";
 
 /**
@@ -73,6 +74,11 @@ export const tools: ToolDef[] = [
           listMyQuestions(e164),
         ]);
 
+      const [doing, awaitingConfirmation] = await Promise.all([
+        listJobsInProgress(e164),
+        listAwaitingConfirmation(e164),
+      ]);
+
       const live = orders.rows.filter((o: { status: string }) =>
         ["submitted", "offered", "accepted"].includes(o.status),
       );
@@ -92,6 +98,10 @@ export const tools: ToolDef[] = [
         is_worker: (worker.rowCount ?? 0) > 0,
         worker_profile: worker.rows[0] ?? null,
         job_offers_held: offers,
+
+        // Work in flight, both directions.
+        jobs_in_progress: doing,
+        awaiting_their_confirmation: awaitingConfirmation,
 
         // Waiting on a decision or an answer from them.
         counters_awaiting_them: counters,
@@ -393,6 +403,45 @@ tools.push({
   },
   handler: async ({ phone, offer_id, accept }) =>
     await resolveOffer(offer_id, accept, phone),
+});
+
+tools.push({
+  name: "mark_task_done",
+  title: "Mark a job done",
+  description:
+    "The person doing a job says it is finished. The requester is asked to confirm; payment is only recorded once they do.",
+  shape: {
+    phone: z.string().describe("The person who did the work"),
+    order_id: z.string(),
+  },
+  handler: async ({ phone, order_id }) => await markTaskDone(order_id, phone),
+});
+
+tools.push({
+  name: "confirm_task_done",
+  title: "Confirm a job is done",
+  description:
+    "The person who requested a task confirms it was done, which is what releases payment. Passing false sends it back as not finished.",
+  shape: {
+    phone: z.string().describe("The requester"),
+    order_id: z.string(),
+    confirmed: z.boolean(),
+    note: z.string().optional().describe("What was wrong, if they say it is not done"),
+  },
+  handler: async ({ phone, order_id, confirmed, note }) =>
+    await confirmTaskDone(order_id, phone, confirmed, note),
+});
+
+tools.push({
+  name: "list_work_status",
+  title: "List work in progress",
+  description:
+    "Jobs this person is currently doing, and jobs of theirs waiting on them to confirm somebody finished.",
+  shape: { phone: z.string() },
+  handler: async ({ phone }) => ({
+    doing: await listJobsInProgress(phone),
+    awaiting_their_confirmation: await listAwaitingConfirmation(phone),
+  }),
 });
 
 tools.push({

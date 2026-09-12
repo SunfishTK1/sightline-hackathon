@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import {
   mcp, market, type OpenJob, type MyOrder, type OpenCounter, type JobQuestion,
+  type WorkItem,
 } from "./mcp.js";
 import { CAMPUS_CONTEXT } from "./campus.js";
 import type { Turn } from "./db.js";
@@ -75,6 +76,36 @@ const TOOL_SCHEMAS = [
         accept: { type: "boolean" },
       },
       required: ["offer_id", "accept"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "mark_task_done",
+    description:
+      "They finished a job they were doing. The requester is then asked to confirm, and payment is only recorded once they do.",
+    parameters: {
+      type: "object",
+      properties: { order_id: { type: "string", description: "The job they finished" } },
+      required: ["order_id"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "confirm_task_done",
+    description:
+      "They confirm a task they requested was actually done, which releases payment. Use confirmed false if they say it was not done properly.",
+    parameters: {
+      type: "object",
+      properties: {
+        order_id: { type: "string" },
+        confirmed: { type: "boolean" },
+        note: { type: "string", description: "What was wrong, if not confirmed; empty otherwise" },
+      },
+      required: ["order_id", "confirmed", "note"],
       additionalProperties: false,
     },
     strict: true,
@@ -246,6 +277,29 @@ function describeQuestions(q?: { waiting_on_them: JobQuestion[]; they_asked: Job
   return parts.join(" ");
 }
 
+function describeWork(work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] }): string {
+  const parts: string[] = [];
+  if (work?.doing?.length) {
+    parts.push(
+      "Jobs they are doing right now: " +
+        work.doing
+          .map((j) => `[job ${j.id}] ${j.title}${j.budget_usd ? ` for $${j.budget_usd}` : ""}${j.status === "done_pending" ? " - they marked it done, waiting on the requester" : ""}`)
+          .join("; ") +
+        ". When they say one is finished, call mark_task_done with that job id.",
+    );
+  }
+  if (work?.awaitingConfirmation?.length) {
+    parts.push(
+      "Waiting on them to confirm somebody finished: " +
+        work.awaitingConfirmation
+          .map((j) => `[job ${j.id}] ${j.title}${j.budget_usd ? ` for $${j.budget_usd}` : ""}`)
+          .join("; ") +
+        ". Confirming with confirm_task_done is what records the money as owed, so only do it when they actually say it was done.",
+    );
+  }
+  return parts.join(" ");
+}
+
 function systemPrompt(
   openJobs: OpenJob[] = [],
   displayName?: string | null,
@@ -253,6 +307,7 @@ function systemPrompt(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): string {
   const who = displayName
     ? `You are talking to ${displayName}. Use their name naturally, not in every message.`
@@ -275,6 +330,7 @@ function systemPrompt(
     describeMyRequests(myOrders),
     describeCounters(openCounters),
     describeQuestions(questions),
+    describeWork(work),
     "If they are unsure about something on an offered job, ask the requester right away with ask_about_job instead of guessing or leaving it hanging.",
     replyContext
       ? `${replyContext} Treat that as what they are answering - do not ask which one they mean.`
@@ -321,6 +377,7 @@ async function callModel(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): Promise<any> {
   const res = await fetch(OPENAI_URL, {
     method: "POST",
@@ -331,7 +388,7 @@ async function callModel(
     body: JSON.stringify({
       model: config.model,
       instructions: systemPrompt(
-        openJobs, displayName, myOrders, openCounters, replyContext, questions,
+        openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
       ),
       input,
       tools: TOOL_SCHEMAS,
@@ -389,6 +446,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       min_price_usd: args.min_price_usd > 0 ? args.min_price_usd : undefined,
     });
   }
+  if (name === "mark_task_done") {
+    return await market.markDone(String(args.order_id), phone);
+  }
+  if (name === "confirm_task_done") {
+    return await market.confirmDone(
+      String(args.order_id), phone, Boolean(args.confirmed), args.note || undefined,
+    );
+  }
   if (name === "ask_about_job") {
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
@@ -440,6 +505,7 @@ export async function respond(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): Promise<{ reply: string; usedTools: string[]; toolTurns: Turn[] }> {
   // Images ride on the current turn only; stored history stays text so the
   // conversation row doesn't fill up with base64.
@@ -466,7 +532,7 @@ export async function respond(
 
   for (let i = 0; i < config.maxToolIterations; i++) {
     const body = await callModel(
-      input, openJobs, displayName, myOrders, openCounters, replyContext, questions,
+      input, openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
     );
     const items: ResponseItem[] = body.output ?? [];
     const calls = items.filter((o) => o.type === "function_call");
