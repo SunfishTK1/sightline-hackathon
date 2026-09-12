@@ -750,6 +750,60 @@ app.post("/v1/orders/:id/unblock", async (req, res) => {
   res.json({ ok: true, data: rows[0] });
 });
 
+/**
+ * Clear the board. Everything still in flight is marked finished and every
+ * live offer is closed, deliberately WITHOUT queueing a single handoff - this
+ * is a reset before a demo, not something the people involved should be
+ * texted about. Undelivered handoffs and pending trailers are cleared for the
+ * same reason: a backlog that fires afterwards is still a burst of texts.
+ */
+app.post("/v1/dev/close-all", async (_req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const offers = await client.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE status IN ('offered', 'accepted', 'countered')
+        RETURNING id`,
+    );
+    const orders = await client.query(
+      `UPDATE orders
+          SET status = 'completed', completed_at = COALESCE(completed_at, now()), updated_at = now()
+        WHERE status NOT IN ('completed', 'cancelled')
+        RETURNING id, title`,
+    );
+    // Nothing queued may fire after this runs.
+    const handoffs = await client.query(
+      `DELETE FROM agent_handoffs WHERE delivered_at IS NULL RETURNING id`,
+    );
+    const trailers = await client.query(
+      `UPDATE order_videos SET delivered_at = now() WHERE delivered_at IS NULL RETURNING order_id`,
+    );
+
+    await client.query("COMMIT");
+    console.log(
+      `closed ${orders.rowCount} task(s), ${offers.rowCount} offer(s); ` +
+        `dropped ${handoffs.rowCount} queued message(s), ${trailers.rowCount} pending trailer(s)`,
+    );
+    res.json({
+      ok: true,
+      data: {
+        tasks_closed: orders.rowCount,
+        offers_closed: offers.rowCount,
+        queued_messages_dropped: handoffs.rowCount,
+        pending_trailers_suppressed: trailers.rowCount,
+        titles: orders.rows.map((r) => r.title),
+      },
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
+});
+
 /** Call a task off, telling anyone who was holding it. */
 app.post("/v1/orders/:id/cancel", async (req, res) => {
   try {

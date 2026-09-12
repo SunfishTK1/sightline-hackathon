@@ -203,7 +203,7 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
 
       <fieldset className="space-y-4 border-t border-[var(--ink)]/10 pt-7">
         <legend className="mb-1 text-sm font-medium text-[var(--ink)]">
-          You&apos;ll need to agree to all of these
+          You&apos;ll need to agree to the first three
         </legend>
         <div className="space-y-1">
           <label htmlFor="acceptedTerms" className="flex items-start gap-3 text-sm text-[var(--ink)]">
