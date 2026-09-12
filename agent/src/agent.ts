@@ -558,13 +558,17 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       };
     }
     if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
-      // Record it at the broker's number. It is inside the auto band, so the
-      // requester's own agent settles it within seconds via AUTO_REQUESTER -
-      // the worker's view has no business holding the requester's phone.
-      await market.counter(target.id, phone, verdict.agreedUsd, args.note || undefined);
-      await announceCounter(target.order_id, String(target.id), verdict.agreedUsd, timeAsk);
+      await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
+      await market.respond(target.id, true, phone);
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: "accepted",
+        message: "Someone took the job.",
+        offerId: String(target.id),
+        state: "accepted",
+      });
       return {
-        status: "agreed_pending_settlement",
+        status: "accepted",
         agreed_usd: verdict.agreedUsd,
         say: verdict.messageHint,
       };
@@ -596,7 +600,7 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (pending) {
       await evaluateDeal({
         order: { title: pending.title, budget_usd: pending.budget_usd },
-        current_offer_usd: Number(pending.budget_usd ?? 0),
+        current_offer_usd: Number(pending.counter_price_usd ?? pending.budget_usd ?? 0),
         decision: args.accept ? "REQUESTER_YES" : "REQUESTER_NO",
         price_usd: Number(pending.counter_price_usd ?? 0),
       }).catch(() => null);

@@ -315,8 +315,7 @@ export async function respondToCounter(
     }
     await pool.query(
       `UPDATE job_offers
-          SET status = 'offered', countered_at = NULL,
-              counter_rounds = 0, counter_price_usd = NULL
+          SET status = 'offered', countered_at = NULL, counter_price_usd = NULL
         WHERE id = $1`,
       [offer.id],
     );
@@ -809,7 +808,7 @@ export async function callWorthy(staleMinutes = 20) {
   const stale = `${Math.max(1, Math.min(staleMinutes, 1440))} minutes`;
 
   const offers = await pool.query(
-    `SELECT j.id AS offer_id, j.phone, p.display_name, o.title, o.budget_usd, j.outreach_sent_at,
+    `SELECT j.id AS offer_id, j.phone, p.display_name, o.id AS order_id, o.title, o.budget_usd, j.outreach_sent_at,
             EXTRACT(EPOCH FROM (now() - j.outreach_sent_at))/60 AS minutes_waiting
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -822,7 +821,7 @@ export async function callWorthy(staleMinutes = 20) {
   );
 
   const counters = await pool.query(
-    `SELECT j.id AS offer_id, p.phone, p.display_name, o.title, j.counter_price_usd, o.budget_usd,
+    `SELECT j.id AS offer_id, p.phone, p.display_name, o.id AS order_id, o.title, j.counter_price_usd, o.budget_usd,
             EXTRACT(EPOCH FROM (now() - j.countered_at))/60 AS minutes_waiting
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -834,7 +833,7 @@ export async function callWorthy(staleMinutes = 20) {
   );
 
   const questions = await pool.query(
-    `SELECT q.id AS question_id, p.phone, p.display_name, o.title, q.question,
+    `SELECT q.id AS question_id, p.phone, p.display_name, o.id AS order_id, o.title, q.question,
             EXTRACT(EPOCH FROM (now() - q.asked_at))/60 AS minutes_waiting
        FROM job_questions q
        JOIN orders o ON o.id = q.order_id
@@ -851,6 +850,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       offer_id: String(r.offer_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "offer_unanswered",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,
@@ -860,6 +860,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       offer_id: String(r.offer_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "counter_undecided",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,
@@ -869,6 +870,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       question_id: String(r.question_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "question_unanswered",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,

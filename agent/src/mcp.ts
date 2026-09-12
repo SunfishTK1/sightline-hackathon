@@ -246,6 +246,7 @@ export type Escalation = {
   phone: string;
   name: string | null;
   offer_id?: string;
+  order_id?: string;
   question_id?: string;
   reason: "offer_unanswered" | "counter_undecided" | "question_unanswered";
   minutes_waiting: number;

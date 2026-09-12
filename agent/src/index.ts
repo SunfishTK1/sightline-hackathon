@@ -984,10 +984,10 @@ async function autoNegotiate(): Promise<void> {
         if (counter.order_id) {
           await postLiveEvent({
             orderId: counter.order_id,
-            kind: "declined",
-            message: "Declined. Trying the next person.",
+            kind: "timeout",
+            message: "Trying the next person.",
             offerId: String(counter.id),
-            state: "declined",
+            state: "dropped",
           });
         }
         log(`broker said try next on counter ${counter.id}`);
@@ -1049,6 +1049,15 @@ async function chaseStuckItems(): Promise<void> {
           "offer_released",
           item.offer_id,
         );
+        if (item.order_id) {
+          await postLiveEvent({
+            orderId: item.order_id,
+            kind: "timeout",
+            message: "No reply in time. Trying the next person.",
+            offerId: item.offer_id,
+            state: "dropped",
+          });
+        }
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
         await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
@@ -1059,6 +1068,15 @@ async function chaseStuckItems(): Promise<void> {
           "counter_expired",
           item.offer_id,
         );
+        if (item.order_id) {
+          await postLiveEvent({
+            orderId: item.order_id,
+            kind: "timeout",
+            message: "No decision in time. Trying the next person.",
+            offerId: item.offer_id,
+            state: "dropped",
+          });
+        }
         log(`expired counter ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "question_unanswered" && item.question_id) {
         await market
