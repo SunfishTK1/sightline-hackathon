@@ -4,7 +4,12 @@
  *
  *   npm run ethics-smoke
  */
-import { reviewTask, reviewAmendment, arbitrateMove } from "../lib/agents/ethics";
+import {
+  parseEthicsStructured,
+  reviewTask,
+  reviewAmendment,
+  arbitrateMove,
+} from "../lib/agents/ethics";
 import {
   MOCK_ALCOHOL_21,
   MOCK_COFFEE_BARTER,
@@ -153,6 +158,30 @@ async function main() {
       /navy/i.test(colorPrice.structured.title),
     colorPrice,
   );
+
+  // voice-mcp posts description (order details), not a StructuredTask
+  // requirements array. Same-job check must still see that text.
+  const fenceDetails = parseEthicsStructured({
+    title: "Paint the fence white",
+    category: "other",
+    description: "white latex, satin finish, front yard",
+    maxPriceUsd: 40,
+  });
+  const airportDetails = parseEthicsStructured({
+    title: "Paint the fence white",
+    category: "other",
+    description: "Drive me to the airport instead",
+    maxPriceUsd: 40,
+  });
+  check("9a parseEthicsStructured keeps description", Boolean(fenceDetails && airportDetails));
+  if (fenceDetails && airportDetails) {
+    const morph = await reviewAmendment(fenceDetails, airportDetails);
+    check(
+      "9b voice-mcp payload: fence details → airport REJECT",
+      morph.verdict === "REJECT" && morph.sameTask === false,
+      morph,
+    );
+  }
 
   if (failed) {
     console.error(`\n${failed} failed`);

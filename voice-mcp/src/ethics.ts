@@ -30,14 +30,22 @@ export function structuredFrom(order: {
   budget_usd?: number | string | null;
   deadline_at?: string | null;
 }) {
+  const details = order.details?.trim() || "";
+  const maxPriceUsd =
+    order.budget_usd != null && Number.isFinite(Number(order.budget_usd))
+      ? Number(order.budget_usd)
+      : 0;
   return {
     title: order.title,
-    description: order.details,
+    description: details,
     category: order.category ?? "other",
     pickupLocation: order.pickup_location ?? undefined,
     dropoffLocation: order.dropoff_location ?? undefined,
-    maxPriceUsd: order.budget_usd != null ? Number(order.budget_usd) : undefined,
+    maxPriceUsd,
     deadline: order.deadline_at ?? undefined,
+    // Gotchu's StructuredTask has no `description` field. Put the details
+    // here so the same-job check still sees what the person said.
+    requirements: details ? [details] : undefined,
   };
 }
 
@@ -72,9 +80,13 @@ export async function reviewAmendment(
   original: Parameters<typeof structuredFrom>[0],
   proposed: Parameters<typeof structuredFrom>[0],
 ) {
+  const originalStructured = structuredFrom(original);
+  const proposedStructured = structuredFrom(proposed);
   return ask<AmendmentVerdict>("/api/ethics/amendment", {
-    originalStructured: structuredFrom(original),
-    proposedStructured: structuredFrom(proposed),
+    originalStructured,
+    proposedStructured,
+    original: originalStructured,
+    proposed: proposedStructured,
   });
 }
 
