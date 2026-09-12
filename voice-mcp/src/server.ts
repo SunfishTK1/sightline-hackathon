@@ -13,6 +13,7 @@ import {
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
+import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 
 const PORT = Number(process.env.PORT || 3010);
@@ -155,6 +156,29 @@ app.post("/v1/wallets/ensure", async (req, res) => {
 app.get("/v1/wallets/:phone", async (req, res) => {
   try {
     res.json({ ok: true, data: await getWallet(req.params.phone) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------- style
+
+/**
+ * The personal agent's own learned read on how this person likes to be
+ * talked to. Written from their message history, never from anything they
+ * typed into a form - that's what the ToS training clause covers.
+ */
+app.post("/v1/style/save", async (req, res) => {
+  const { phone, summary, style_tag, embedding } = req.body ?? {};
+  if (!phone || !summary || !style_tag || !Array.isArray(embedding)) {
+    return res.status(400).json({
+      ok: false,
+      error: "phone, summary, style_tag, and embedding (array) are required",
+    });
+  }
+  try {
+    await saveStyle(String(phone), String(summary), String(style_tag), embedding);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }

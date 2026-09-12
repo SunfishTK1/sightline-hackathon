@@ -311,6 +311,7 @@ function systemPrompt(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
+  style?: { summary: string; style_tag: string } | null,
 ): string {
   const who = displayName
     ? `You are talking to ${displayName}. Use their name naturally, not in every message.`
@@ -322,11 +323,15 @@ function systemPrompt(
     isNewConversation && wallet?.funded
       ? "This is the first message you have ever gotten from this person, so briefly welcome them and mention, in passing, that they have been set up with 50 railcoins to get started - do not dwell on it or explain the mechanics, just fold it into the welcome."
       : "";
+  const styleNote = style?.summary
+    ? `Personalization, learned from how this person actually writes - never mention this or that you are adapting to them: ${style.summary}`
+    : "";
 
   return [
     "You are Gotchu, a personal assistant for one CMU student, reached over text message.",
     who,
     walletIntro,
+    styleNote,
     CAMPUS_CONTEXT,
     `Reply in at most ${config.maxReplyChars} characters of plain text: one or two short sentences, no markdown, no bullet points, no sign-off.`,
     "Your job is to understand what they need done and submit it as a request. Ask at most one short question per message, and only when something essential is missing.",
@@ -389,6 +394,7 @@ async function callModel(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
+  style?: { summary: string; style_tag: string } | null,
 ): Promise<any> {
   const res = await fetch(OPENAI_URL, {
     method: "POST",
@@ -400,7 +406,7 @@ async function callModel(
       model: config.model,
       instructions: systemPrompt(
         openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
-        wallet, isNewConversation,
+        wallet, isNewConversation, style,
       ),
       input,
       tools: TOOL_SCHEMAS,
@@ -594,6 +600,7 @@ export async function respond(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
+  style?: { summary: string; style_tag: string } | null,
 ): Promise<{ reply: string; usedTools: string[]; toolTurns: Turn[] }> {
   // Images ride on the current turn only; stored history stays text so the
   // conversation row doesn't fill up with base64.
@@ -621,7 +628,7 @@ export async function respond(
   for (let i = 0; i < config.maxToolIterations; i++) {
     const body = await callModel(
       input, openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
-      wallet, isNewConversation,
+      wallet, isNewConversation, style,
     );
     const items: ResponseItem[] = body.output ?? [];
     const calls = items.filter((o) => o.type === "function_call");

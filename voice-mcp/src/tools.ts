@@ -9,6 +9,7 @@ import {
   blockOrder,
 } from "./marketplace.js";
 import { ensureWallet } from "./wallet.js";
+import { getStyleByPersonId } from "./style.js";
 
 /**
  * One definition per tool, shared by the MCP transport and the REST mirror.
@@ -50,6 +51,11 @@ export const tools: ToolDef[] = [
         console.error(`ensureWallet(${e164}) failed: ${(err as Error).message}`);
         return null;
       });
+
+      // Whatever the agent has learned about how this person likes to be
+      // talked to, from their own messages - not anything they filled into a
+      // form. Absent for anyone new or without enough history yet.
+      const style = await getStyleByPersonId(person.id).catch(() => null);
 
       const [orders, openCall, worker, pastCalls, offers, counters, askedOfThem, theyAsked] =
         await Promise.all([
@@ -103,6 +109,7 @@ export const tools: ToolDef[] = [
         wallet: wallet
           ? { public_key: wallet.public_key, cluster: wallet.cluster, funded: !!wallet.funded_at }
           : null,
+        style: style ? { summary: style.summary, style_tag: style.style_tag } : null,
 
         // Tasks they asked for.
         open_requests: live,

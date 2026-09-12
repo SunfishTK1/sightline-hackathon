@@ -18,6 +18,7 @@ import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } 
 import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
+import { learnStyle } from "./style.js";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 
@@ -98,6 +99,7 @@ async function handleEvent(event: RelayEvent): Promise<void> {
       },
       who?.wallet ?? null,
       history.length === 0,
+      who?.style ?? null,
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;
@@ -120,12 +122,19 @@ async function handleEvent(event: RelayEvent): Promise<void> {
   if (sent.accepted) {
     // Tool actions are stored between the question and the answer, so the
     // agent can later recall what it did, not just what it said.
-    await saveTurns(phone, [
+    const updatedHistory = [
       ...history,
-      { role: "user", content: text, at: receivedAt },
+      { role: "user", content: text, at: receivedAt } as Turn,
       ...toolTurns,
-      { role: "assistant", content: reply, at: new Date().toISOString() },
-    ]);
+      { role: "assistant", content: reply, at: new Date().toISOString() } as Turn,
+    ];
+    await saveTurns(phone, updatedHistory);
+
+    // Re-learn their style every so often, not on every message - it costs
+    // two model calls and their style doesn't change message to message.
+    if (updatedHistory.length % 8 < 2) {
+      learnStyle(phone, updatedHistory).catch(() => {});
+    }
   }
 }
 

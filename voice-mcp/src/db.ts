@@ -231,6 +231,17 @@ export async function ensureSchema(): Promise<void> {
       created_at            timestamptz NOT NULL DEFAULT now()
     );
 
+    -- Learned from how this person actually writes, not anything they filled
+    -- into a form. Re-learned periodically as more of their history comes in,
+    -- and read back to condition how the agent talks to them.
+    CREATE TABLE IF NOT EXISTS person_style (
+      person_id   uuid PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+      summary     text NOT NULL,
+      style_tag   text NOT NULL,
+      embedding   jsonb NOT NULL,
+      updated_at  timestamptz NOT NULL DEFAULT now()
+    );
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_by uuid REFERENCES people(id);
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at timestamptz;
 

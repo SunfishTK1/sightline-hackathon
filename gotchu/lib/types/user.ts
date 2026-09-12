@@ -15,6 +15,9 @@ export interface UserConsents {
   age18: boolean;
   canCall: boolean;
   canText: boolean;
+  acceptedTerms: boolean;
+  /** Which TERMS_VERSION they agreed to - a stored acceptance only counts for that version. */
+  termsVersion: string;
   acceptedAt: string;
 }
 

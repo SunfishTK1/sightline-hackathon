@@ -58,9 +58,12 @@ export const onboardingSchema = z.object({
       }
       return email;
     }),
+  acceptedTerms: z
+    .boolean()
+    .refine((value) => value, "You must read and agree to the Terms of Service"),
   ageConfirmed: z
     .boolean()
-    .refine((value) => value, "You must agree to the Terms of Service and confirm you are 18 or older"),
+    .refine((value) => value, "You must confirm you are 18 or older"),
   consentCall: z
     .boolean()
     .refine((value) => value, "You must opt in to being called"),
