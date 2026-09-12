@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { CAMPUS_LOOK } from "./illustrate.js";
+import { likenessFor } from "./likeness.js";
 
 const VIDEO_URL = "https://api.openai.com/v1/videos";
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -121,7 +122,11 @@ export async function planMission(order: FilmableOrder): Promise<MissionPlan> {
  * Three acts, timed so the instructions are genuinely followable and the close
  * actually asks for a decision. The length follows the number of steps.
  */
-export function buildVideoPrompt(order: FilmableOrder, plan: MissionPlan): string {
+export function buildVideoPrompt(
+  order: FilmableOrder,
+  plan: MissionPlan,
+  withLikeness = false,
+): string {
   const arrival = order.dropoff_location ?? "the drop-off";
 
   // Three acts, sized to the clip: a three second brief, a four second close,
@@ -141,7 +146,9 @@ export function buildVideoPrompt(order: FilmableOrder, plan: MissionPlan): strin
   return [
     `A ${total}-second photorealistic cinematic mission briefing for a single campus errand: ${order.title}.`,
     CAMPUS_LOOK,
-    "Show the students who use this campus as they actually are, varied and unremarkable.",
+    withLikeness
+      ? "The person carrying out the task is the student in the reference image - keep their appearance consistent throughout. Everyone else on campus is varied and unremarkable."
+      : "Show the students who use this campus as they actually are, varied and unremarkable.",
 
     // Act I - the brief.
     `SECONDS 0 TO ${briefEnds}, THE BRIEF: a slow push-in on the objective${
@@ -171,7 +178,9 @@ async function api(path: string, init?: RequestInit): Promise<Response> {
     ...init,
     headers: {
       Authorization: `Bearer ${config.openaiKey}`,
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      // Only for JSON bodies: setting it on FormData would clobber the
+      // multipart boundary and the upload would be rejected.
+      ...(typeof init?.body === "string" ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -185,18 +194,57 @@ export async function generateTaskVideo(
   order: FilmableOrder,
 ): Promise<{ mp4: Buffer; prompt: string; seconds: string; plan: MissionPlan } | null> {
   const plan = await planMission(order);
-  const prompt = buildVideoPrompt(order, plan);
   const seconds = secondsFor(plan);
+
+  // Only when they asked to be in it. The prompt changes too: conditioning the
+  // first frame on someone's face while the text still says "show students as
+  // they actually are" pulls the model in two directions.
+  const likeness = await likenessFor(order.requester_phone);
+  const prompt = buildVideoPrompt(order, plan, Boolean(likeness));
+
   try {
-    const started = await api("", {
-      method: "POST",
-      body: JSON.stringify({
-        model: VIDEO_MODEL,
-        prompt,
-        seconds,
-        size: VIDEO_SIZE,
-      }),
-    });
+    let started: Response;
+    if (likeness) {
+      // A reference has to be uploaded, and Sora rejects one whose dimensions
+      // differ from the requested size - hence the exact 720x1280 fit.
+      const form = new FormData();
+      form.append("model", VIDEO_MODEL);
+      form.append("prompt", prompt);
+      form.append("seconds", seconds);
+      form.append("size", VIDEO_SIZE);
+      form.append(
+        "input_reference",
+        new Blob([new Uint8Array(likeness.png)], { type: "image/png" }),
+        "reference.png",
+      );
+      started = await api("", { method: "POST", body: form });
+      if (!started.ok) {
+        // Refusing a real face is an expected outcome, not a bug. Fall back to
+        // the generic film rather than leaving the task without one.
+        console.error(
+          `likeness film refused (HTTP ${started.status}) for "${order.title}" - falling back`,
+        );
+        started = await api("", {
+          method: "POST",
+          body: JSON.stringify({
+            model: VIDEO_MODEL,
+            prompt: buildVideoPrompt(order, plan, false),
+            seconds,
+            size: VIDEO_SIZE,
+          }),
+        });
+      }
+    } else {
+      started = await api("", {
+        method: "POST",
+        body: JSON.stringify({
+          model: VIDEO_MODEL,
+          prompt,
+          seconds,
+          size: VIDEO_SIZE,
+        }),
+      });
+    }
     if (!started.ok) return null;
     const job = (await started.json()) as VideoJob;
     if (!job.id) return null;

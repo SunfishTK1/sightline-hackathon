@@ -149,6 +149,12 @@ export const market = {
    * Completed tasks with no clip yet. Delivery waits on the relay learning to
    * carry video; until then these are generated and stored.
    */
+  /** May we picture this person, and with what. Null when they said no. */
+  likeness: (phone: string) =>
+    get<{ consented: boolean; has_photo: boolean; avatar_data_url: string | null }>(
+      `/v1/people/likeness?phone=${encodeURIComponent(phone)}`,
+    ).catch(() => null),
+
   /** A private link letting someone open their own wallet. */
   walletLink: (phone: string) =>
     post<{ token: string; url: string | null; expires_in_days: number }>(

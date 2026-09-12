@@ -263,6 +263,11 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
        JOIN orders o ON o.id = $1
       WHERE w.is_available
         AND wp.phone_verified
+        -- Someone who signed up on the web claimed a specific CMU identity, so
+        -- that claim has to be proven before they can be offered work. Anyone
+        -- who only ever arrived by phone has no email to verify and is
+        -- unaffected.
+        AND (wp.email IS NULL OR COALESCE((wp.doc->>'emailVerified')::boolean, false))
         AND w.person_id <> o.person_id
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j WHERE j.order_id = o.id AND j.phone = w.phone)
@@ -922,6 +927,35 @@ app.get("/v1/orders/:id", async (req, res) => {
   );
   if (!rows[0]) return res.status(404).json({ ok: false, error: "no such order" });
   res.json({ ok: true, data: rows[0] });
+});
+
+/**
+ * Whether this person may be pictured in generated media, and the photo to do
+ * it with. Server-to-server only: the photo never goes to a browser from here,
+ * and an absent consent is a no rather than a maybe.
+ */
+app.get("/v1/people/likeness", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const { rows } = await pool.query(
+    `SELECT avatar_data_url,
+            COALESCE((doc->'consents'->>'canUseLikeness')::boolean, false) AS consented
+       FROM people WHERE phone = $1`,
+    [normalizePhone(phone)],
+  );
+  const row = rows[0];
+  const consented = Boolean(row?.consented);
+  const hasPhoto = Boolean(row?.avatar_data_url);
+  res.json({
+    ok: true,
+    data: {
+      consented,
+      has_photo: hasPhoto,
+      // Only handed over when both are true - there is no reason to move a
+      // photo around for someone who said no.
+      avatar_data_url: consented && hasPhoto ? row.avatar_data_url : null,
+    },
+  });
 });
 
 /** Recent orders, with where they came from. */

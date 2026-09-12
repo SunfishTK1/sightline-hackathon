@@ -152,6 +152,8 @@ export async function ensureSchema(): Promise<void> {
     -- it false until a code sent to that number comes back.
     ALTER TABLE people ADD COLUMN IF NOT EXISTS phone_verified boolean NOT NULL DEFAULT true;
     ALTER TABLE people ADD COLUMN IF NOT EXISTS signed_up_at timestamptz;
+    -- Written by the web signup; read here so eligibility can depend on it.
+    ALTER TABLE people ADD COLUMN IF NOT EXISTS doc jsonb NOT NULL DEFAULT '{}'::jsonb;
     CREATE UNIQUE INDEX IF NOT EXISTS people_auth0_sub_idx
       ON people (auth0_sub) WHERE auth0_sub IS NOT NULL;
 
