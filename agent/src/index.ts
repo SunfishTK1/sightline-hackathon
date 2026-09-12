@@ -80,10 +80,12 @@ async function handleEvent(event: RelayEvent): Promise<void> {
   // Messages' inline reply tells us exactly which of our messages they are
   // answering. That removes the guesswork behind a bare "yes".
   let replyContext: string | undefined;
+  let replyRefId: string | undefined;
   const repliedTo = event.data.inReplyTo?.providerMessageId;
   if (repliedTo) {
     const prior = await findSent(repliedTo).catch(() => null);
     if (prior) {
+      replyRefId = prior.ref_id ?? undefined;
       const about = prior.kind === "offer" ? ` (job offer ${prior.ref_id})` : "";
       replyContext = `They used an inline reply on your earlier message${about}: "${prior.text}".`;
       log(`  inline reply to ${prior.kind}${about}`);
@@ -121,6 +123,45 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     reply = "I hit a snag on my end - say that again and I'll pick it back up.";
   }
 
+  type ChatTarget = { id: string; title?: string; role: "worker" | "requester" };
+  let chatTarget: ChatTarget | null = null;
+  if (!usedTools.length) {
+    const workerTargets: ChatTarget[] = (who?.jobs_in_progress ?? [])
+      .filter((order: { id?: string }) => order.id)
+      .map((order: { id: string; title?: string }) => ({
+        id: String(order.id),
+        title: order.title,
+        role: "worker" as const,
+      }));
+    const requesterTargets: ChatTarget[] = [
+      ...(who?.open_requests ?? []).filter(
+        (order: { id?: string; status: string }) => order.id && order.status === "accepted",
+      ),
+      ...(who?.awaiting_their_confirmation ?? []),
+    ]
+      .filter((order: { id?: string }) => order.id)
+      .map((order: { id: string; title?: string }) => ({
+        id: String(order.id),
+        title: order.title,
+        role: "requester" as const,
+      }));
+    const targets = [...workerTargets, ...requesterTargets];
+    chatTarget = targets.find((target) => target.id === replyRefId) ?? null;
+    if (!chatTarget) {
+      const lower = text.toLowerCase();
+      const named = targets.filter(
+        (target) => target.title && lower.includes(target.title.toLowerCase()),
+      );
+      if (named.length === 1) chatTarget = named[0];
+    }
+    if (!chatTarget && targets.length === 1) {
+      chatTarget = targets[0];
+    } else if (!chatTarget && targets.length > 1) {
+      const names = targets.map((target) => `"${target.title ?? target.id}"`).join(", ");
+      reply = shorten(`Which job do you mean: ${names}?`);
+    }
+  }
+
   const sent = await sendText(phone, reply, `gotchu-${event.id}`);
   await recordSent(sent.requestId, phone, "reply", null, reply);
   log(`-> ${phone} [${usedTools.join(",") || "no tools"}] ${sent.accepted ? "sent" : "FAILED " + sent.detail}: ${reply}`);
@@ -150,18 +191,11 @@ async function handleEvent(event: RelayEvent): Promise<void> {
 
     // After someone has taken the job, ordinary texts become the live thread.
     // Tool calls (yes/no, counters) stay off that thread.
-    if (!usedTools.length) {
-      const doing = who?.jobs_in_progress ?? [];
-      const theirs = (who?.open_requests ?? []).find((order) =>
-        ["accepted", "done_pending"].includes(order.status),
-      );
-      if (doing[0]?.id) {
-        await postLiveChat({ orderId: String(doing[0].id), author: "worker", body: text });
-        await market.relayChat(String(doing[0].id), text, "requester").catch(() => null);
-      } else if (theirs?.id) {
-        await postLiveChat({ orderId: String(theirs.id), author: "requester", body: text });
-        await market.relayChat(String(theirs.id), text, "worker").catch(() => null);
-      }
+    if (!usedTools.length && chatTarget) {
+      await postLiveChat({ orderId: chatTarget.id, author: chatTarget.role, body: text });
+      await market
+        .relayChat(chatTarget.id, text, chatTarget.role === "worker" ? "requester" : "worker")
+        .catch(() => null);
     }
   }
 }
@@ -462,6 +496,12 @@ function handoffText(handoff: Handoff): string | null {
   }
   if (handoff.kind === "counter_released") {
     return `They moved on from your counter on "${handoff.payload?.title}", so I'm asking someone else.`;
+  }
+  if (handoff.kind === "counter_revised") {
+    return `They changed the terms on "${handoff.payload?.title}", so your $${handoff.payload?.asked_usd} counter is no longer pending. I'll send the revised offer separately.`;
+  }
+  if (handoff.kind === "offer_released") {
+    return `They moved on from your offer for "${handoff.payload?.title}", so you're off the hook.`;
   }
   return null;
 }
@@ -832,11 +872,6 @@ async function expireStaleOffers(): Promise<void> {
           state: "dropped",
         });
       }
-      await sayTo(
-        offer.phone,
-        `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
-        `gotchu-timeout-${offer.id}`,
-      );
       log(`timed out offer ${offer.id} for ${offer.phone}`);
     } catch (err) {
       log(`timeout failed on offer ${offer.id}: ${(err as Error).message}`);
@@ -1079,13 +1114,6 @@ async function chaseStuckItems(): Promise<void> {
           log(`offer ${item.offer_id} changed before escalation could release it`);
           continue;
         }
-        await sayTo(
-          item.phone,
-          `No reply on "${item.about}", so I've released it - it's going to someone else.`,
-          `gotchu-released-${item.offer_id}`,
-          "offer_released",
-          item.offer_id,
-        );
         if (item.order_id) {
           await postLiveEvent({
             orderId: item.order_id,

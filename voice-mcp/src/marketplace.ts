@@ -73,7 +73,7 @@ export async function resolveOffer(
     }
 
     const offerResult = await client.query(
-      `SELECT id, order_id, person_id, phone, offered_usd
+      `SELECT id, order_id, person_id, phone, offered_usd, outreach_sent_at
          FROM job_offers
         WHERE id = $1 AND order_id = $2 AND status = 'offered'
           AND ($3::text IS NULL OR phone = $3)
@@ -92,6 +92,21 @@ export async function resolveOffer(
           WHERE id = $1 AND status = 'offered'`,
         [offer.id, nextStatus],
       );
+      if (guard == null && offer.outreach_sent_at) {
+        await client.query(
+          `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+           VALUES ($1,$2,$3,'offer_released',$4::jsonb)`,
+          [
+            offer.person_id,
+            offer.phone,
+            offer.order_id,
+            JSON.stringify({
+              title: order.title,
+              offer_id: String(offer.id),
+            }),
+          ],
+        );
+      }
       // A decline must never resurrect a task that was blocked out from under
       // it. Only reopen a still-open order once no other worker holds it.
       await client.query(
@@ -1392,7 +1407,22 @@ export async function claimTask(orderId: string, workerPhone: string) {
     return { status: "already_yours" as const, order_id: order.id, title: order.title };
   }
 
-  const taken = await resolveOffer(offer.id, true, e164);
+  let taken: Awaited<ReturnType<typeof resolveOffer>>;
+  try {
+    taken = await resolveOffer(offer.id, true, e164);
+  } catch (err) {
+    // The upsert committed before resolveOffer opened its transaction. If that
+    // transaction dies, remove only the still-unaccepted claim row so it
+    // cannot hold exclusivity or appear actionable.
+    await pool
+      .query(
+        `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+          WHERE id = $1 AND status = 'offered'`,
+        [offer.id],
+      )
+      .catch(() => undefined);
+    throw err;
+  }
   if (taken.error) return { error: "not_available" as const, detail: taken.error };
   return { status: "accepted" as const, order_id: order.id, title: order.title, offer_id: offer.id };
 }

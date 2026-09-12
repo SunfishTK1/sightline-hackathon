@@ -53,6 +53,18 @@ function settlementMemo(orderId: string): string {
   return `${SETTLEMENT_MEMO_PREFIX}${orderId}`;
 }
 
+async function parkUnrecordedSignature(orderId: string, signature: string): Promise<void> {
+  await pool.query(
+    `UPDATE payments
+        SET note = $2, updated_at = now()
+      WHERE order_id = $1
+        AND status IS DISTINCT FROM 'paid'
+        AND solana_signature IS NULL
+        AND COALESCE(note, '') NOT LIKE 'unrecorded:%'`,
+    [orderId, `${UNRECORDED_PREFIX}${signature}`],
+  );
+}
+
 /**
  * A process can die after Solana confirms but before Postgres stores the
  * signature. Every payment carries its order id as a memo, so a stale claim
@@ -143,7 +155,21 @@ async function claimPayment(
     return { kind: "already", signature: row.solana_signature || "paid" };
   }
   if (row?.status === "paying" && row.stale) {
-    return { kind: "stale" };
+    // Reclaim here, before any caller checks Solana. PostgreSQL rechecks this
+    // predicate after a concurrent row lock, so only one stale verifier wins.
+    const reclaimed = await pool.query<{ id: string }>(
+      `UPDATE payments
+          SET updated_at = now()
+        WHERE order_id = $1
+          AND status = 'paying'
+          AND solana_signature IS NULL
+          AND updated_at < now() - ($2 || ' minutes')::interval
+        RETURNING id`,
+      [orderId, String(STALE_CLAIM_MINUTES)],
+    );
+    return reclaimed.rows[0]
+      ? { kind: "stale" }
+      : { kind: "busy", reason: "settlement already in progress" };
   }
   if (row?.status === "paying") {
     return { kind: "busy", reason: "settlement already in progress" };
@@ -213,12 +239,7 @@ export async function payForTask(input: {
         await persistSettlement(input.orderId, recorded);
         return recorded;
       } catch (err) {
-        await pool
-          .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
-            input.orderId,
-            `${UNRECORDED_PREFIX}${recovered}`,
-          ])
-          .catch(() => undefined);
+        await parkUnrecordedSignature(input.orderId, recovered).catch(() => undefined);
         return {
           settled: false,
           reason: `paid on-chain but not recorded: ${recovered} (${(err as Error).message})`,
@@ -227,21 +248,6 @@ export async function payForTask(input: {
       }
     }
 
-    // The chain has no matching successful transfer. Only one verifier may
-    // reclaim the stale row and proceed to send.
-    const reclaimed = await pool.query<{ id: string }>(
-      `UPDATE payments
-          SET updated_at = now()
-        WHERE order_id = $1
-          AND status = 'paying'
-          AND solana_signature IS NULL
-          AND updated_at < now() - ($2 || ' minutes')::interval
-        RETURNING id`,
-      [input.orderId, String(STALE_CLAIM_MINUTES)],
-    );
-    if (!reclaimed.rows[0]) {
-      return { settled: false, reason: "settlement already in progress", railcoins };
-    }
   }
   if (claim.kind === "busy") {
     return { settled: false, reason: claim.reason, railcoins };
@@ -309,12 +315,7 @@ export async function payForTask(input: {
       await persistSettlement(input.orderId, result);
       return result;
     } catch (err) {
-      await pool
-        .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
-          input.orderId,
-          `${UNRECORDED_PREFIX}${signature}`,
-        ])
-        .catch(() => undefined);
+      await parkUnrecordedSignature(input.orderId, signature).catch(() => undefined);
       return {
         settled: false,
         reason: `paid on-chain but not recorded: ${signature} (${(err as Error).message})`,
@@ -394,7 +395,15 @@ export async function recordSettlement(orderId: string, result: Settlement): Pro
     `UPDATE payments
         SET status = $2, solana_signature = $3, railcoins = $4,
             note = $5, updated_at = now()
-      WHERE order_id = $1`,
+      WHERE order_id = $1
+        AND (
+          $2::text = 'paid'
+          OR (
+            status IS DISTINCT FROM 'paid'
+            AND solana_signature IS NULL
+            AND COALESCE(note, '') NOT LIKE 'unrecorded:%'
+          )
+        )`,
     [
       orderId,
       result.settled ? "paid" : "settlement_failed",

@@ -9,6 +9,42 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, near end of hackathon — merged the `embedding` branch into `main`
+
+**What this agent added directly:**
+- The `embedding` branch (v2 personalization: explicit preferences tracked
+  separately from inferred tone, an evolving profile instead of a
+  per-message snapshot, drift-based cost control, and a closed prompt-
+  injection path in how preferences get extracted and stored - see that
+  branch's own history for detail) is now merged into `main`.
+- Built and merged via a git worktree at `../sightline-hackathon-embedding`,
+  specifically so none of this touched the shared working directory while
+  Cursor was actively committing there - the merge into `main` itself was
+  done as a direct push to the remote ref (`git push origin embedding:main`),
+  never a local checkout/merge in the shared folder. Took four attempts:
+  each time this agent fetched `origin/main`, merged it into `embedding`,
+  and tried to fast-forward-push, more commits had already landed - normal
+  given how fast this repo was moving in the final stretch, not a problem.
+- One real merge-induced regression, fixed: a three-way merge combination
+  left `agent/src/index.ts`'s `who?.open_requests.find(...)` callback
+  parameter as an implicit `any` (not a real behavior bug - plain `main`
+  typechecked clean before this merge - purely an artifact of this
+  specific merge). Fixed with an explicit type; a teammate independently
+  fixed the identical spot with a more precise type one push later, and
+  that version is what's in `main` now.
+- Local `main` was fast-forwarded to match afterward, safely - working
+  tree had no uncommitted changes at that point, so nothing was at risk.
+- **Not resolved this pass**: the actual "does this produce good output"
+  question for the extraction/summary prompts is still unverified - no
+  `OPENAI_API_KEY` was available in this environment for the whole
+  `embedding` branch's development. Everything is typechecked and
+  reasoned through, not empirically tested against real model output.
+
+**Conflicts resolved this pass:** one (the implicit-any spot above,
+resolved by taking the other side's more precise fix).
+
+---
+
 ## 2026-09-12, very late night — a real ethics-BLOCK enforcement gap, found via the account view
 
 **What this agent added directly:**

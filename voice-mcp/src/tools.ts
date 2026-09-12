@@ -158,7 +158,9 @@ export const tools: ToolDef[] = [
         wallet: wallet
           ? { public_key: wallet.public_key, cluster: wallet.cluster, funded: !!wallet.funded_at }
           : null,
-        style: style ? { summary: style.summary, style_tag: style.style_tag } : null,
+        style: style
+          ? { summary: style.summary, style_tag: style.style_tag, preferences: style.preferences }
+          : null,
 
         // Tasks they asked for.
         open_requests: live,
@@ -787,6 +789,13 @@ tools.push({
           WHERE o.id = t.id
           RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status, t.old_status
        ),
+       countered_before AS (
+         SELECT j.id, j.person_id, j.phone, j.order_id, j.counter_price_usd, c.title
+           FROM job_offers j
+           JOIN changed c ON c.id = j.order_id
+          WHERE j.status = 'countered'
+          FOR UPDATE
+       ),
        reset_candidates AS (
          UPDATE job_offers j
             SET status = CASE
@@ -825,6 +834,23 @@ tools.push({
            FROM changed c
           WHERE j.order_id = c.id
             AND j.status IN ('offered', 'countered', 'declined', 'dropped')
+            AND (
+              j.status <> 'countered'
+              OR EXISTS (SELECT 1 FROM countered_before b WHERE b.id = j.id)
+            )
+          RETURNING j.id
+       ),
+       counter_handoffs AS (
+         INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         SELECT b.person_id, b.phone, b.order_id, 'counter_revised',
+                jsonb_build_object(
+                  'title', b.title,
+                  'asked_usd', b.counter_price_usd,
+                  'offer_id', b.id::text
+                )
+           FROM countered_before b
+           JOIN reset_candidates r ON r.id = b.id
+         RETURNING id
        )
        SELECT id, title, budget_usd, deadline_at, status FROM changed`,
       [

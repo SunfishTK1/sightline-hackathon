@@ -14,7 +14,7 @@ import {
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
-import { saveStyle } from "./style.js";
+import { saveStyle, addPreferences, getFullStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 import { chargeToTreasury } from "./pay.js";
 import { reviewTask } from "./ethics.js";
@@ -202,7 +202,7 @@ app.get("/v1/wallets/:phone", async (req, res) => {
  * typed into a form - that's what the ToS training clause covers.
  */
 app.post("/v1/style/save", async (req, res) => {
-  const { phone, summary, style_tag, embedding } = req.body ?? {};
+  const { phone, summary, style_tag, embedding, preferences } = req.body ?? {};
   if (!phone || !summary || !style_tag || !Array.isArray(embedding)) {
     return res.status(400).json({
       ok: false,
@@ -210,8 +210,40 @@ app.post("/v1/style/save", async (req, res) => {
     });
   }
   try {
-    await saveStyle(String(phone), String(summary), String(style_tag), embedding);
+    await saveStyle(
+      String(phone), String(summary), String(style_tag), embedding,
+      Array.isArray(preferences) ? preferences.map(String) : [],
+    );
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Record newly-stated preferences without re-learning tone - cheaper than a full save. */
+app.post("/v1/style/preferences", async (req, res) => {
+  const { phone, preferences } = req.body ?? {};
+  if (!phone || !Array.isArray(preferences)) {
+    return res.status(400).json({ ok: false, error: "phone and preferences (array) are required" });
+  }
+  try {
+    await addPreferences(String(phone), preferences.map(String));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * Internal only - includes the embedding, so the agent can decide whether
+ * someone's tone has actually shifted before spending a model call re-
+ * learning it. Never call this from anything a user's own request reaches.
+ */
+app.get("/v1/style/full", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await getFullStyle(phone) });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
