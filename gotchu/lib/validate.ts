@@ -107,3 +107,41 @@ export const availabilitySchema = z.object({
   isAvailable: z.boolean(),
   until: z.string().datetime().optional(),
 });
+
+export const taskCategorySchema = z.enum([
+  "pickup",
+  "food",
+  "moving",
+  "errand",
+  "tutoring_allowed",
+  "other",
+]);
+
+export const structuredTaskSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  category: taskCategorySchema,
+  pickupLocation: z.string().trim().min(1).max(200).optional(),
+  dropoffLocation: z.string().trim().min(1).max(200).optional(),
+  deadline: z.string().optional(),
+  maxPriceUsd: z.number().finite().min(0),
+  estimatedMinutes: z.number().finite().min(0).optional(),
+  requirements: z.array(z.string()).optional(),
+  inferred: z.boolean().optional(),
+  needsReview: z.boolean().optional(),
+});
+
+export const proposedMoveSchema = z.object({
+  priceUsd: z.number().finite(),
+  etaMinutes: z.number().finite(),
+  rationale: z.string(),
+  accept: z.boolean(),
+  amendments: z.array(z.object({ path: z.string(), to: z.unknown() })).optional(),
+});
+
+export const arbitrateInputSchema = z.object({
+  originalStructured: structuredTaskSchema,
+  currentStructured: structuredTaskSchema,
+  role: z.enum(["worker_agent", "requester_agent"]),
+  proposed: proposedMoveSchema,
+  transcript: z.array(z.unknown()).optional().default([]),
+});

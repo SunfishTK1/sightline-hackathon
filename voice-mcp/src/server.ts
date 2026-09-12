@@ -248,7 +248,7 @@ app.get("/v1/orders/open", async (_req, res) => {
         AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
-           WHERE j.order_id = o.id AND j.status IN ('offered', 'accepted'))
+           WHERE j.order_id = o.id AND j.status IN ('offered', 'countered', 'accepted'))
       ORDER BY o.created_at
       LIMIT 10`,
   );
@@ -297,9 +297,11 @@ app.post("/v1/offers", async (req, res) => {
      RETURNING id, order_id, phone, status, offered_usd, travel_note`,
     [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
   );
-  await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
-    order_id,
-  ]);
+  await pool.query(
+    `UPDATE orders SET status = 'offered', updated_at = now()
+      WHERE id = $1 AND status IN ('submitted', 'offered')`,
+    [order_id],
+  );
   res.json({ ok: true, data: rows[0] ?? null });
 });
 

@@ -20,6 +20,12 @@ type OpenOrder = {
   budget_usd: string | null;
 };
 
+function parseBudgetUsd(value: string | null): number {
+  if (!value) return 0;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? amount : 0;
+}
+
 /** The live marketplace's shape, mapped onto the one the pin builder wants. */
 function asTask(order: OpenOrder): Task {
   const now = new Date().toISOString();
@@ -33,7 +39,7 @@ function asTask(order: OpenOrder): Task {
       category: (order.category ?? "other") as Task["structured"]["category"],
       pickupLocation: order.pickup_location ?? undefined,
       dropoffLocation: order.dropoff_location ?? undefined,
-      maxPriceUsd: order.budget_usd ? Number(order.budget_usd) : 0,
+      maxPriceUsd: parseBudgetUsd(order.budget_usd),
     } as Task["structured"],
     status: "OPEN",
     matchedWorkerUuid: null,
@@ -60,13 +66,11 @@ async function liveTasks(): Promise<Task[] | null> {
 }
 
 export async function GET() {
-  // Real open tasks when there are any. The demo pins stay as a fallback so an
-  // empty marketplace shows a map with something on it rather than a blank
-  // one - but the flag says which you are looking at, so nobody mistakes
-  // fixtures for live work.
+  // Demo pins only when no marketplace is configured. An empty or failed
+  // live fetch must not look like real open work.
   const live = await liveTasks();
-  const demo = !live || live.length === 0;
-  const tasks = demo ? MOCK_MAP_OPEN_TASKS : live;
+  const demo = !MARKET;
+  const tasks = live && live.length > 0 ? live : demo ? MOCK_MAP_OPEN_TASKS : [];
 
   const { pins, unlocated } = pinsFromTasks(tasks);
   return NextResponse.json({

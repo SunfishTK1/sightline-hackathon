@@ -66,8 +66,12 @@ export async function resolveOffer(
       `UPDATE orders
           SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
               updated_at = now()
-        WHERE id = $1`,
-      [offer.order_id],
+        WHERE id = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM job_offers
+             WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
+          )`,
+      [offer.order_id, offer.id],
     );
     return { status: "declined", order_id: offer.order_id };
   }
@@ -76,13 +80,22 @@ export async function resolveOffer(
     `UPDATE orders
         SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now()
       WHERE id = $1
+        AND accepted_by IS NULL
+        AND status IN ('submitted', 'offered')
       RETURNING id, title, person_id`,
     [offer.order_id, offer.person_id],
   );
-  // Nobody else is still on the hook for this one.
+  if (!order.rows[0]) {
+    await pool.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now() WHERE id = $1`,
+      [offer.id],
+    );
+    return { status: "unchanged", error: "That task is no longer open." };
+  }
+  // Nobody else is still on the hook for this one — including pending counters.
   await pool.query(
     `UPDATE job_offers SET status = 'cancelled', responded_at = now()
-      WHERE order_id = $1 AND id <> $2 AND status = 'offered'`,
+      WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered')`,
     [offer.order_id, offer.id],
   );
 
@@ -285,13 +298,19 @@ export async function respondToCounter(
     return { status: "declined" };
   }
 
-  await pool.query(
+  const accepted = await pool.query(
     `UPDATE orders
         SET budget_usd = $2, status = 'accepted', accepted_by = $3,
             accepted_at = now(), updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+        AND accepted_by IS NULL
+        AND status IN ('submitted', 'offered')
+      RETURNING id`,
     [offer.order_id, offer.counter_price_usd, offer.person_id],
   );
+  if (!accepted.rows[0]) {
+    return { status: "unchanged", error: "That task is no longer open." };
+  }
   await pool.query(
     `UPDATE job_offers SET status = 'accepted', responded_at = now() WHERE id = $1`,
     [offer.id],

@@ -112,7 +112,7 @@ export function publicUser(user: User): Omit<User, "preferenceEmbedding" | "auth
 export async function findUserByAuth0Sub(auth0Sub: string): Promise<User | null> {
   if (postgresConfigured()) {
     const { rows } = await getPool().query<PersonRow>(
-      "SELECT * FROM people WHERE doc->>'auth0Sub' = $1 LIMIT 1",
+      "SELECT * FROM people WHERE auth0_sub = $1 OR doc->>'auth0Sub' = $1 LIMIT 1",
       [auth0Sub],
     );
     return rows[0] ? fromRow(rows[0]) : null;
@@ -166,13 +166,21 @@ export async function upsertUser(user: User): Promise<{ user: User; wasExisting:
     let target = byEmail.rows[0] ?? null;
     const wasExisting = Boolean(target);
 
-    if (!target) {
-      const byPhone = await pool.query<PersonRow>(
-        "SELECT * FROM people WHERE phone = $1 LIMIT 1",
-        [user.phone],
-      );
-      const phoneOwner = byPhone.rows[0] ?? null;
-      if (phoneOwner?.email && phoneOwner.email !== user.cmuEmail) {
+    const byPhone = await pool.query<PersonRow>(
+      "SELECT * FROM people WHERE phone = $1 LIMIT 1",
+      [user.phone],
+    );
+    const phoneOwner = byPhone.rows[0] ?? null;
+    if (phoneOwner && phoneOwner.id !== target?.id) {
+      // Claiming a bare contact stub (agent-known number, no email yet) is
+      // allowed on first insert. A phone already tied to a different email
+      // — or to another onboarded person — is a real conflict.
+      if (phoneOwner.email && phoneOwner.email !== user.cmuEmail) {
+        throw new PhoneAlreadyRegisteredError(
+          "That phone number is already registered under a different CMU email.",
+        );
+      }
+      if (target) {
         throw new PhoneAlreadyRegisteredError(
           "That phone number is already registered under a different CMU email.",
         );
@@ -185,6 +193,7 @@ export async function upsertUser(user: User): Promise<{ user: User; wasExisting:
     // A submission without a new photo (e.g. an update to name/phone only)
     // must not blank out one that's already saved.
     const photoDataUrl = user.photoDataUrl ?? target?.avatar_data_url ?? null;
+    const auth0Sub = user.auth0Sub || null;
 
     const { rows } = target
       ? await pool.query<PersonRow>(
@@ -195,7 +204,12 @@ export async function upsertUser(user: User): Promise<{ user: User; wasExisting:
             email = $3,
             avatar_data_url = $4,
             doc = $5::jsonb,
-            updated_at = $6
+            updated_at = $6,
+            auth0_sub = COALESCE($8, auth0_sub),
+            phone_verified = CASE
+              WHEN people.phone IS DISTINCT FROM $1 THEN false
+              ELSE people.phone_verified
+            END
           WHERE id = $7
           RETURNING *
           `,
@@ -207,15 +221,16 @@ export async function upsertUser(user: User): Promise<{ user: User; wasExisting:
             JSON.stringify(doc),
             user.updatedAt,
             target.id,
+            auth0Sub,
           ],
         )
       : await pool.query<PersonRow>(
           `
-          INSERT INTO people (phone, display_name, email, avatar_data_url, doc, updated_at)
-          VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+          INSERT INTO people (phone, display_name, email, avatar_data_url, doc, updated_at, auth0_sub, phone_verified)
+          VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, false)
           RETURNING *
           `,
-          [user.phone, displayName, user.cmuEmail, photoDataUrl, JSON.stringify(doc), user.updatedAt],
+          [user.phone, displayName, user.cmuEmail, photoDataUrl, JSON.stringify(doc), user.updatedAt, auth0Sub],
         );
     if (!rows[0]) throw new Error("upsert failed");
     return { user: fromRow(rows[0]), wasExisting };

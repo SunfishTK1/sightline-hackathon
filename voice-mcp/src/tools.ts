@@ -466,6 +466,11 @@ tools.push({
   handler: async (input) => {
     const e164 = normalizePhone(input.phone);
     const person = await upsertPerson(e164);
+    const verified = await pool.query<{ phone_verified: boolean }>(
+      `SELECT COALESCE(phone_verified, false) AS phone_verified FROM people WHERE id = $1`,
+      [person.id],
+    );
+    const canBeAvailable = Boolean(input.is_available && verified.rows[0]?.phone_verified);
     const { rows } = await pool.query(
       `INSERT INTO worker_profiles (person_id, phone, is_available, blurb, categories,
                                     min_price_usd, auto_counter, auto_accept, updated_at)
@@ -483,7 +488,7 @@ tools.push({
       [
         person.id,
         e164,
-        input.is_available,
+        canBeAvailable,
         input.blurb ?? null,
         input.categories ?? [],
         input.min_price_usd ?? null,

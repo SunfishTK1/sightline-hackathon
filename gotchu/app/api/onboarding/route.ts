@@ -29,7 +29,7 @@ import {
   upsertUser,
 } from "@/lib/users";
 import { isCmuEmail, onboardingSchema } from "@/lib/validate";
-import { activateParticipant } from "@/lib/activate";
+import { activateParticipant, dropWorkerAvailability } from "@/lib/activate";
 import { TERMS_VERSION } from "@/lib/terms";
 import type { User } from "@/lib/types/user";
 
@@ -50,9 +50,23 @@ export async function POST(req: Request) {
   // verified isn't re-created (and re-verified) just because the cookie
   // was lost.
   const identity = await getIdentity();
+  if (identity && identity.cmuEmail !== input.cmuEmail) {
+    return fail(
+      "This session is already tied to a different CMU email. Sign out to register a new account.",
+      409,
+    );
+  }
+
   const existing =
     (identity ? await findUserByAuth0Sub(identity.auth0Sub) : null) ??
     (await findUserByCmuEmail(input.cmuEmail));
+
+  // A verified account cannot be overwritten by anyone who merely knows the
+  // email. First-time / still-unverified resubmits stay allowed so the
+  // confirmation email can be resent from another browser.
+  if (existing?.emailVerified && (!identity || identity.cmuEmail !== existing.cmuEmail)) {
+    return fail("This email is already registered. Sign in to update your profile.", 409);
+  }
 
   let auth0Sub = existing?.auth0Sub ?? null;
   let emailVerified: boolean;
@@ -121,7 +135,7 @@ export async function POST(req: Request) {
       canUseLikeness: input.consentLikeness ?? false,
       acceptedAt: now,
     },
-    availability: existing?.availability ?? { isAvailable: false },
+    availability: phoneChanged ? { isAvailable: false } : (existing?.availability ?? { isAvailable: false }),
     stats: existing?.stats ?? {
       tasksCompleted: 0,
       tasksRequested: 0,
@@ -152,6 +166,9 @@ export async function POST(req: Request) {
     displayName: [saved.firstName, saved.lastName].filter(Boolean).join(" ") || null,
     blurb: saved.preferenceText,
   });
+  if (phoneChanged) {
+    await dropWorkerAvailability(saved.uuid);
+  }
 
   const jar = await cookies();
   jar.set(IDENTITY_COOKIE, identityCookieValue({ auth0Sub: user.auth0Sub, cmuEmail: input.cmuEmail }), {
