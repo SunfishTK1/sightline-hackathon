@@ -895,6 +895,21 @@ app.post("/v1/signup/availability", async (req, res) => {
   res.json({ ok: true, data: result });
 });
 
+/** One order, whatever its status - so a view of a task can show where it runs. */
+app.get("/v1/orders/:id", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
+            p.phone AS requester_phone
+       FROM orders o
+       LEFT JOIN people p ON p.id = o.person_id
+      WHERE o.id = $1`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ ok: false, error: "no such order" });
+  res.json({ ok: true, data: rows[0] });
+});
+
 /** Recent orders, with where they came from. */
 app.get("/v1/orders", async (req, res) => {
   const { rows } = await pool.query(
