@@ -94,6 +94,7 @@ export async function POST(req: Request) {
       age18: input.ageConfirmed,
       canCall: input.consentCall,
       canText: input.consentText,
+      canUseLikeness: input.consentLikeness ?? false,
       acceptedAt: now,
     },
     availability: existing?.availability ?? { isAvailable: false },

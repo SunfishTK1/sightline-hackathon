@@ -460,20 +460,31 @@ app.get("/v1/orders/needing-image", async (_req, res) => {
 });
 
 app.post("/v1/orders/:id/image", async (req, res) => {
-  const { png_base64, prompt } = req.body ?? {};
-  if (!png_base64) return res.status(400).json({ ok: false, error: "png_base64 is required" });
+  const { png_base64, storage_key, bytes: reportedBytes, prompt } = req.body ?? {};
+  if (!png_base64 && !storage_key) {
+    return res.status(400).json({ ok: false, error: "storage_key or png_base64 is required" });
+  }
+  const bytes = storage_key
+    ? Number(reportedBytes) || null
+    : Buffer.from(png_base64, "base64").length;
+
   await pool.query(
-    `INSERT INTO order_images (order_id, png, prompt)
-     VALUES ($1, decode($2,'base64'), $3)
-     ON CONFLICT (order_id) DO UPDATE SET png = EXCLUDED.png, prompt = EXCLUDED.prompt`,
-    [req.params.id, png_base64, prompt ?? null],
+    `INSERT INTO order_images (order_id, png, storage_key, bytes, prompt)
+     VALUES ($1, CASE WHEN $2::text IS NULL THEN NULL ELSE decode($2,'base64') END, $3, $4, $5)
+     ON CONFLICT (order_id) DO UPDATE
+       SET png = EXCLUDED.png, storage_key = EXCLUDED.storage_key,
+           bytes = EXCLUDED.bytes, prompt = EXCLUDED.prompt`,
+    [req.params.id, png_base64 ?? null, storage_key ?? null, bytes, prompt ?? null],
   );
-  res.json({ ok: true, data: { order_id: req.params.id, bytes: Buffer.from(png_base64, "base64").length } });
+  res.json({ ok: true, data: { order_id: req.params.id, bytes, storage_key: storage_key ?? null } });
 });
 
 app.get("/v1/orders/:id/image", async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT encode(png,'base64') AS png_base64 FROM order_images WHERE order_id = $1`,
+    // Same as the clips: once there is a key, the caller reads from the bucket.
+    `SELECT storage_key, COALESCE(bytes, octet_length(png)) AS bytes,
+            CASE WHEN storage_key IS NULL THEN encode(png,'base64') END AS png_base64
+       FROM order_images WHERE order_id = $1`,
     [req.params.id],
   );
   if (!rows[0]) return res.status(404).json({ ok: false, error: "no image for that order" });

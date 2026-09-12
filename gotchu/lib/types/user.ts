@@ -15,6 +15,12 @@ export interface UserConsents {
   age18: boolean;
   canCall: boolean;
   canText: boolean;
+  /**
+   * Whether their photo may be used to picture them in generated images and
+   * clips. Unlike the others this one is optional: a marketplace can insist on
+   * being able to text you, but nobody has to agree to appear in a video.
+   */
+  canUseLikeness: boolean;
   acceptedAt: string;
 }
 

@@ -7,7 +7,13 @@ import { pool, normalizePhone, upsertPerson } from "./db.js";
 
 const CLUSTER = process.env.SOLANA_CLUSTER || "devnet";
 const RPC_URL = process.env.SOLANA_RPC_URL || clusterApiUrl(CLUSTER as any);
-const AIRDROP_SOL = Number(process.env.SOLANA_AIRDROP_SOL || 0.5);
+// Users see "railcoins", not SOL: 50,000 railcoins = 1 SOL, so everyone's
+// 50-railcoin starting balance costs the treasury 0.001 SOL. Solana rejects
+// any transfer that leaves a brand-new account below the rent-exempt
+// minimum (~0.00065 SOL currently), so this can't go much lower - it's
+// already ~500x more treasury-efficient than a flat 0.5 SOL per person, and
+// the devnet faucet only refills the treasury 5 SOL every 8 hours.
+const AIRDROP_SOL = Number(process.env.SOLANA_AIRDROP_SOL || 0.001);
 
 export const connection = new Connection(RPC_URL, "confirmed");
 

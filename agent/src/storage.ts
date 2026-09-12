@@ -56,23 +56,14 @@ export async function ensureBucket(): Promise<boolean> {
   }
 }
 
-export function videoKey(orderId: string): string {
-  return `videos/${orderId}.mp4`;
-}
+export const videoKey = (orderId: string) => `videos/${orderId}.mp4`;
+export const imageKey = (orderId: string) => `images/${orderId}.png`;
 
-/** Store the clip. Returns the key to record, or null if it could not be put. */
-export async function putVideo(orderId: string, mp4: Buffer): Promise<string | null> {
+/** Store an object. Returns the key to record, or null if it could not be put. */
+async function put(Key: string, Body: Buffer, ContentType: string): Promise<string | null> {
   if (!storageConfigured()) return null;
-  const Key = videoKey(orderId);
   try {
-    await s3().send(
-      new PutObjectCommand({
-        Bucket: BUCKET,
-        Key,
-        Body: mp4,
-        ContentType: "video/mp4",
-      }),
-    );
+    await s3().send(new PutObjectCommand({ Bucket: BUCKET, Key, Body, ContentType }));
     return Key;
   } catch (err) {
     console.error(`could not store ${Key}:`, (err as Error).message);
@@ -80,8 +71,13 @@ export async function putVideo(orderId: string, mp4: Buffer): Promise<string | n
   }
 }
 
-/** Read a clip back for delivery. */
-export async function getVideo(key: string): Promise<Buffer | null> {
+export const putVideo = (orderId: string, mp4: Buffer) =>
+  put(videoKey(orderId), mp4, "video/mp4");
+export const putImage = (orderId: string, png: Buffer) =>
+  put(imageKey(orderId), png, "image/png");
+
+/** Read an object back for delivery. */
+export async function getObject(key: string): Promise<Buffer | null> {
   if (!storageConfigured()) return null;
   try {
     const res = await s3().send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -95,3 +91,6 @@ export async function getVideo(key: string): Promise<Buffer | null> {
     return null;
   }
 }
+
+export const getVideo = getObject;
+export const getImage = getObject;
