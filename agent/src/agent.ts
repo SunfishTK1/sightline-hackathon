@@ -334,6 +334,9 @@ function systemPrompt(
     walletIntro,
     styleNote,
     CAMPUS_CONTEXT,
+    // The agent is asked for this often enough that guessing at it is a real
+    // risk; give it the exact URL rather than letting it invent one.
+    `There is a signup page at ${config.signupUrl}. It is where someone adds a photo, says what work they will and will not take, and sets a minimum price - it is optional, and everything here works over text without it. Share that exact URL when they ask how to sign up, how to add a photo, how to change what work they get offered, or where the website is. Never invent a different link or a different path.`,
     `Reply in at most ${config.maxReplyChars} characters of plain text: one or two short sentences, no markdown, no bullet points, no sign-off.`,
     "Your job is to understand what they need done and submit it as a request. Ask at most one short question per message, and only when something essential is missing.",
     "If they do not name a price, that is fine - submit with budget 0 and say you left the price open.",

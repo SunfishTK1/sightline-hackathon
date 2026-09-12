@@ -20,6 +20,14 @@ export const config = {
     .map((n) => n.trim())
     .filter(Boolean),
 
+  /**
+   * Where someone finishes their profile: photo, what work they will take,
+   * and the consent for using their likeness in generated media. The agent
+   * hands this out, so it must never be a guess - an unreachable link is
+   * worse than saying nothing.
+   */
+  signupUrl: (process.env.SIGNUP_URL || "https://gotchu-web-production.up.railway.app/onboarding").replace(/\/$/, ""),
+
   /** Unset until the voice agent is live - the agent must not invent a number. */
   voiceCallNumber: process.env.VOICE_CALL_NUMBER || "",
 
