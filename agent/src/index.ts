@@ -220,9 +220,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       if (!open) {
         reply = "That job isn't open any more, so I couldn't take it for you.";
       } else {
-        await market.respond(open.id, true, phone).catch(() => null);
-        reply = `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`;
-        if (open.order_id) {
+        const accepted = await market.respond(open.id, true, phone).catch(() => null);
+        reply = accepted
+          ? `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`
+          : "That job isn't open any more, so I couldn't take it for you.";
+        if (accepted && open.order_id) {
           await postLiveEvent({
             orderId: open.order_id,
             kind: "accepted",
@@ -234,9 +236,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       }
     } else if (data.kind === "disliked") {
       if (open) {
-        await market.respond(open.id, false, phone).catch(() => null);
-        reply = `Passed on "${open.title}" for you.`;
-        if (open.order_id) {
+        const declined = await market.respond(open.id, false, phone).catch(() => null);
+        reply = declined
+          ? `Passed on "${open.title}" for you.`
+          : "That job isn't open any more, so I couldn't pass on it.";
+        if (declined && open.order_id) {
           await postLiveEvent({
             orderId: open.order_id,
             kind: "declined",
