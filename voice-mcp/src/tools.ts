@@ -23,6 +23,39 @@ export type ToolDef = {
   handler: (input: any) => Promise<unknown>;
 };
 
+async function startLiveBoardUrl(order: {
+  id: string;
+  title: string;
+  category?: string | null;
+  deadline_at?: string | null;
+}): Promise<string | null> {
+  const base = (process.env.MARKET_MAKER_URL || "http://localhost:3000").replace(/\/$/, "");
+  const url = `${base}/api/live/start`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        orderId: order.id,
+        title: order.title,
+        category: order.category,
+        deadlineAt: order.deadline_at,
+        slots: 3,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      console.error(`live board start failed: HTTP ${res.status} ${url}`);
+      return null;
+    }
+    const body = (await res.json()) as { url?: string };
+    return body.url ?? null;
+  } catch (err) {
+    console.error(`live board start error at ${url}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 const RESOLUTION_STATUS = [
   "order_submitted",
   "answered_question",
@@ -308,6 +341,13 @@ export const tools: ToolDef[] = [
         };
       }
 
+      const liveUrl = await startLiveBoardUrl({
+        id: order.id,
+        title: order.title,
+        category: order.category,
+        deadline_at: order.deadline_at,
+      });
+
       // Queue the confirmation the text agent will send.
       await pool.query(
         `INSERT INTO agent_handoffs (person_id, phone, call_id, order_id, kind, payload)
@@ -322,10 +362,17 @@ export const tools: ToolDef[] = [
             budget_usd: order.budget_usd,
             category: order.category,
             deadline_at: order.deadline_at,
+            order_id: order.id,
+            live_url: liveUrl,
           }),
         ],
       );
-      return { order_id: order.id, status: order.status, created_at: order.created_at };
+      return {
+        order_id: order.id,
+        status: order.status,
+        created_at: order.created_at,
+        live_url: liveUrl,
+      };
     },
   },
 
