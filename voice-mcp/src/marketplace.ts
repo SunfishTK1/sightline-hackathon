@@ -46,82 +46,133 @@ export async function resolveOffer(
 ): Promise<{ status: string; order_id?: string; error?: string }> {
   const guard = phone ? normalizePhone(phone) : null;
   const nextStatus = accepted ? "accepted" : guard ? "declined" : "dropped";
-  const { rows } = await pool.query(
-    `UPDATE job_offers
-        SET status = $2, responded_at = now()
-      WHERE id = $1 AND status = 'offered'
-        AND ($3::text IS NULL OR phone = $3)
-      RETURNING id, order_id, person_id, phone, offered_usd`,
-    [offerId, nextStatus, guard],
-  );
-  const offer = rows[0];
-  if (!offer) return { status: "unchanged", error: "That offer is not open for this person." };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const linked = await client.query(`SELECT order_id FROM job_offers WHERE id = $1`, [offerId]);
+    if (!linked.rows[0]) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That offer is not open for this person." };
+    }
 
-  if (!accepted) {
-    // A decline must never resurrect a task that was blocked out from under
-    // it - blindly reopening to 'submitted' regardless of ethics_verdict is
-    // exactly how a BLOCK verdict got silently bypassed before: the order
-    // went back into matching, was accepted, and completed with nobody ever
-    // re-checking it. Blocked stays blocked.
-    await pool.query(
-      `UPDATE orders
-          SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
-              updated_at = now()
-        WHERE id = $1
-          AND NOT EXISTS (
-            SELECT 1 FROM job_offers
-             WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
-          )`,
-      [offer.order_id, offer.id],
+    // Serialize every accept on the order before touching an offer. Offer
+    // creation and counter acceptance use this same lock order.
+    const orderResult = await client.query(
+      `SELECT o.id, o.title, o.status, o.accepted_by, o.person_id,
+              p.phone AS requester_phone
+         FROM orders o
+         JOIN people p ON p.id = o.person_id
+        WHERE o.id = $1
+        FOR UPDATE OF o`,
+      [linked.rows[0].order_id],
     );
-    return { status: nextStatus, order_id: offer.order_id };
-  }
+    const order = orderResult.rows[0];
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That task is no longer open." };
+    }
 
-  const order = await pool.query(
-    `UPDATE orders
-        SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now(),
-            -- $3::numeric, or Postgres infers integer from the literal 0 and
-            -- an offered price of "200.00" fails to parse - which silently
-            -- broke accepting any offer whose price was not a whole number.
-            budget_usd = COALESCE(NULLIF($3::numeric, 0), budget_usd)
-      WHERE id = $1
-        AND accepted_by IS NULL
-        -- no_takers is paused, not withdrawn: somebody volunteering for one
-        -- must still be able to take it.
-        AND status IN ('submitted', 'offered', 'no_takers')
-      RETURNING id, title, person_id`,
-    [offer.order_id, offer.person_id, offer.offered_usd],
-  );
-  if (!order.rows[0]) {
-    await pool.query(
-      `UPDATE job_offers SET status = 'cancelled', responded_at = now() WHERE id = $1`,
+    const offerResult = await client.query(
+      `SELECT id, order_id, person_id, phone, offered_usd
+         FROM job_offers
+        WHERE id = $1 AND order_id = $2 AND status = 'offered'
+          AND ($3::text IS NULL OR phone = $3)
+        FOR UPDATE`,
+      [offerId, order.id, guard],
+    );
+    const offer = offerResult.rows[0];
+    if (!offer) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That offer is not open for this person." };
+    }
+
+    if (!accepted) {
+      await client.query(
+        `UPDATE job_offers SET status = $2, responded_at = now()
+          WHERE id = $1 AND status = 'offered'`,
+        [offer.id, nextStatus],
+      );
+      // A decline must never resurrect a task that was blocked out from under
+      // it. Only reopen a still-open order once no other worker holds it.
+      await client.query(
+        `UPDATE orders
+            SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+                updated_at = now()
+          WHERE id = $1 AND status IN ('submitted', 'offered', 'no_takers')
+            AND NOT EXISTS (
+              SELECT 1 FROM job_offers
+               WHERE order_id = $1 AND id <> $2
+                 AND status IN ('offered', 'countered', 'accepted')
+            )`,
+        [offer.order_id, offer.id],
+      );
+      await client.query("COMMIT");
+      return { status: nextStatus, order_id: offer.order_id };
+    }
+
+    const alreadyOwned = order.status === "accepted" && order.accepted_by === offer.person_id;
+    const orderIsOpen =
+      order.accepted_by == null && ["submitted", "offered", "no_takers"].includes(order.status);
+    if (!alreadyOwned && !orderIsOpen) {
+      await client.query(
+        `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+          WHERE id = $1 AND status = 'offered'`,
+        [offer.id],
+      );
+      await client.query("COMMIT");
+      return { status: "unchanged", error: "That task is no longer open." };
+    }
+
+    if (orderIsOpen) {
+      const updated = await client.query(
+        `UPDATE orders
+            SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now(),
+                budget_usd = COALESCE(NULLIF($3::numeric, 0), budget_usd)
+          WHERE id = $1 AND accepted_by IS NULL
+            AND status IN ('submitted', 'offered', 'no_takers')
+          RETURNING id`,
+        [offer.order_id, offer.person_id, offer.offered_usd],
+      );
+      if (!updated.rows[0]) {
+        await client.query("ROLLBACK");
+        return { status: "unchanged", error: "That task is no longer open." };
+      }
+    }
+
+    await client.query(
+      `UPDATE job_offers SET status = 'accepted', responded_at = now()
+        WHERE id = $1 AND status = 'offered'`,
       [offer.id],
     );
-    return { status: "unchanged", error: "That task is no longer open." };
-  }
-  // Nobody else is still on the hook for this one — including pending counters.
-  await pool.query(
-    `UPDATE job_offers SET status = 'cancelled', responded_at = now()
-      WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered')`,
-    [offer.order_id, offer.id],
-  );
-
-  const requester = await pool.query(`SELECT id, phone FROM people WHERE id = $1`, [
-    order.rows[0].person_id,
-  ]);
-  if (requester.rows[0]) {
-    await pool.query(
-      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
-       VALUES ($1,$2,$3,'worker_accepted',$4::jsonb)`,
-      [
-        requester.rows[0].id,
-        requester.rows[0].phone,
-        offer.order_id,
-        JSON.stringify({ title: order.rows[0].title, worker_phone: offer.phone }),
-      ],
+    // Nobody else is still on the hook, including rows left accepted by an
+    // interrupted older accept.
+    await client.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE order_id = $1 AND id <> $2
+          AND status IN ('offered', 'countered', 'accepted')`,
+      [offer.order_id, offer.id],
     );
+
+    if (!alreadyOwned) {
+      await client.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'worker_accepted',$4::jsonb)`,
+        [
+          order.person_id,
+          order.requester_phone,
+          offer.order_id,
+          JSON.stringify({ title: order.title, worker_phone: offer.phone }),
+        ],
+      );
+    }
+    await client.query("COMMIT");
+    return { status: "accepted", order_id: offer.order_id };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
-  return { status: "accepted", order_id: offer.order_id };
 }
 
 /**
@@ -275,122 +326,185 @@ export async function respondToCounter(
   requesterPhone: string,
   opts?: { release?: boolean },
 ): Promise<{ status: string; error?: string }> {
-  const { rows } = await pool.query(
-    `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd, j.offered_usd,
-            o.title, o.budget_usd
-       FROM job_offers j
-       JOIN orders o ON o.id = j.order_id
-       JOIN people p ON p.id = o.person_id
-      WHERE j.id = $1 AND j.status = 'countered' AND p.phone = $2`,
-    [offerId, normalizePhone(requesterPhone)],
-  );
-  const offer = rows[0];
-  if (!offer) return { status: "unchanged", error: "No counter is open on that offer." };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const linked = await client.query(`SELECT order_id FROM job_offers WHERE id = $1`, [offerId]);
+    if (!linked.rows[0]) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "No counter is open on that offer." };
+    }
 
-  if (!accept) {
-    // Timeout / "try next" must release the worker so the order can rematch.
-    // A normal requester "no" keeps the original price on the table.
-    if (opts?.release) {
-      await pool.query(
-        `UPDATE job_offers SET status = 'dropped', responded_at = now() WHERE id = $1`,
+    // Every path locks the order before its offer, matching offer creation and
+    // serializing two requester decisions against competing accepts.
+    const orderResult = await client.query(
+      `SELECT o.id, o.title, o.budget_usd, o.status, o.accepted_by
+         FROM orders o
+         JOIN people p ON p.id = o.person_id
+        WHERE o.id = $1 AND p.phone = $2
+        FOR UPDATE OF o`,
+      [linked.rows[0].order_id, normalizePhone(requesterPhone)],
+    );
+    const order = orderResult.rows[0];
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "No counter is open on that offer." };
+    }
+
+    const offerResult = await client.query(
+      `SELECT id, order_id, person_id, phone, counter_price_usd, offered_usd
+         FROM job_offers
+        WHERE id = $1 AND order_id = $2 AND status = 'countered'
+        FOR UPDATE`,
+      [offerId, order.id],
+    );
+    const offer = offerResult.rows[0];
+    if (!offer) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "No counter is open on that offer." };
+    }
+
+    const orderIsOpen =
+      order.accepted_by == null && ["submitted", "offered", "no_takers"].includes(order.status);
+    if (!orderIsOpen) {
+      if (order.status === "accepted" && order.accepted_by === offer.person_id) {
+        await client.query(
+          `UPDATE job_offers SET status = 'accepted', responded_at = now() WHERE id = $1`,
+          [offer.id],
+        );
+        await client.query(
+          `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+            WHERE order_id = $1 AND id <> $2
+              AND status IN ('offered', 'countered', 'accepted')`,
+          [offer.order_id, offer.id],
+        );
+        await client.query("COMMIT");
+        return { status: "accepted" };
+      }
+      await client.query(
+        `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+          WHERE id = $1 AND status = 'countered'`,
         [offer.id],
       );
-      await pool.query(
-        `UPDATE orders
-            SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
-                updated_at = now()
-          WHERE id = $1
-            AND NOT EXISTS (
-              SELECT 1 FROM job_offers
-               WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
-            )`,
-        [offer.order_id, offer.id],
+      await client.query("COMMIT");
+      return { status: "unchanged", error: "That task is no longer open." };
+    }
+
+    if (!accept) {
+      // Timeout / "try next" must release the worker so the order can rematch.
+      // A normal requester "no" keeps the original price on the table.
+      if (opts?.release) {
+        await client.query(
+          `UPDATE job_offers SET status = 'dropped', responded_at = now()
+            WHERE id = $1 AND status = 'countered'`,
+          [offer.id],
+        );
+        await client.query(
+          `UPDATE orders
+              SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+                  updated_at = now()
+            WHERE id = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM job_offers
+                 WHERE order_id = $1 AND id <> $2
+                   AND status IN ('offered', 'countered', 'accepted')
+              )`,
+          [offer.order_id, offer.id],
+        );
+        await client.query(
+          `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+           VALUES ($1,$2,$3,'counter_released',$4::jsonb)`,
+          [
+            offer.person_id,
+            offer.phone,
+            offer.order_id,
+            JSON.stringify({
+              title: order.title,
+              asked_usd: Number(offer.counter_price_usd),
+              offer_id: String(offer.id),
+            }),
+          ],
+        );
+        await client.query("COMMIT");
+        return { status: "released" };
+      }
+      await client.query(
+        `UPDATE job_offers
+            SET status = 'offered', countered_at = NULL, counter_price_usd = NULL,
+                counter_note = NULL, outreach_sent_at = now(), responded_at = NULL
+          WHERE id = $1 AND status = 'countered'`,
+        [offer.id],
       );
-      await pool.query(
+      await client.query(
         `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
-         VALUES ($1,$2,$3,'counter_released',$4::jsonb)`,
+         VALUES ($1,$2,$3,'counter_declined',$4::jsonb)`,
         [
           offer.person_id,
           offer.phone,
           offer.order_id,
           JSON.stringify({
-            title: offer.title,
+            title: order.title,
             asked_usd: Number(offer.counter_price_usd),
+            still_offered_usd: offer.offered_usd
+              ? Number(offer.offered_usd)
+              : order.budget_usd
+                ? Number(order.budget_usd)
+                : null,
             offer_id: String(offer.id),
           }),
         ],
       );
-      return { status: "released" };
+      await client.query("COMMIT");
+      return { status: "declined" };
     }
-    await pool.query(
-      `UPDATE job_offers
-          SET status = 'offered', countered_at = NULL, counter_price_usd = NULL
-        WHERE id = $1`,
+
+    const counterPrice = Number(offer.counter_price_usd);
+    if (!Number.isFinite(counterPrice) || counterPrice <= 0) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That counter has an invalid price." };
+    }
+    const accepted = await client.query(
+      `UPDATE orders
+          SET budget_usd = $2::numeric, status = 'accepted', accepted_by = $3,
+              accepted_at = now(), updated_at = now()
+        WHERE id = $1 AND accepted_by IS NULL
+          AND status IN ('submitted', 'offered', 'no_takers')
+        RETURNING id`,
+      [offer.order_id, counterPrice, offer.person_id],
+    );
+    if (!accepted.rows[0]) {
+      await client.query("ROLLBACK");
+      return { status: "unchanged", error: "That task is no longer open." };
+    }
+    await client.query(
+      `UPDATE job_offers SET status = 'accepted', responded_at = now()
+        WHERE id = $1 AND status = 'countered'`,
       [offer.id],
     );
-    await pool.query(
+    await client.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE order_id = $1 AND id <> $2
+          AND status IN ('offered', 'countered', 'accepted')`,
+      [offer.order_id, offer.id],
+    );
+    await client.query(
       `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
-       VALUES ($1,$2,$3,'counter_declined',$4::jsonb)`,
+       VALUES ($1,$2,$3,'counter_accepted',$4::jsonb)`,
       [
         offer.person_id,
         offer.phone,
         offer.order_id,
-        JSON.stringify({
-          title: offer.title,
-          asked_usd: Number(offer.counter_price_usd),
-          still_offered_usd: offer.offered_usd
-            ? Number(offer.offered_usd)
-            : offer.budget_usd
-              ? Number(offer.budget_usd)
-              : null,
-          offer_id: String(offer.id),
-        }),
+        JSON.stringify({ title: order.title, agreed_usd: counterPrice }),
       ],
     );
-    return { status: "declined" };
+    await client.query("COMMIT");
+    return { status: "accepted" };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
-
-  const counterPrice = Number(offer.counter_price_usd);
-  if (!Number.isFinite(counterPrice) || counterPrice <= 0) {
-    return { status: "unchanged", error: "That counter has an invalid price." };
-  }
-  const accepted = await pool.query(
-    `UPDATE orders
-        SET budget_usd = NULLIF($2::numeric, 0), status = 'accepted', accepted_by = $3,
-            accepted_at = now(), updated_at = now()
-      WHERE id = $1
-        AND accepted_by IS NULL
-        AND status IN ('submitted', 'offered', 'no_takers')
-      RETURNING id`,
-    [offer.order_id, counterPrice, offer.person_id],
-  );
-  if (!accepted.rows[0]) {
-    await pool.query(
-      `UPDATE job_offers SET status = 'declined', responded_at = now() WHERE id = $1`,
-      [offer.id],
-    );
-    return { status: "unchanged", error: "That task is no longer open." };
-  }
-  await pool.query(
-    `UPDATE job_offers SET status = 'accepted', responded_at = now() WHERE id = $1`,
-    [offer.id],
-  );
-  await pool.query(
-    `UPDATE job_offers SET status = 'cancelled', responded_at = now()
-      WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered')`,
-    [offer.order_id, offer.id],
-  );
-  await pool.query(
-    `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
-     VALUES ($1,$2,$3,'counter_accepted',$4::jsonb)`,
-    [
-      offer.person_id,
-      offer.phone,
-      offer.order_id,
-      JSON.stringify({ title: offer.title, agreed_usd: Number(offer.counter_price_usd) }),
-    ],
-  );
-  return { status: "accepted" };
 }
 
 // ---------------------------------------------------------------- completion
@@ -1195,23 +1309,32 @@ export async function claimTask(orderId: string, workerPhone: string) {
   }
 
   const worker = await upsertPerson(e164);
-  // Someone actively volunteering beats someone sitting on an unanswered ask.
-  // Without this the claim fails on the order's own pending offer and the
-  // volunteer is told no, which is how Daphne was refused a job she offered
-  // to do twice.
-  await pool.query(
-    `UPDATE job_offers SET status = 'cancelled', responded_at = now()
-      WHERE order_id = $1 AND phone <> $2 AND status IN ('offered', 'countered')`,
-    [order.id, e164],
-  );
   // Reuse their existing offer if one is already open to them; otherwise make
-  // one so there is a row to accept and to settle against later.
+  // one so there is a row to accept and to settle against later. Keep any
+  // current holder live until resolveOffer secures this claim; its successful
+  // accept path then cancels competitors, while a failed claim leaves them be.
   const { rows: offerRows } = await pool.query(
     `INSERT INTO job_offers (order_id, person_id, phone, status, reason, offered_usd, outreach_sent_at)
      VALUES ($1,$2,$3,'offered','They volunteered for it.',$4, now())
      ON CONFLICT (order_id, phone) DO UPDATE
-       SET status = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
-                         THEN 'offered' ELSE job_offers.status END
+       SET status = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                         THEN 'offered' ELSE job_offers.status END,
+           offered_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                              THEN EXCLUDED.offered_usd ELSE job_offers.offered_usd END,
+           reason = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                         THEN EXCLUDED.reason ELSE job_offers.reason END,
+           outreach_sent_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                                   THEN now() ELSE job_offers.outreach_sent_at END,
+           responded_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                               THEN NULL ELSE job_offers.responded_at END,
+           counter_rounds = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                                 THEN 0 ELSE job_offers.counter_rounds END,
+           counter_price_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                                    THEN NULL ELSE job_offers.counter_price_usd END,
+           countered_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                               THEN NULL ELSE job_offers.countered_at END,
+           counter_note = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded','countered')
+                               THEN NULL ELSE job_offers.counter_note END
      RETURNING id, status`,
     [order.id, worker.id, e164, order.budget_usd ?? null],
   );
@@ -1221,15 +1344,27 @@ export async function claimTask(orderId: string, workerPhone: string) {
     // Their offer says accepted but the task may not have caught up - that
     // split is exactly what a non-transactional accept leaves behind. Finish
     // the job rather than reporting success on half of it.
-    if (order.status !== "accepted") {
-      await pool.query(
-        `UPDATE orders
-            SET status = 'accepted', accepted_by = $2, accepted_at = COALESCE(accepted_at, now()),
-                updated_at = now()
-          WHERE id = $1 AND status IN ('submitted', 'offered', 'no_takers')`,
-        [order.id, worker.id],
-      );
+    const repaired = await pool.query(
+      `UPDATE orders
+          SET status = 'accepted', accepted_by = $2, accepted_at = COALESCE(accepted_at, now()),
+              updated_at = now()
+        WHERE id = $1 AND accepted_by IS NULL
+          AND status IN ('submitted', 'offered', 'no_takers')
+        RETURNING id`,
+      [order.id, worker.id],
+    );
+    if (!repaired.rows[0]) {
+      const current = await pool.query(`SELECT accepted_by FROM orders WHERE id = $1`, [order.id]);
+      if (current.rows[0]?.accepted_by !== worker.id) {
+        return { error: "not_available" as const };
+      }
     }
+    await pool.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE order_id = $1 AND id <> $2
+          AND status IN ('offered', 'countered', 'accepted')`,
+      [order.id, offer.id],
+    );
     return { status: "already_yours" as const, order_id: order.id, title: order.title };
   }
 

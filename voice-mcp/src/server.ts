@@ -502,10 +502,14 @@ app.get("/v1/offers/outreach", async (_req, res) => {
 });
 
 app.post("/v1/offers/:id/sent", async (req, res) => {
-  await pool.query(`UPDATE job_offers SET outreach_sent_at = now() WHERE id = $1`, [
-    req.params.id,
-  ]);
-  res.json({ ok: true });
+  const { rows } = await pool.query(
+    `UPDATE job_offers SET outreach_sent_at = now()
+      WHERE id = $1 AND status = 'offered' AND outreach_sent_at IS NULL
+      RETURNING id`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(409).json({ ok: false, error: "offer is not awaiting outreach" });
+  res.json({ ok: true, data: rows[0] });
 });
 
 /**

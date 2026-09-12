@@ -2,7 +2,7 @@
  * @owner Daphne
  * Ethics + arbitration — reviewTask, reviewAmendment, arbitrateMove, reviewComment
  */
-import type { StructuredTask } from "@/lib/types/task";
+import type { StructuredTask, TaskCategory } from "@/lib/types/task";
 import type {
   AmendmentVerdict,
   ArbitrateInput,
@@ -16,6 +16,66 @@ import {
   looksLikeBarterPay,
 } from "@/lib/prompts/ethics-denylist";
 import { HANDBOOK_REASONS } from "@/lib/prompts/ethics-handbook";
+
+const TASK_CATEGORIES: TaskCategory[] = [
+  "pickup",
+  "food",
+  "moving",
+  "errand",
+  "tutoring_allowed",
+  "other",
+];
+
+/**
+ * HTTP payloads from voice-mcp use `description` (the order details) and
+ * sometimes snake_case / missing price. Fold those onto StructuredTask so the
+ * same-job check actually sees what the person said.
+ */
+export function parseEthicsStructured(raw: unknown): StructuredTask | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const title = typeof o.title === "string" ? o.title.trim() : "";
+  if (!title) return null;
+
+  let category: string =
+    typeof o.category === "string" && o.category.trim() ? o.category.trim() : "other";
+  if (category === "tutoring") category = "tutoring_allowed";
+  if (!(TASK_CATEGORIES as string[]).includes(category)) category = "other";
+
+  const extras = [o.description, o.details]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+  const fromArray = Array.isArray(o.requirements)
+    ? o.requirements.filter((v): v is string => typeof v === "string")
+    : [];
+  const requirements = [...fromArray, ...extras];
+
+  const pickup = o.pickupLocation ?? o.pickup_location;
+  const dropoff = o.dropoffLocation ?? o.dropoff_location;
+  const priceRaw = o.maxPriceUsd;
+  const maxPriceUsd =
+    typeof priceRaw === "number" && Number.isFinite(priceRaw)
+      ? priceRaw
+      : typeof priceRaw === "string" && Number.isFinite(Number(priceRaw))
+        ? Number(priceRaw)
+        : 0;
+
+  return {
+    title,
+    category: category as TaskCategory,
+    pickupLocation:
+      typeof pickup === "string" && pickup.trim() ? pickup.trim() : undefined,
+    dropoffLocation:
+      typeof dropoff === "string" && dropoff.trim() ? dropoff.trim() : undefined,
+    deadline: typeof o.deadline === "string" ? o.deadline : undefined,
+    maxPriceUsd,
+    estimatedMinutes:
+      typeof o.estimatedMinutes === "number" && Number.isFinite(o.estimatedMinutes)
+        ? o.estimatedMinutes
+        : undefined,
+    requirements: requirements.length ? requirements : undefined,
+  };
+}
 
 const PRICE_FIELDS = new Set(["maxPriceUsd", "estimatedMinutes"]);
 
