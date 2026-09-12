@@ -240,15 +240,64 @@ const MAX_OUTREACH_ATTEMPTS = 3;
  */
 const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || process.env.VIDEO_WAIT_MS || 420_000);
 
+function confirmationLine(handoff: Handoff, url?: string | null): string {
+  const price = handoff.payload?.budget_usd;
+  const priceText = price && Number(price) > 0 ? ` at $${price}` : "";
+  const head = `Your request is in: ${handoff.payload?.title}${priceText}.`;
+  if (url) return `${head} Watch it live at: ${url}`;
+  return `${head} I'll text you when someone picks it up.`;
+}
+
+/** Keep the live URL intact — the usual 320-char cut can slice it off. */
+function shortenHandoff(text: string): string {
+  const marker = " Watch it live at: ";
+  const at = text.lastIndexOf(marker);
+  if (at === -1) return shorten(text);
+  const url = text.slice(at + marker.length).trim();
+  const budget = Math.max(80, config.maxReplyChars - marker.length - url.length);
+  return `${shorten(text.slice(0, at), budget)}${marker}${url}`;
+}
+
+async function openLiveBoard(order: {
+  id: string;
+  title: string;
+  category?: string | null;
+  deadlineAt?: string | null;
+  slots?: number;
+}): Promise<{ token: string; url: string; created: boolean } | null> {
+  return startLiveBoard({
+    orderId: order.id,
+    title: order.title,
+    category: order.category,
+    deadlineAt: order.deadlineAt,
+    slots: order.slots ?? 3,
+  });
+}
+
+async function textLiveLink(
+  phone: string | null | undefined,
+  title: string,
+  url: string,
+  orderId: string,
+): Promise<void> {
+  if (!phone || !url) return;
+  await sayTo(
+    phone,
+    `On your "${title}" — already matching. Watch it live: ${url}`,
+    `gotchu-live-${orderId}`,
+    "agent_action",
+    null,
+    "SMS",
+  );
+}
+
 function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "call_summary") {
     const resolution = handoff.resolution || handoff.payload?.resolution || "";
     return `From your call: ${handoff.payload?.summary || handoff.summary || ""} ${resolution}`.trim();
   }
   if (handoff.kind === "order_confirmation") {
-    const price = handoff.payload?.budget_usd;
-    const priceText = price && Number(price) > 0 ? ` at $${price}` : "";
-    return `Your request is in: ${handoff.payload?.title}${priceText}. I'll text you when someone picks it up.`;
+    return confirmationLine(handoff);
   }
   if (handoff.kind === "worker_accepted") {
     return `Someone just took your request: ${handoff.payload?.title}. I'll let you know when it's done.`;
@@ -314,6 +363,16 @@ function handoffText(handoff: Handoff): string | null {
  */
 async function matchOpenOrders(): Promise<void> {
   for (const order of await market.openOrders()) {
+    const live = await openLiveBoard({
+      id: order.id,
+      title: order.title,
+      category: order.category,
+      deadlineAt: order.deadline_at,
+    });
+    if (live?.created) {
+      await textLiveLink(order.requester_phone, order.title, live.url, order.id);
+    }
+
     const candidates = await market.candidates(order.id);
     if (!candidates.length) continue;
 
@@ -324,13 +383,6 @@ async function matchOpenOrders(): Promise<void> {
     }
     const pick = picks[0];
     if (!pick) continue;
-    const live = await startLiveBoard({
-      orderId: order.id,
-      title: order.title,
-      category: order.category,
-      deadlineAt: order.deadline_at,
-      slots: Math.max(picks.length, 2),
-    });
     const travelNote = pick.travel
       ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
       : undefined;
@@ -369,14 +421,7 @@ async function matchOpenOrders(): Promise<void> {
           `gotchu-prime-${order.id}-${pick.offerUsd}`,
         );
         if (live?.url) {
-          await sayTo(
-            order.requester_phone,
-            `On your "${order.title}" — already matching. Watch it live: ${live.url}`,
-            `gotchu-live-${order.id}`,
-            "agent_action",
-            null,
-            "SMS",
-          );
+          await textLiveLink(order.requester_phone, order.title, live.url, order.id);
         }
       }
     }
@@ -490,7 +535,18 @@ async function sendOutreach(): Promise<void> {
  */
 async function deliverHandoffs(): Promise<void> {
   for (const handoff of await undeliveredHandoffs()) {
-    const text = handoffText(handoff);
+    let text = handoffText(handoff);
+    if (handoff.kind === "order_confirmation" && handoff.order_id) {
+      const live = await openLiveBoard({
+        id: handoff.order_id,
+        title: String(handoff.payload?.title ?? "Your request"),
+        category: handoff.payload?.category ?? null,
+        deadlineAt: handoff.payload?.deadline_at ?? null,
+      });
+      if (live?.url) {
+        text = confirmationLine(handoff, live.url);
+      }
+    }
     if (!text) continue;
 
     // A handoff aimed at a malformed number can never be delivered; retrying
@@ -536,13 +592,14 @@ async function deliverHandoffs(): Promise<void> {
     const attemptNo = (prior?.attempts ?? 0) + 1;
     // A retry needs a fresh key: replaying the old one returns the original
     // response and sends nothing.
-    const sent = await sendText(handoff.phone, shorten(text), `handoff-${handoff.id}-a${attemptNo}`);
+    const outbound = shortenHandoff(text);
+    const sent = await sendText(handoff.phone, outbound, `handoff-${handoff.id}-a${attemptNo}`);
     // A counter notification has to remember the offer, not the order: that is
     // what answering it needs.
     const refId = handoff.kind === "counter_received"
       ? String(handoff.payload?.offer_id ?? "")
       : String(handoff.order_id ?? "");
-    await recordSent(sent.requestId, handoff.phone, handoff.kind, refId, shorten(text));
+    await recordSent(sent.requestId, handoff.phone, handoff.kind, refId, outbound);
 
     if (sent.permanent) {
       await markHandoffDelivered(handoff.id);

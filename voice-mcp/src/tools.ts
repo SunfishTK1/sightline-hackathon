@@ -310,7 +310,12 @@ export const tools: ToolDef[] = [
           e164,
           callId,
           order.id,
-          JSON.stringify({ title: order.title, budget_usd: order.budget_usd }),
+          JSON.stringify({
+            title: order.title,
+            budget_usd: order.budget_usd,
+            category: order.category,
+            deadline_at: order.deadline_at,
+          }),
         ],
       );
       return { order_id: order.id, status: order.status, created_at: order.created_at };
