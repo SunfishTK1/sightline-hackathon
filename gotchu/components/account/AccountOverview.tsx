@@ -54,7 +54,9 @@ function TaskList({ items, emptyText, counterpartLabel }: {
             <p className="text-xs text-muted-foreground">
               {formatDate(item.createdAt)}
               {item.counterpartName ? ` · ${counterpartLabel} ${item.counterpartName}` : ""}
-              {item.budgetUsd && Number(item.budgetUsd) > 0 ? ` · $${item.budgetUsd}` : ""}
+              {item.budgetUsd && Number(item.budgetUsd) > 0
+                ? ` · ${Math.round(Number(item.budgetUsd))} railcoins`
+                : ""}
             </p>
           </div>
           <Badge variant={statusVariant(item.status)} className="shrink-0">
