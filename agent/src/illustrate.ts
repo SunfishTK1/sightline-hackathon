@@ -1,6 +1,9 @@
 import { config } from "./config.js";
+import { likenessFor } from "./likeness.js";
 
 const IMAGE_URL = "https://api.openai.com/v1/images/generations";
+/** Same model, but conditioned on a reference photo of the person. */
+const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
 const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-sunburst";
 
 export type IllustratableOrder = {
@@ -63,6 +66,43 @@ export function buildImagePrompt(order: IllustratableOrder): string {
 export async function generateTaskImage(
   order: IllustratableOrder,
 ): Promise<{ png: Buffer; prompt: string } | null> {
+  // A still holds a likeness far better than a clip does - Sora only
+  // conditions its first frame, so the face drifts - which makes the picture
+  // the place where looking like the actual person is worth doing.
+  const likeness = await likenessFor(order.requester_phone, "image");
+  if (likeness) {
+    const prompt = `${buildImagePrompt(order)} The person doing the task is the student in the reference photo: keep their face, hair, and skin tone recognisably the same. Do not copy the reference's background or clothing - place them in the scene described above.`;
+    const form = new FormData();
+    form.append("model", IMAGE_MODEL);
+    form.append("prompt", prompt);
+    form.append("size", "1024x1024");
+    form.append(
+      "image[]",
+      new Blob([new Uint8Array(likeness.png)], { type: "image/png" }),
+      "reference.png",
+    );
+    try {
+      const res = await fetch(IMAGE_EDIT_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${config.openaiKey}` },
+        body: form,
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { data?: Array<{ b64_json?: string }> };
+        const b64 = body.data?.[0]?.b64_json;
+        if (b64) {
+          console.log(`drew "${order.title}" with the requester's likeness`);
+          return { png: Buffer.from(b64, "base64"), prompt };
+        }
+      }
+      // Refusing a real face is expected, not exceptional. Fall through to the
+      // ordinary picture rather than leaving the task without one.
+      console.error(`likeness image refused (HTTP ${res.status}) for "${order.title}"`);
+    } catch (err) {
+      console.error(`likeness image failed for "${order.title}": ${(err as Error).message}`);
+    }
+  }
+
   const prompt = buildImagePrompt(order);
   try {
     const res = await fetch(IMAGE_URL, {

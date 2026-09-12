@@ -4,10 +4,19 @@ import { config } from "./config.js";
  * Thin client over the voice MCP service's REST mirror. Both the phone agent
  * and the voice agent write through it, so one order table serves both.
  */
+function voiceHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (config.voiceMcpToken) {
+    headers.Authorization = `Bearer ${config.voiceMcpToken}`;
+    headers["x-api-key"] = config.voiceMcpToken;
+  }
+  return headers;
+}
+
 async function callTool<T = any>(name: string, input: Record<string, unknown>): Promise<T> {
   const res = await fetch(`${config.voiceMcpUrl}/v1/tools/${name}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: voiceHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(input),
   });
   const body = (await res.json().catch(() => ({}))) as any;
@@ -37,7 +46,7 @@ export type MyOrder = {
 // ---------------------------------------------------------------- marketplace
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${config.voiceMcpUrl}${path}`);
+  const res = await fetch(`${config.voiceMcpUrl}${path}`, { headers: voiceHeaders() });
   if (!res.ok) throw new Error(`GET ${path}: HTTP ${res.status}`);
   return ((await res.json()) as any).data as T;
 }
@@ -45,7 +54,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${config.voiceMcpUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: voiceHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body ?? {}),
   });
   const parsed = (await res.json().catch(() => ({}))) as any;
@@ -75,6 +84,8 @@ export type Outreach = OpenJob & {
   offered_usd?: string | null;
   created_at?: string;
   travel_note?: string | null;
+  /** Who asked for the task - needed to look up their likeness consent. */
+  requester_phone?: string | null;
 };
 
 /** A worker's proposed price, waiting on the requester. */
@@ -90,6 +101,8 @@ export type OpenCounter = {
 
 export const market = {
   openOrders: () => get<any[]>("/v1/orders/open"),
+  getOrder: (orderId: string) =>
+    get<{ requester_phone?: string; status?: string }>(`/v1/orders/${orderId}`),
   candidates: (orderId: string) => get<any[]>(`/v1/orders/${orderId}/candidates`),
   createOffer: (
     order_id: string,
@@ -110,8 +123,8 @@ export const market = {
   /** A person can be holding several offers at once. */
   openJobs: (phone: string) =>
     get<OpenJob[]>(`/v1/offers/open?phone=${encodeURIComponent(phone)}`),
-  respond: (id: string, accepted: boolean) =>
-    post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted }),
+  respond: (id: string, accepted: boolean, phone?: string) =>
+    post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted, phone }),
 
   /** The broker's price for a live offer. Never the requester's budget. */
   setOfferPrice: (id: string, offered_usd: number) =>
@@ -119,8 +132,8 @@ export const market = {
 
   counter: (id: string, phone: string, price_usd: number, note?: string) =>
     post<{ status: string }>(`/v1/offers/${id}/counter`, { phone, price_usd, note }),
-  respondToCounter: (id: string, phone: string, accept: boolean) =>
-    post<{ status: string }>(`/v1/offers/${id}/counter/respond`, { phone, accept }),
+  respondToCounter: (id: string, phone: string, accept: boolean, release = false) =>
+    post<{ status: string }>(`/v1/offers/${id}/counter/respond`, { phone, accept, release }),
   /** Counters waiting on this person's decision, for tasks they asked for. */
   openCounters: (phone: string) =>
     get<OpenCounter[]>(`/v1/counters/open?phone=${encodeURIComponent(phone)}`),
@@ -233,6 +246,7 @@ export type Escalation = {
   phone: string;
   name: string | null;
   offer_id?: string;
+  order_id?: string;
   question_id?: string;
   reason: "offer_unanswered" | "counter_undecided" | "question_unanswered";
   minutes_waiting: number;
@@ -293,12 +307,17 @@ export type Handoff = {
 };
 
 export async function undeliveredHandoffs(): Promise<Handoff[]> {
-  const res = await fetch(`${config.voiceMcpUrl}/v1/handoffs?limit=20`);
+  const res = await fetch(`${config.voiceMcpUrl}/v1/handoffs?limit=20`, {
+    headers: voiceHeaders(),
+  });
   if (!res.ok) throw new Error(`handoffs failed: HTTP ${res.status}`);
   const body = (await res.json()) as { data: Handoff[] };
   return body.data ?? [];
 }
 
 export async function markHandoffDelivered(id: string): Promise<void> {
-  await fetch(`${config.voiceMcpUrl}/v1/handoffs/${id}/delivered`, { method: "POST" });
+  await fetch(`${config.voiceMcpUrl}/v1/handoffs/${id}/delivered`, {
+    method: "POST",
+    headers: voiceHeaders(),
+  });
 }

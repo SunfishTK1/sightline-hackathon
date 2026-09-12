@@ -203,10 +203,10 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       if (result && pending?.order_id) {
         await postLiveEvent({
           orderId: pending.order_id,
-          kind: "declined",
-          message: "The counter was turned down. Still looking.",
+          kind: "countered",
+          message: "Passed on that price — still waiting on them.",
           offerId: String(prior.ref_id),
-          state: "declined",
+          state: "waiting",
         });
       }
     }
@@ -266,6 +266,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       turns.push({ role: "assistant", content: reply, at: new Date().toISOString() });
     }
     log(`-> ${phone} [reaction] ${sent.accepted ? "sent" : "FAILED"}: ${reply}`);
+    await saveTurns(phone, turns);
+    if (sent.accepted || sent.permanent) {
+      await completeEvent(event.id);
+    }
+    return;
   }
   await saveTurns(phone, turns);
   await completeEvent(event.id);
@@ -435,6 +440,9 @@ function handoffText(handoff: Handoff): string | null {
       : " It's still open at the original price if you want it.";
     return `They passed on $${handoff.payload?.asked_usd} for "${handoff.payload?.title}".${still}`;
   }
+  if (handoff.kind === "counter_released") {
+    return `They moved on from your counter on "${handoff.payload?.title}", so I'm asking someone else.`;
+  }
   return null;
 }
 
@@ -456,7 +464,14 @@ async function matchOpenOrders(): Promise<void> {
     }
 
     const candidates = await market.candidates(order.id);
-    if (!candidates.length) continue;
+    if (!candidates.length) {
+      const result = await market.noMatch(String(order.id)).catch(() => null);
+      log(
+        `no candidates left for "${order.title}"` +
+          (result?.parked ? " - parked, requester told" : ""),
+      );
+      continue;
+    }
 
     const picks = await pickWorkers(order, candidates);
     if (!picks.length) {
@@ -560,8 +575,11 @@ async function sendOutreach(): Promise<void> {
           pickup_location: offer.pickup_location ?? null,
           dropoff_location: offer.dropoff_location ?? null,
           budget_usd: offer.budget_usd ?? null,
-          // Only used to attribute the clip; the outreach row does not carry it.
-          requester_phone: "",
+          // Needed, not decorative: this is how the film finds out whether the
+          // requester agreed to appear in it. Passing "" here meant every film
+          // started by an outreach hold - which is most of them - silently
+          // skipped the likeness.
+          requester_phone: offer.requester_phone ?? "",
         }).catch(() => false);
       }
       const missing = [!png && "its picture", !mp4 && "its film"].filter(Boolean).join(" and ");
@@ -613,8 +631,9 @@ async function sendOutreach(): Promise<void> {
       continue;
     }
     if (attempt >= MAX_OUTREACH_ATTEMPTS) {
-      // Stop asking. Otherwise an unreachable number is re-texted forever.
-      await market.markOutreachSent(offer.id);
+      // They never got the text. Marking it sent would hold the exclusive
+      // slot for ten minutes; decline so rematch can move on now.
+      await market.respond(offer.id, false).catch(() => null);
       log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
       continue;
     }
@@ -747,7 +766,15 @@ async function sayTo(
 async function applyLiveSkips(): Promise<void> {
   for (const skip of await listLiveSkips()) {
     if (skip.offerId) {
-      await market.respond(skip.offerId, false).catch(() => null);
+      const order = await market.getOrder(skip.orderId).catch(() => null);
+      const phone = order?.requester_phone;
+      const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
+      const countered = counters.find((c) => String(c.id) === String(skip.offerId));
+      if (countered && phone) {
+        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null);
+      } else {
+        await market.respond(skip.offerId, false).catch(() => null);
+      }
       await postLiveEvent({
         orderId: skip.orderId,
         kind: "skipped",
@@ -807,7 +834,7 @@ async function expireStaleOffers(): Promise<void> {
         decision: "TIMEOUT",
       });
       if (verdict && verdict.action !== "TRY_NEXT") continue;
-      await market.respondToCounter(counter.id, counter.requester_phone, false);
+      await market.respondToCounter(counter.id, counter.requester_phone, false, true);
       if (counter.order_id) {
         await postLiveEvent({
           orderId: counter.order_id,
@@ -842,11 +869,38 @@ async function autoNegotiate(): Promise<void> {
   const now = Date.now();
 
   for (const offer of offers) {
-    if (offer.auto_counter === false || !offer.min_price_usd) continue;
     if (now - new Date(offer.outreach_sent_at).getTime() < config.negotiationGraceMs) continue;
 
-    const min = Number(offer.min_price_usd);
+    const min = offer.min_price_usd != null ? Number(offer.min_price_usd) : null;
     const pays = Number(offer.offered_usd ?? offer.budget_usd ?? 0);
+    const hasPrice = Number(offer.offered_usd ?? 0) > 0 || Number(offer.budget_usd ?? 0) > 0;
+
+    if (offer.auto_accept && min != null && pays >= min) {
+      try {
+        await market.respond(offer.id, true, offer.phone);
+        if (offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "accepted",
+            message: "Taken automatically at their minimum.",
+            offerId: String(offer.id),
+            state: "accepted",
+          });
+        }
+        await sayTo(
+          offer.phone,
+          `"${offer.title}" came in at $${pays}, at or above your $${min} minimum, so I took it for you.`,
+          `gotchu-autoaccept-${offer.id}`,
+        );
+        log(`auto-accepted offer ${offer.id} at $${pays}`);
+      } catch (err) {
+        log(`auto-accept failed on offer ${offer.id}: ${(err as Error).message}`);
+      }
+      continue;
+    }
+
+    if (offer.auto_counter === false || min == null) continue;
+    if (!hasPrice) continue; // open budget: leave it to the human
     if (pays >= min) continue; // fine as offered; their call to take it
 
     try {
@@ -870,10 +924,10 @@ async function autoNegotiate(): Promise<void> {
         if (offer.order_id) {
           await postLiveEvent({
             orderId: offer.order_id,
-            kind: "declined",
-            message: "Declined. Trying the next person.",
+            kind: "timeout",
+            message: "Trying the next person.",
             offerId: String(offer.id),
-            state: "declined",
+            state: "dropped",
           });
         }
         log(`broker said try next on offer ${offer.id}`);
@@ -928,14 +982,14 @@ async function autoNegotiate(): Promise<void> {
         round: Number(counter.counter_rounds ?? 0),
       });
       if (verdict?.action === "TRY_NEXT") {
-        await market.respondToCounter(counter.id, counter.requester_phone, false);
+        await market.respondToCounter(counter.id, counter.requester_phone, false, true);
         if (counter.order_id) {
           await postLiveEvent({
             orderId: counter.order_id,
-            kind: "declined",
-            message: "Declined. Trying the next person.",
+            kind: "timeout",
+            message: "Trying the next person.",
             offerId: String(counter.id),
-            state: "declined",
+            state: "dropped",
           });
         }
         log(`broker said try next on counter ${counter.id}`);
@@ -997,17 +1051,51 @@ async function chaseStuckItems(): Promise<void> {
           "offer_released",
           item.offer_id,
         );
+        if (item.order_id) {
+          await postLiveEvent({
+            orderId: item.order_id,
+            kind: "timeout",
+            message: "No reply in time. Trying the next person.",
+            offerId: item.offer_id,
+            state: "dropped",
+          });
+        }
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
-        await market.respondToCounter(item.offer_id, item.phone, false).catch(() => null);
+        await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
         await sayTo(
           item.phone,
-          `No answer on that counter-offer for "${item.about}", so it's expired. The job stays open at your price.`,
+          `No answer on that counter-offer for "${item.about}", so it's expired. I'm asking someone else.`,
           `gotchu-counterexpired-${item.offer_id}`,
           "counter_expired",
           item.offer_id,
         );
+        if (item.order_id) {
+          await postLiveEvent({
+            orderId: item.order_id,
+            kind: "timeout",
+            message: "No decision in time. Trying the next person.",
+            offerId: item.offer_id,
+            state: "dropped",
+          });
+        }
         log(`expired counter ${item.offer_id} after ${strike - 1} notices`);
+      } else if (item.reason === "question_unanswered" && item.question_id) {
+        await market
+          .answerQuestion(
+            item.question_id,
+            item.phone,
+            "No answer in time. The worker can go ahead without this.",
+          )
+          .catch(() => null);
+        await sayTo(
+          item.phone,
+          `No answer on that question about "${item.about}", so I've closed it. The job is still moving.`,
+          `gotchu-questionexpired-${item.question_id}`,
+          "question_expired",
+          item.question_id,
+        );
+        log(`expired question ${item.question_id} after ${strike - 1} notices`);
       }
       continue;
     }

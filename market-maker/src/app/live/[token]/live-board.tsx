@@ -153,6 +153,7 @@ export function LiveBoard({
     cluster: string | null;
     canPay: boolean;
     alreadyPaid: boolean;
+    needsRetry?: boolean;
   };
 }) {
   const [board, setBoard] = useState(initial);
@@ -333,6 +334,7 @@ export function LiveBoard({
           cluster={money.cluster}
           canPay={money.canPay}
           alreadyPaid={money.alreadyPaid}
+          needsRetry={money.needsRetry}
         />
       ) : null}
 

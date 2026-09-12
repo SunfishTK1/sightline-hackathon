@@ -22,6 +22,7 @@ export function TaskMoney({
   cluster,
   canPay,
   alreadyPaid,
+  needsRetry,
 }: {
   token: string;
   railcoins: number | null;
@@ -31,6 +32,7 @@ export function TaskMoney({
   canPay: boolean;
   /** Settled before this page was opened, so say so instead of going quiet. */
   alreadyPaid: boolean;
+  needsRetry?: boolean;
 }) {
   const [balance, setBalance] = useState(requesterBalance);
   const [paying, setPaying] = useState(false);
@@ -53,6 +55,10 @@ export function TaskMoney({
               ? "Nobody has taken this yet, so there is nobody to pay."
               : "That did not go through. Try again.",
         );
+        return;
+      }
+      if (!json.paid) {
+        setError("Payment did not settle. Try again.");
         return;
       }
       setPaid(true);
@@ -115,10 +121,16 @@ export function TaskMoney({
             disabled={paying}
             className="w-full rounded-xl bg-[#1f5c3a] px-5 py-3 text-base font-medium text-white disabled:opacity-60 sm:w-auto sm:px-8"
           >
-            {paying ? "Paying…" : `Got it — pay ${railcoins ?? ""} railcoins`}
+            {paying
+              ? "Paying…"
+              : needsRetry
+                ? "Retry payment"
+                : `Got it — pay ${railcoins ?? ""} railcoins`}
           </button>
           <p className="mt-2 text-sm text-zinc-500">
-            One tap marks it received and pays them. There is no undo.
+            {needsRetry
+              ? "The task is done, but railcoins did not move. Try again."
+              : "One tap marks it received and pays them. There is no undo."}
           </p>
         </div>
       ) : null}

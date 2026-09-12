@@ -1,16 +1,20 @@
 /** @owner Daphne — POST ethics review */
 import { NextResponse } from "next/server";
 import { reviewTask } from "@/lib/agents/ethics";
-import type { StructuredTask } from "@/lib/types/task";
+import { structuredTaskSchema } from "@/lib/validate";
 
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
-  if (body.structured) {
-    const verdict = await reviewTask(body.structured as StructuredTask);
-    return NextResponse.json({ ok: true, data: verdict });
+  const parsed = structuredTaskSchema.safeParse(body?.structured);
+  if (!parsed.success) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "pass a complete { structured } task",
+      },
+      { status: 400 },
+    );
   }
-  return NextResponse.json({
-    ok: false,
-    error: "pass { structured } or { taskId }",
-  });
+  const verdict = await reviewTask(parsed.data);
+  return NextResponse.json({ ok: true, data: verdict });
 }

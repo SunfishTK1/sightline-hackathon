@@ -8,6 +8,16 @@
 import { loadLiveBoard, recordLiveEvent, type LiveBoardView } from "@/lib/db/live";
 
 const VOICE_MCP = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
+const VOICE_MCP_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+
+function voiceHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (VOICE_MCP_TOKEN) {
+    headers.Authorization = `Bearer ${VOICE_MCP_TOKEN}`;
+    headers["x-api-key"] = VOICE_MCP_TOKEN;
+  }
+  return headers;
+}
 
 export type LiveDeal = {
   canCancel: boolean;
@@ -49,6 +59,7 @@ async function voiceGet<T>(path: string): Promise<T | null> {
   if (!VOICE_MCP) return null;
   try {
     const res = await fetch(`${VOICE_MCP}${path}`, {
+      headers: voiceHeaders(),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });
@@ -65,7 +76,7 @@ async function voicePost<T>(path: string, body?: unknown): Promise<{ ok: boolean
   try {
     const res = await fetch(`${VOICE_MCP}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: voiceHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body ?? {}),
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
@@ -92,11 +103,16 @@ export async function loadLiveDeal(board: LiveBoardView): Promise<LiveDeal> {
     : [];
   const counter = counters.find((row) => row.order_id === board.orderId) ?? null;
   const originalUsd = order?.budget_usd ? Number(order.budget_usd) : null;
-  const cancellable = matching && order?.status !== "completed" && order?.status !== "cancelled";
+  const cancellable =
+    matching &&
+    order?.status !== "completed" &&
+    order?.status !== "cancelled" &&
+    order?.status !== "done_pending" &&
+    order?.status !== "accepted";
 
   if (counter) {
     return {
-      canCancel: Boolean(cancellable || matching),
+      canCancel: Boolean(cancellable),
       canAccept: true,
       canDecline: true,
       kind: "counter",
@@ -108,9 +124,9 @@ export async function loadLiveDeal(board: LiveBoardView): Promise<LiveDeal> {
   }
 
   return {
-    canCancel: Boolean(cancellable || matching),
+    canCancel: Boolean(cancellable),
     canAccept: false,
-    canDecline: Boolean(matching && (active?.offerId || active)),
+    canDecline: Boolean(matching && active?.offerId),
     kind: active ? "offer" : null,
     offerId: active?.offerId ?? null,
     askingUsd: originalUsd,
@@ -129,9 +145,10 @@ export async function decideLiveDeal(
 
   if (action === "cancel") {
     if (!deal.canCancel) return board;
-    await voicePost(`/v1/orders/${encodeURIComponent(board.orderId)}/cancel`, {
+    const result = await voicePost(`/v1/orders/${encodeURIComponent(board.orderId)}/cancel`, {
       reason: "Cancelled from the live board.",
     });
+    if (!result.ok) return board;
     return recordLiveEvent({
       token,
       kind: "stopped",
@@ -160,17 +177,21 @@ export async function decideLiveDeal(
   }
 
   if (action === "decline") {
-    if (!deal.canDecline) return board;
+    if (!deal.canDecline || !deal.offerId) return board;
     const order = await voiceGet<OrderRow>(`/v1/orders/${encodeURIComponent(board.orderId)}`);
     const phone = order?.requester_phone;
     if (deal.kind === "counter" && deal.offerId && phone) {
-      await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/counter/respond`, {
+      const result = await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/counter/respond`, {
         phone,
         accept: false,
+        release: true,
       });
-    }
-    if (deal.offerId) {
-      await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/respond`, { accepted: false });
+      if (!result.ok) return board;
+    } else if (deal.offerId) {
+      const result = await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/respond`, {
+        accepted: false,
+      });
+      if (!result.ok) return board;
     }
     return recordLiveEvent({
       token,

@@ -196,8 +196,8 @@ export async function evaluateBrokerDecision(
   if (input.decision === "REQUESTER_YES") {
     return {
       action: "ACCEPT",
-      agreedUsd: money(current),
-      messageHint: `Requester agreed at $${money(current)}.`,
+      agreedUsd: money(asNumber(input.price_usd) ?? current),
+      messageHint: `Requester agreed at $${money(asNumber(input.price_usd) ?? current)}.`,
       askRequester: false,
     };
   }

@@ -112,16 +112,26 @@ export async function announceHandoffOnLive(handoff: {
     });
     return;
   }
-  if (handoff.kind === "counter_declined" || handoff.kind === "negotiation_cancelled") {
+  if (handoff.kind === "counter_declined") {
     await postLiveEvent({
       orderId,
-      kind: "declined",
+      kind: "countered",
+      message: "Passed on that price — still waiting on them.",
+      offerId,
+      state: "waiting",
+    });
+    return;
+  }
+  if (handoff.kind === "counter_released" || handoff.kind === "negotiation_cancelled") {
+    await postLiveEvent({
+      orderId,
+      kind: "timeout",
       message:
         handoff.kind === "negotiation_cancelled"
           ? "The back-and-forth was called off. Trying the next person."
-          : "They passed. Trying the next person.",
+          : "Trying the next person.",
       offerId,
-      state: "declined",
+      state: "dropped",
     });
     return;
   }

@@ -8,7 +8,7 @@
  * same database.
  */
 import type { QueryResultRow } from "pg";
-import { getPool } from "./pg";
+import { getPool, postgresConfigured } from "./pg";
 import { getRailcoinBalance } from "./wallet-balance";
 
 function iso(value: unknown): string | null {
@@ -43,6 +43,7 @@ function toHistoryItem(row: QueryResultRow, counterpartKey: string): TaskHistory
 
 /** Tasks this person has asked for, newest first. */
 export async function getRequestHistory(personId: string): Promise<TaskHistoryItem[]> {
+  if (!postgresConfigured()) return [];
   const { rows } = await getPool().query(
     `SELECT o.id, o.title, o.status, o.category, o.budget_usd, o.created_at, o.completed_at,
             w.display_name AS worker_name
@@ -58,6 +59,7 @@ export async function getRequestHistory(personId: string): Promise<TaskHistoryIt
 
 /** Tasks this person has done (or is doing) for someone else, newest first. */
 export async function getWorkHistory(personId: string): Promise<TaskHistoryItem[]> {
+  if (!postgresConfigured()) return [];
   const { rows } = await getPool().query(
     `SELECT o.id, o.title, o.status, o.category, o.budget_usd, o.created_at, o.completed_at,
             p.display_name AS requester_name
@@ -81,13 +83,16 @@ export type WalletSummary = {
 
 /** This person's devnet wallet, with a live balance check - null if they have none yet. */
 export async function getWalletSummary(personId: string): Promise<WalletSummary | null> {
+  if (!postgresConfigured()) return null;
   const { rows } = await getPool().query(
     `SELECT public_key, cluster, funded_at FROM wallets WHERE person_id = $1`,
     [personId],
   );
   const row = rows[0];
   if (!row) return null;
-  const balanceRailcoins = row.funded_at ? await getRailcoinBalance(row.public_key) : 0;
+  // A row can exist before funded_at is set (airdrop pending). Still ask
+  // the chain — 0 is only correct after a successful empty-balance read.
+  const balanceRailcoins = await getRailcoinBalance(row.public_key);
   return {
     publicKey: row.public_key,
     cluster: row.cluster,

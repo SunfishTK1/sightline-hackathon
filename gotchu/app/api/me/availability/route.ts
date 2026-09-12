@@ -1,4 +1,5 @@
 /** @owner Will — PATCH availability.isAvailable */
+import { activateParticipant, syncWorkerAvailability } from "@/lib/activate";
 import { fail, ok } from "@/lib/http";
 import { getIdentity } from "@/lib/identity";
 import { findUserByAuth0Sub, publicUser, upsertUser } from "@/lib/users";
@@ -24,10 +25,25 @@ export async function PATCH(req: Request) {
     return fail(parsed.error.issues[0]?.message ?? "Invalid availability");
   }
 
+  await activateParticipant({
+    personId: existing.uuid,
+    phone: existing.phone,
+    displayName: [existing.firstName, existing.lastName].filter(Boolean).join(" ") || null,
+    blurb: existing.preferenceText,
+  });
+
+  const pool = await syncWorkerAvailability(existing.uuid, parsed.data.isAvailable);
+  if (parsed.data.isAvailable && pool.reason === "phone_unverified") {
+    return fail("Confirm your phone over text before going available.", 403);
+  }
+  if (parsed.data.isAvailable && pool.reason === "no_profile") {
+    return fail("Could not join the matching pool. Try again in a moment.", 503);
+  }
+
   const { user: saved } = await upsertUser({
     ...existing,
     availability: {
-      isAvailable: parsed.data.isAvailable,
+      isAvailable: pool.isAvailable,
       until: parsed.data.until,
     },
     updatedAt: new Date().toISOString(),

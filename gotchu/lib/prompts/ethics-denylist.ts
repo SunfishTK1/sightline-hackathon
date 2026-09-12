@@ -60,7 +60,8 @@ export const DENYLIST: DenylistRule[] = [
   },
   {
     category: "academic_integrity",
-    pattern: /\b(exam|quiz|midterm|final|homework|problem\s*set|pset|lab\s+report)\b/i,
+    pattern:
+      /\b(exam|quiz|midterm|final\s+exam|homework|problem\s*set|pset|lab\s+report)\b/i,
   },
   { category: "academic_integrity", pattern: /\b15-?213\b/i },
   {

@@ -9,7 +9,7 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
-  cancelOrder, blockOrder, receiveAndPay,
+  cancelOrder, blockOrder, receiveAndPay, recordNoMatch,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
@@ -245,9 +245,10 @@ app.get("/v1/orders/open", async (_req, res) => {
        FROM orders o
        JOIN people p ON p.id = o.person_id
       WHERE o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
-           WHERE j.order_id = o.id AND j.status IN ('offered', 'accepted'))
+           WHERE j.order_id = o.id AND j.status IN ('offered', 'countered', 'accepted'))
       ORDER BY o.created_at
       LIMIT 10`,
   );
@@ -270,7 +271,9 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
         AND (wp.email IS NULL OR COALESCE((wp.doc->>'emailVerified')::boolean, false))
         AND w.person_id <> o.person_id
         AND NOT EXISTS (
-          SELECT 1 FROM job_offers j WHERE j.order_id = o.id AND j.phone = w.phone)
+          SELECT 1 FROM job_offers j
+           WHERE j.order_id = o.id AND j.phone = w.phone
+             AND j.status IN ('offered', 'countered', 'accepted'))
       LIMIT 25`,
     [req.params.orderId],
   );
@@ -286,20 +289,80 @@ app.post("/v1/offers", async (req, res) => {
   const e164 = normalizePhone(String(phone));
   const person = await upsertPerson(e164);
   const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
-  const { rows } = await pool.query(
-    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (order_id, phone) DO UPDATE
-       SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
-           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
-           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note)
-     RETURNING id, order_id, phone, status, offered_usd, travel_note`,
-    [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
-  );
-  await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
-    order_id,
-  ]);
-  res.json({ ok: true, data: rows[0] ?? null });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const open = await client.query(
+      `SELECT id FROM orders
+        WHERE id = $1
+          AND status IN ('submitted', 'offered')
+          AND ethics_verdict IS DISTINCT FROM 'BLOCK'
+        FOR UPDATE`,
+      [order_id],
+    );
+    if (!open.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "order_not_open" });
+    }
+    const held = await client.query(
+      `SELECT id FROM job_offers
+        WHERE order_id = $1
+          AND status IN ('offered', 'countered', 'accepted')
+          AND phone IS DISTINCT FROM $2
+        LIMIT 1`,
+      [order_id, e164],
+    );
+    if (held.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "already_offered" });
+    }
+    const { rows } = await client.query(
+      `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (order_id, phone) DO UPDATE
+         SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
+             offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
+             travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note),
+             status = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.status
+               ELSE 'offered'
+             END,
+             outreach_sent_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.outreach_sent_at
+               ELSE NULL
+             END,
+             responded_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.responded_at
+               ELSE NULL
+             END,
+             counter_rounds = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_rounds
+               ELSE 0
+             END,
+             counter_price_usd = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_price_usd
+               ELSE NULL
+             END,
+             countered_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
+               ELSE NULL
+             END
+       RETURNING id, order_id, phone, status, offered_usd, travel_note`,
+      [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
+    );
+    await client.query(
+      `UPDATE orders SET status = 'offered', updated_at = now()
+        WHERE id = $1 AND status IN ('submitted', 'offered')`,
+      [order_id],
+    );
+    await client.query("COMMIT");
+    res.json({ ok: true, data: rows[0] ?? null });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
 });
 
 /** Every recent offer, including ones whose outreach has not gone out yet. */
@@ -337,11 +400,16 @@ app.post("/v1/offers/:id/price", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
+    // The requester's phone rides along because outreach starts the film when
+    // it holds an offer, and a film without it cannot look up whether they
+    // agreed to appear in it.
     `SELECT j.id, j.phone, j.reason, j.offered_usd, j.travel_note, j.created_at, o.id AS order_id,
             o.title, o.details, o.budget_usd, o.deadline_at,
-            o.pickup_location, o.dropoff_location, o.category
+            o.pickup_location, o.dropoff_location, o.category,
+            p.phone AS requester_phone
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
+       LEFT JOIN people p ON p.id = o.person_id
       WHERE j.outreach_sent_at IS NULL AND j.status = 'offered'
       ORDER BY j.created_at
       LIMIT 10`,
@@ -426,6 +494,7 @@ app.get("/v1/orders/needing-video", async (_req, res) => {
        JOIN people p ON p.id = o.person_id
        LEFT JOIN order_videos v ON v.order_id = o.id
       WHERE v.order_id IS NULL AND o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 3`,
   );
@@ -513,6 +582,7 @@ app.get("/v1/orders/needing-image", async (_req, res) => {
        LEFT JOIN order_images i ON i.order_id = o.id
       WHERE i.order_id IS NULL
         AND o.status IN ('submitted','offered','accepted')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 5`,
   );
@@ -564,8 +634,11 @@ app.post("/v1/orders/:id/done", async (req, res) => {
 app.post("/v1/orders/:id/confirm", async (req, res) => {
   const { phone, confirmed, note } = req.body ?? {};
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  if (typeof confirmed !== "boolean") {
+    return res.status(400).json({ ok: false, error: "confirmed is required" });
+  }
   const result = await confirmTaskDone(
-    req.params.id, String(phone), confirmed !== false, note,
+    req.params.id, String(phone), confirmed, note,
   );
   if (result.error) return res.status(409).json({ ok: false, error: result.error });
   res.json({ ok: true, data: result });
@@ -662,11 +735,24 @@ app.post("/v1/offers/:id/counter", async (req, res) => {
 
 /** The requester answers a counter. */
 app.post("/v1/offers/:id/counter/respond", async (req, res) => {
-  const { phone, accept } = req.body ?? {};
+  const { phone, accept, release } = req.body ?? {};
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
-  const result = await respondToCounter(req.params.id, Boolean(accept), String(phone));
+  const result = await respondToCounter(req.params.id, Boolean(accept), String(phone), {
+    release: Boolean(release),
+  });
   if (result.error) return res.status(409).json({ ok: false, error: result.error });
   res.json({ ok: true, data: result });
+});
+
+/** Matcher found nobody suitable. Count the miss; park after a few tries. */
+app.post("/v1/orders/:id/no-match", async (req, res) => {
+  try {
+    const result = await recordNoMatch(req.params.id);
+    if (!result.counted) return res.status(409).json({ ok: false, error: "not_open" });
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 /** Counters awaiting a requester's decision. */
@@ -815,7 +901,9 @@ app.post("/v1/dev/close-all", async (_req, res) => {
 /** One click from the requester: it arrived, pay them. */
 app.post("/v1/orders/:id/received", async (req, res) => {
   try {
-    const result = await receiveAndPay(req.params.id);
+    const phone = req.body?.phone ? String(req.body.phone) : undefined;
+    if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+    const result = await receiveAndPay(req.params.id, phone);
     if ("error" in result && result.error) {
       return res.status(409).json({ ok: false, error: result.error });
     }
@@ -919,9 +1007,11 @@ app.get("/v1/orders/:id", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
             o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
-            p.phone AS requester_phone
+            p.phone AS requester_phone,
+            pay.status AS payment_status, pay.solana_signature
        FROM orders o
        LEFT JOIN people p ON p.id = o.person_id
+       LEFT JOIN payments pay ON pay.order_id = o.id
       WHERE o.id = $1`,
     [req.params.id],
   );

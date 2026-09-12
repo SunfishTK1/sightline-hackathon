@@ -9,7 +9,7 @@ export function mockNextMove(round: number, role: "worker_agent" | "requester_ag
   ];
   const prices = ladder[Math.min(round - 1, ladder.length - 1)];
   const priceUsd = role === "worker_agent" ? prices.worker : prices.requester;
-  const accept = round >= 2 && role === "requester_agent" && priceUsd === 11;
+  const accept = round >= 2 && priceUsd === 11;
 
   return {
     round,

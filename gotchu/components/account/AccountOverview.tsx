@@ -19,7 +19,7 @@ const STATUS_LABEL: Record<string, string> = {
   accepted: "In progress",
   done_marked: "Marked done - awaiting confirmation",
   completed: "Completed",
-  blocked: "Blocked",
+  blocked: "Declined",
   cancelled: "Cancelled",
 };
 

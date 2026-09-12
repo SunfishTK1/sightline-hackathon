@@ -1,5 +1,5 @@
 import { pool, normalizePhone, upsertPerson } from "./db.js";
-import { payForTask, recordSettlement, type Settlement } from "./pay.js";
+import { payForTask, type Settlement } from "./pay.js";
 import { getWallet } from "./wallet.js";
 import { RAILCOINS_PER_SOL } from "./pay.js";
 
@@ -25,6 +25,7 @@ export async function listOpenTasks() {
             o.deadline_at, o.budget_usd, o.urgency, o.created_at
        FROM orders o
       WHERE o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 20`,
   );
@@ -49,31 +50,53 @@ export async function resolveOffer(
         SET status = $2, responded_at = now()
       WHERE id = $1 AND status = 'offered'
         AND ($3::text IS NULL OR phone = $3)
-      RETURNING id, order_id, person_id, phone`,
+      RETURNING id, order_id, person_id, phone, offered_usd`,
     [offerId, accepted ? "accepted" : "declined", guard],
   );
   const offer = rows[0];
   if (!offer) return { status: "unchanged", error: "That offer is not open for this person." };
 
   if (!accepted) {
+    // A decline must never resurrect a task that was blocked out from under
+    // it - blindly reopening to 'submitted' regardless of ethics_verdict is
+    // exactly how a BLOCK verdict got silently bypassed before: the order
+    // went back into matching, was accepted, and completed with nobody ever
+    // re-checking it. Blocked stays blocked.
     await pool.query(
-      `UPDATE orders SET status = 'submitted', updated_at = now() WHERE id = $1`,
-      [offer.order_id],
+      `UPDATE orders
+          SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+              updated_at = now()
+        WHERE id = $1
+          AND NOT EXISTS (
+            SELECT 1 FROM job_offers
+             WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
+          )`,
+      [offer.order_id, offer.id],
     );
     return { status: "declined", order_id: offer.order_id };
   }
 
   const order = await pool.query(
     `UPDATE orders
-        SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now()
+        SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now(),
+            budget_usd = COALESCE($3, budget_usd)
       WHERE id = $1
+        AND accepted_by IS NULL
+        AND status IN ('submitted', 'offered')
       RETURNING id, title, person_id`,
-    [offer.order_id, offer.person_id],
+    [offer.order_id, offer.person_id, offer.offered_usd],
   );
-  // Nobody else is still on the hook for this one.
+  if (!order.rows[0]) {
+    await pool.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now() WHERE id = $1`,
+      [offer.id],
+    );
+    return { status: "unchanged", error: "That task is no longer open." };
+  }
+  // Nobody else is still on the hook for this one — including pending counters.
   await pool.query(
     `UPDATE job_offers SET status = 'cancelled', responded_at = now()
-      WHERE order_id = $1 AND id <> $2 AND status = 'offered'`,
+      WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered')`,
     [offer.order_id, offer.id],
   );
 
@@ -107,7 +130,7 @@ export async function reassignOrder(
   const person = await upsertPerson(e164);
   const { rows } = await pool.query(
     `UPDATE orders SET person_id = $2, updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND status IN ('submitted', 'offered', 'blocked')
       RETURNING id, title, status`,
     [orderId, person.id],
   );
@@ -241,9 +264,10 @@ export async function respondToCounter(
   offerId: string | number,
   accept: boolean,
   requesterPhone: string,
+  opts?: { release?: boolean },
 ): Promise<{ status: string; error?: string }> {
   const { rows } = await pool.query(
-    `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd,
+    `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd, j.offered_usd,
             o.title, o.budget_usd
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -255,8 +279,44 @@ export async function respondToCounter(
   if (!offer) return { status: "unchanged", error: "No counter is open on that offer." };
 
   if (!accept) {
+    // Timeout / "try next" must release the worker so the order can rematch.
+    // A normal requester "no" keeps the original price on the table.
+    if (opts?.release) {
+      await pool.query(
+        `UPDATE job_offers SET status = 'declined', responded_at = now() WHERE id = $1`,
+        [offer.id],
+      );
+      await pool.query(
+        `UPDATE orders
+            SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+                updated_at = now()
+          WHERE id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM job_offers
+               WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
+            )`,
+        [offer.order_id, offer.id],
+      );
+      await pool.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'counter_released',$4::jsonb)`,
+        [
+          offer.person_id,
+          offer.phone,
+          offer.order_id,
+          JSON.stringify({
+            title: offer.title,
+            asked_usd: Number(offer.counter_price_usd),
+            offer_id: String(offer.id),
+          }),
+        ],
+      );
+      return { status: "released" };
+    }
     await pool.query(
-      `UPDATE job_offers SET status = 'offered', countered_at = NULL WHERE id = $1`,
+      `UPDATE job_offers
+          SET status = 'offered', countered_at = NULL, counter_price_usd = NULL
+        WHERE id = $1`,
       [offer.id],
     );
     await pool.query(
@@ -269,20 +329,35 @@ export async function respondToCounter(
         JSON.stringify({
           title: offer.title,
           asked_usd: Number(offer.counter_price_usd),
-          still_offered_usd: offer.budget_usd ? Number(offer.budget_usd) : null,
+          still_offered_usd: offer.offered_usd
+            ? Number(offer.offered_usd)
+            : offer.budget_usd
+              ? Number(offer.budget_usd)
+              : null,
+          offer_id: String(offer.id),
         }),
       ],
     );
     return { status: "declined" };
   }
 
-  await pool.query(
+  const accepted = await pool.query(
     `UPDATE orders
         SET budget_usd = $2, status = 'accepted', accepted_by = $3,
             accepted_at = now(), updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+        AND accepted_by IS NULL
+        AND status IN ('submitted', 'offered')
+      RETURNING id`,
     [offer.order_id, offer.counter_price_usd, offer.person_id],
   );
+  if (!accepted.rows[0]) {
+    await pool.query(
+      `UPDATE job_offers SET status = 'declined', responded_at = now() WHERE id = $1`,
+      [offer.id],
+    );
+    return { status: "unchanged", error: "That task is no longer open." };
+  }
   await pool.query(
     `UPDATE job_offers SET status = 'accepted', responded_at = now() WHERE id = $1`,
     [offer.id],
@@ -375,11 +450,15 @@ export async function confirmTaskDone(
   }
 
   if (!confirmed) {
-    await pool.query(
+    const disputed = await pool.query(
       `UPDATE orders SET status = 'accepted', done_marked_at = NULL, updated_at = now()
-        WHERE id = $1`,
+        WHERE id = $1 AND status = 'done_pending'
+        RETURNING id`,
       [order.id],
     );
+    if (!disputed.rows[0]) {
+      return { status: "unchanged", error: "No task of theirs is waiting to be confirmed." };
+    }
     await pool.query(
       `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
        VALUES ($1,$2,$3,'task_disputed',$4::jsonb)`,
@@ -389,11 +468,15 @@ export async function confirmTaskDone(
     return { status: "disputed" };
   }
 
-  await pool.query(
+  const completed = await pool.query(
     `UPDATE orders SET status = 'completed', completed_at = now(), updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1 AND status = 'done_pending'
+      RETURNING id`,
     [order.id],
   );
+  if (!completed.rows[0]) {
+    return { status: "unchanged", error: "That task is no longer waiting to be confirmed." };
+  }
 
   // Record what is owed. Nothing moves until a verified Connect account exists.
   const amount = Number(order.budget_usd ?? 0);
@@ -403,7 +486,13 @@ export async function confirmTaskDone(
     `INSERT INTO payments (order_id, payer_id, payee_id, amount_usd, platform_fee_usd,
                            status, stripe_mode, note)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (order_id) DO UPDATE SET status = EXCLUDED.status, updated_at = now()
+     ON CONFLICT (order_id) DO UPDATE SET
+       status = CASE
+         WHEN payments.solana_signature IS NOT NULL OR payments.status IN ('paid', 'paying')
+           THEN payments.status
+         ELSE EXCLUDED.status
+       END,
+       updated_at = now()
      RETURNING id, amount_usd, platform_fee_usd, status`,
     [
       order.id, order.person_id, order.accepted_by, amount, fee, payState,
@@ -423,7 +512,6 @@ export async function confirmTaskDone(
       payeePhone: order.worker_phone,
       amountUsd: amount - fee,
     });
-    await recordSettlement(order.id, settlement).catch(() => null);
     console.log(
       settlement.settled
         ? `paid ${settlement.railcoins} railcoins for "${order.title}" (${settlement.signature})`
@@ -494,7 +582,7 @@ export async function confirmTaskDone(
  * Both phones come from the order itself rather than the caller, so whoever
  * calls this cannot name a different requester or redirect the payment.
  */
-export async function receiveAndPay(orderId: string) {
+export async function receiveAndPay(orderId: string, requesterPhone?: string) {
   const { rows } = await pool.query(
     `SELECT o.status, p.phone AS requester_phone, w.phone AS worker_phone
        FROM orders o
@@ -505,7 +593,39 @@ export async function receiveAndPay(orderId: string) {
   );
   const order = rows[0];
   if (!order) return { error: "no_such_task" as const };
-  if (order.status === "completed") return { error: "already_paid" as const };
+  if (requesterPhone && normalizePhone(requesterPhone) !== order.requester_phone) {
+    return { error: "not_the_requester" as const };
+  }
+  if (order.status === "completed") {
+    const pay = await pool.query<{ solana_signature: string | null; status: string | null }>(
+      `SELECT solana_signature, status FROM payments WHERE order_id = $1`,
+      [orderId],
+    );
+    const row = pay.rows[0];
+    if (row?.solana_signature || row?.status === "paid") {
+      return { error: "already_paid" as const };
+    }
+    if (!order.worker_phone) return { error: "nobody_has_taken_it" as const };
+    const amountRow = await pool.query<{ budget_usd: string | null; platform_fee_usd: string | null }>(
+      `SELECT o.budget_usd, p.platform_fee_usd
+         FROM orders o
+         LEFT JOIN payments p ON p.order_id = o.id
+        WHERE o.id = $1`,
+      [orderId],
+    );
+    const amount = Number(amountRow.rows[0]?.budget_usd ?? 0);
+    const fee = Number(
+      amountRow.rows[0]?.platform_fee_usd ?? Math.round(amount * PLATFORM_FEE_RATE * 100) / 100,
+    );
+    if (!(amount > 0)) return { error: "already_paid" as const };
+    const settlement = await payForTask({
+      orderId,
+      payerPhone: order.requester_phone,
+      payeePhone: order.worker_phone,
+      amountUsd: amount - fee,
+    });
+    return { status: "completed", settlement };
+  }
   if (!order.worker_phone) return { error: "nobody_has_taken_it" as const };
 
   if (order.status === "accepted") {
@@ -578,6 +698,7 @@ export async function askAboutJob(
         title: offer.title,
         question,
         question_id: String(inserted.rows[0].id),
+        offer_id: String(offer.id),
       }),
     ],
   );
@@ -596,7 +717,7 @@ export async function answerJobQuestion(
        FROM orders o, people p
       WHERE q.id = $1 AND q.answered_at IS NULL
         AND o.id = q.order_id AND p.id = o.person_id AND p.phone = $2
-      RETURNING q.id, q.order_id, q.asker_phone, q.question, o.title`,
+      RETURNING q.id, q.order_id, q.offer_id, q.asker_phone, q.question, o.title`,
     [questionId, normalizePhone(requesterPhone), answer],
   );
   const q = rows[0];
@@ -610,7 +731,12 @@ export async function answerJobQuestion(
       asker.rows[0]?.id ?? null,
       q.asker_phone,
       q.order_id,
-      JSON.stringify({ title: q.title, question: q.question, answer }),
+      JSON.stringify({
+        title: q.title,
+        question: q.question,
+        answer,
+        offer_id: q.offer_id != null ? String(q.offer_id) : undefined,
+      }),
     ],
   );
   return { status: "answered" };
@@ -686,7 +812,7 @@ export async function callWorthy(staleMinutes = 20) {
   const stale = `${Math.max(1, Math.min(staleMinutes, 1440))} minutes`;
 
   const offers = await pool.query(
-    `SELECT j.id AS offer_id, j.phone, p.display_name, o.title, o.budget_usd, j.outreach_sent_at,
+    `SELECT j.id AS offer_id, j.phone, p.display_name, o.id AS order_id, o.title, o.budget_usd, j.outreach_sent_at,
             EXTRACT(EPOCH FROM (now() - j.outreach_sent_at))/60 AS minutes_waiting
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -699,7 +825,7 @@ export async function callWorthy(staleMinutes = 20) {
   );
 
   const counters = await pool.query(
-    `SELECT j.id AS offer_id, p.phone, p.display_name, o.title, j.counter_price_usd, o.budget_usd,
+    `SELECT j.id AS offer_id, p.phone, p.display_name, o.id AS order_id, o.title, j.counter_price_usd, o.budget_usd,
             EXTRACT(EPOCH FROM (now() - j.countered_at))/60 AS minutes_waiting
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -711,7 +837,7 @@ export async function callWorthy(staleMinutes = 20) {
   );
 
   const questions = await pool.query(
-    `SELECT q.id AS question_id, p.phone, p.display_name, o.title, q.question,
+    `SELECT q.id AS question_id, p.phone, p.display_name, o.id AS order_id, o.title, q.question,
             EXTRACT(EPOCH FROM (now() - q.asked_at))/60 AS minutes_waiting
        FROM job_questions q
        JOIN orders o ON o.id = q.order_id
@@ -728,6 +854,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       offer_id: String(r.offer_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "offer_unanswered",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,
@@ -737,6 +864,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       offer_id: String(r.offer_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "counter_undecided",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,
@@ -746,6 +874,7 @@ export async function callWorthy(staleMinutes = 20) {
       phone: r.phone,
       name: r.display_name,
       question_id: String(r.question_id),
+      order_id: r.order_id ? String(r.order_id) : undefined,
       reason: "question_unanswered",
       minutes_waiting: round(r.minutes_waiting),
       about: r.title,
@@ -876,11 +1005,55 @@ export async function purgeDemoData(): Promise<{
   }
 }
 
+const NO_MATCH_PARK_AFTER = 3;
+
+/**
+ * The matcher looked and picked nobody. Count the miss; after a few tries,
+ * park the order and tell the requester instead of retrying every 10s.
+ */
+export async function recordNoMatch(orderId: string) {
+  const { rows } = await pool.query(
+    `UPDATE orders
+        SET match_attempts = match_attempts + 1,
+            status = CASE
+              WHEN match_attempts + 1 >= $2 AND status IN ('submitted', 'offered')
+              THEN 'no_takers'
+              ELSE status
+            END,
+            updated_at = now()
+      WHERE id = $1 AND status IN ('submitted', 'offered')
+      RETURNING id, title, person_id, match_attempts, status`,
+    [orderId, NO_MATCH_PARK_AFTER],
+  );
+  const order = rows[0];
+  if (!order) return { counted: false };
+  const parked = order.status === "no_takers";
+  if (parked) {
+    const requester = await pool.query(`SELECT id, phone FROM people WHERE id = $1`, [
+      order.person_id,
+    ]);
+    if (requester.rows[0]) {
+      await pool.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'no_takers',$4::jsonb)`,
+        [
+          requester.rows[0].id,
+          requester.rows[0].phone,
+          order.id,
+          JSON.stringify({ title: order.title }),
+        ],
+      );
+    }
+  }
+  return { counted: true, parked, attempts: order.match_attempts };
+}
+
 /**
  * Call a task off. Anyone currently holding or negotiating the offer is told,
  * rather than left waiting on a job that no longer exists.
  *
  * A completed task cannot be cancelled - that money has already moved.
+ * An accepted or done-pending job is already theirs; cancel is too late.
  */
 export async function cancelOrder(orderId: string, reason?: string) {
   const client = await pool.connect();
@@ -888,7 +1061,7 @@ export async function cancelOrder(orderId: string, reason?: string) {
     await client.query("BEGIN");
     const { rows } = await client.query(
       `UPDATE orders SET status = 'cancelled', updated_at = now()
-        WHERE id = $1 AND status NOT IN ('completed', 'cancelled')
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'done_pending', 'accepted')
         RETURNING id, title, person_id`,
       [orderId],
     );
@@ -939,7 +1112,7 @@ export async function blockOrder(orderId: string, reason: string) {
     const { rows } = await client.query(
       `UPDATE orders
           SET status = 'blocked', ethics_verdict = 'BLOCK', ethics_reason = $2, updated_at = now()
-        WHERE id = $1 AND status NOT IN ('completed', 'cancelled')
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'done_pending', 'accepted')
         RETURNING id, title`,
       [orderId, reason],
     );

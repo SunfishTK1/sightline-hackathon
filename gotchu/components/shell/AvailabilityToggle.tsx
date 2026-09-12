@@ -56,13 +56,22 @@ export function AvailabilityToggle() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ isAvailable: next }),
             });
-            const json = (await res.json()) as { ok: boolean; error?: string };
+            const json = (await res.json()) as {
+              ok: boolean;
+              error?: string;
+              data?: { user?: { availability?: { isAvailable?: boolean } } };
+            };
             if (!json.ok) {
               setChecked(!next);
               toast.error(json.error ?? "Could not update availability");
               return;
             }
-            toast.success(next ? "You're available" : "You're off the market");
+            setChecked(Boolean(json.data?.user?.availability?.isAvailable));
+            toast.success(
+              json.data?.user?.availability?.isAvailable
+                ? "You're available"
+                : "You're off the market",
+            );
           } catch {
             setChecked(!next);
             toast.error("Could not update availability");

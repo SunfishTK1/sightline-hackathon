@@ -88,7 +88,14 @@ async function pullVoiceMedia(
   const base = process.env.VOICE_MCP_URL?.replace(/\/$/, "");
   if (!base || !/^[0-9a-f-]{36}$/i.test(orderId)) return null;
   try {
+    const token = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+      headers["x-api-key"] = token;
+    }
     const response = await fetch(`${base}/v1/orders/${orderId}/${kind}`, {
+      headers,
       signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) return null;

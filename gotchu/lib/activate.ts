@@ -66,3 +66,82 @@ export async function activateParticipant(person: Activation): Promise<void> {
     console.error("could not bring the new signup into the marketplace:", err);
   }
 }
+
+/** Keep marketplace lookups in sync after a later profile edit. */
+export async function syncWorkerProfile(person: {
+  personId: string;
+  phone?: string;
+  blurb?: string | null;
+}): Promise<void> {
+  if (!postgresConfigured()) return;
+  try {
+    await getPool().query(
+      `UPDATE worker_profiles
+          SET phone = COALESCE($2, phone),
+              blurb = COALESCE($3, blurb),
+              updated_at = now()
+        WHERE person_id = $1`,
+      [person.personId, person.phone ?? null, person.blurb ?? null],
+    );
+  } catch (err) {
+    console.error("could not sync worker profile:", err);
+  }
+}
+
+/**
+ * Flip the matching-pool flag the matcher actually reads. Voice-mcp only
+ * treats someone as available after the phone is verified; we honor that
+ * so the web toggle cannot put unverified numbers into the pool.
+ */
+export async function syncWorkerAvailability(
+  personId: string,
+  isAvailable: boolean,
+): Promise<{ isAvailable: boolean; reason?: "no_profile" | "phone_unverified" | "sync_failed" }> {
+  if (!postgresConfigured()) return { isAvailable };
+  try {
+    const { rows } = await getPool().query<{ is_available: boolean; phone_verified: boolean | null }>(
+      `UPDATE worker_profiles w
+          SET is_available = ($2 AND COALESCE(p.phone_verified, false)),
+              updated_at = now()
+         FROM people p
+        WHERE p.id = w.person_id AND w.person_id = $1
+        RETURNING w.is_available, p.phone_verified`,
+      [personId, isAvailable],
+    );
+    if (!rows[0]) return { isAvailable: false, reason: "no_profile" };
+    const actual = Boolean(rows[0].is_available);
+    if (isAvailable && !actual) return { isAvailable: false, reason: "phone_unverified" };
+    return { isAvailable: actual };
+  } catch (err) {
+    console.error("could not sync worker availability:", err);
+    return { isAvailable: false, reason: "sync_failed" };
+  }
+}
+
+/** Matching-pool flag, or null if they have no worker profile yet. */
+export async function getWorkerAvailability(personId: string): Promise<boolean | null> {
+  if (!postgresConfigured()) return null;
+  try {
+    const { rows } = await getPool().query<{ is_available: boolean }>(
+      `SELECT is_available FROM worker_profiles WHERE person_id = $1`,
+      [personId],
+    );
+    return rows[0] ? Boolean(rows[0].is_available) : null;
+  } catch (err) {
+    console.error("could not read worker availability:", err);
+    return null;
+  }
+}
+
+/** A new number is unproven — take them out of the matching pool. */
+export async function dropWorkerAvailability(personId: string): Promise<void> {
+  if (!postgresConfigured()) return;
+  try {
+    await getPool().query(
+      `UPDATE worker_profiles SET is_available = false, updated_at = now() WHERE person_id = $1`,
+      [personId],
+    );
+  } catch (err) {
+    console.error("could not drop worker availability:", err);
+  }
+}

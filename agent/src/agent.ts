@@ -558,13 +558,17 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       };
     }
     if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
-      // Record it at the broker's number. It is inside the auto band, so the
-      // requester's own agent settles it within seconds via AUTO_REQUESTER -
-      // the worker's view has no business holding the requester's phone.
-      await market.counter(target.id, phone, verdict.agreedUsd, args.note || undefined);
-      await announceCounter(target.order_id, String(target.id), verdict.agreedUsd, timeAsk);
+      await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
+      await market.respond(target.id, true, phone);
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: "accepted",
+        message: "Someone took the job.",
+        offerId: String(target.id),
+        state: "accepted",
+      });
       return {
-        status: "agreed_pending_settlement",
+        status: "accepted",
         agreed_usd: verdict.agreedUsd,
         say: verdict.messageHint,
       };
@@ -575,10 +579,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "countered",
-        message: `Counter offer: they asked for $${verdict.nextOfferUsd}.`,
+        kind: "waiting",
+        message: `Price adjusted to $${verdict.nextOfferUsd}. Still waiting on them.`,
         offerId: String(target.id),
-        state: "countered",
+        state: "waiting",
       });
       return { status: "countered_back", offer_usd: verdict.nextOfferUsd, say: verdict.messageHint };
     }
@@ -596,7 +600,7 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (pending) {
       await evaluateDeal({
         order: { title: pending.title, budget_usd: pending.budget_usd },
-        current_offer_usd: Number(pending.budget_usd ?? 0),
+        current_offer_usd: Number(pending.counter_price_usd ?? pending.budget_usd ?? 0),
         decision: args.accept ? "REQUESTER_YES" : "REQUESTER_NO",
         price_usd: Number(pending.counter_price_usd ?? 0),
       }).catch(() => null);
@@ -607,10 +611,12 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (orderId) {
       await postLiveEvent({
         orderId,
-        kind: args.accept ? "accepted" : "declined",
-        message: args.accept ? "Someone took the job." : "The counter was turned down. Still looking.",
+        kind: args.accept ? "accepted" : "countered",
+        message: args.accept
+          ? "Someone took the job."
+          : "Passed on that price — still waiting on them.",
         offerId: String(args.offer_id),
-        state: args.accept ? "accepted" : "declined",
+        state: args.accept ? "accepted" : "waiting",
       });
     }
     return result;

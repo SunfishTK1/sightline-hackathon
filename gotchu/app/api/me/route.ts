@@ -1,8 +1,20 @@
 /** @owner Will — GET profile, PATCH + preference re-embed */
-import { embedText } from "@/lib/embed";
+import {
+  activateParticipant,
+  dropWorkerAvailability,
+  getWorkerAvailability,
+  syncWorkerProfile,
+} from "@/lib/activate";
+import { embedText, isUsableEmbedding } from "@/lib/embed";
 import { fail, ok } from "@/lib/http";
 import { getIdentity } from "@/lib/identity";
-import { findUserByAuth0Sub, publicUser, refreshEmailVerification, upsertUser } from "@/lib/users";
+import {
+  findUserByAuth0Sub,
+  PhoneAlreadyRegisteredError,
+  publicUser,
+  refreshEmailVerification,
+  upsertUser,
+} from "@/lib/users";
 import { profilePatchSchema } from "@/lib/validate";
 
 export async function GET() {
@@ -11,7 +23,12 @@ export async function GET() {
     return ok({ user: null, identity: null });
   }
   const found = await findUserByAuth0Sub(identity.auth0Sub);
-  const user = found ? await refreshEmailVerification(found) : null;
+  const refreshed = found ? await refreshEmailVerification(found) : null;
+  const poolAvailable = refreshed ? await getWorkerAvailability(refreshed.uuid) : null;
+  const user =
+    refreshed && poolAvailable !== null
+      ? { ...refreshed, availability: { ...refreshed.availability, isAvailable: poolAvailable } }
+      : refreshed;
   return ok({
     user: user ? publicUser(user) : null,
     identity: { cmuEmail: identity.cmuEmail, source: identity.source },
@@ -37,20 +54,47 @@ export async function PATCH(req: Request) {
 
   const patch = parsed.data;
   const preferenceText = patch.preferenceText ?? existing.preferenceText;
-  const preferenceEmbedding =
-    patch.preferenceText && patch.preferenceText !== existing.preferenceText
-      ? await embedText(patch.preferenceText)
-      : existing.preferenceEmbedding;
+  const preferenceChanged =
+    Boolean(patch.preferenceText) && patch.preferenceText !== existing.preferenceText;
+  const phoneChanged = Boolean(patch.phone && patch.phone !== existing.phone);
+  const nextEmbedding = preferenceChanged ? await embedText(patch.preferenceText!) : null;
+  const preferenceEmbedding = isUsableEmbedding(nextEmbedding)
+    ? nextEmbedding
+    : existing.preferenceEmbedding;
 
-  const { user: saved } = await upsertUser({
-    ...existing,
-    firstName: patch.firstName ?? existing.firstName,
-    lastName: patch.lastName ?? existing.lastName,
-    phone: patch.phone ?? existing.phone,
-    preferenceText,
-    preferenceEmbedding,
-    updatedAt: new Date().toISOString(),
+  let saved;
+  try {
+    ({ user: saved } = await upsertUser({
+      ...existing,
+      firstName: patch.firstName ?? existing.firstName,
+      lastName: patch.lastName ?? existing.lastName,
+      phone: patch.phone ?? existing.phone,
+      preferenceText,
+      preferenceEmbedding,
+      availability: phoneChanged ? { isAvailable: false } : existing.availability,
+      updatedAt: new Date().toISOString(),
+    }));
+  } catch (err) {
+    if (err instanceof PhoneAlreadyRegisteredError) {
+      return fail(err.message, 409);
+    }
+    throw err;
+  }
+
+  await syncWorkerProfile({
+    personId: saved.uuid,
+    phone: saved.phone,
+    blurb: saved.preferenceText,
   });
+  if (phoneChanged) {
+    await activateParticipant({
+      personId: saved.uuid,
+      phone: saved.phone,
+      displayName: [saved.firstName, saved.lastName].filter(Boolean).join(" ") || null,
+      blurb: saved.preferenceText,
+    });
+    await dropWorkerAvailability(saved.uuid);
+  }
 
   return ok({ user: publicUser(saved) });
 }

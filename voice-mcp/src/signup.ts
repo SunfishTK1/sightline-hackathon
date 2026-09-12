@@ -70,7 +70,12 @@ export async function registerSignup(input: SignupInput) {
         SET auth0_sub = $2,
             email = COALESCE($3, email),
             signed_up_at = COALESCE(signed_up_at, now()),
-            phone_verified = CASE WHEN phone = $4 AND phone_verified THEN true ELSE false END
+            phone_verified = CASE WHEN phone = $4 AND phone_verified THEN true ELSE false END,
+            doc = jsonb_set(
+              COALESCE(doc, '{}'::jsonb),
+              '{emailVerified}',
+              COALESCE(doc->'emailVerified', 'false'::jsonb)
+            )
       WHERE id = $1
       RETURNING id, phone, display_name, email, phone_verified`,
     [person.id, input.auth0_sub, input.email || null, e164],
@@ -86,7 +91,7 @@ export async function registerSignup(input: SignupInput) {
        VALUES ($1,$2,$3,$4,$5::text[],$6, now())
        ON CONFLICT (person_id) DO UPDATE
          SET phone = EXCLUDED.phone,
-             is_available = EXCLUDED.is_available,
+             is_available = worker_profiles.is_available AND EXCLUDED.is_available,
              blurb = COALESCE(EXCLUDED.blurb, worker_profiles.blurb),
              categories = EXCLUDED.categories,
              min_price_usd = COALESCE(EXCLUDED.min_price_usd, worker_profiles.min_price_usd),
@@ -154,7 +159,17 @@ export async function verifySignup(auth0_sub: string, code: string) {
     `UPDATE phone_verifications SET verified_at = now() WHERE phone = $1`,
     [person.phone],
   );
-  await pool.query(`UPDATE people SET phone_verified = true WHERE id = $1`, [person.id]);
+  await pool.query(
+    `UPDATE people
+        SET phone_verified = true,
+            doc = jsonb_set(
+              COALESCE(doc, '{}'::jsonb),
+              '{availability}',
+              COALESCE(doc->'availability', '{}'::jsonb) || '{"isAvailable":true}'::jsonb
+            )
+      WHERE id = $1`,
+    [person.id],
+  );
   await pool.query(
     `UPDATE worker_profiles SET is_available = true, updated_at = now() WHERE person_id = $1`,
     [person.id],
@@ -202,9 +217,19 @@ export async function setAvailability(auth0_sub: string, available: boolean) {
         SET is_available = ($2 AND p.phone_verified), updated_at = now()
        FROM people p
       WHERE p.id = w.person_id AND p.auth0_sub = $1
-      RETURNING w.is_available`,
+      RETURNING w.is_available, w.person_id`,
     [auth0_sub, available],
   );
   if (!rows[0]) return { error: "no_profile" as const };
+  await pool.query(
+    `UPDATE people
+        SET doc = jsonb_set(
+              COALESCE(doc, '{}'::jsonb),
+              '{availability}',
+              COALESCE(doc->'availability', '{}'::jsonb) || $2::jsonb
+            )
+      WHERE id = $1`,
+    [rows[0].person_id, JSON.stringify({ isAvailable: Boolean(rows[0].is_available) })],
+  );
   return { is_available: rows[0].is_available };
 }

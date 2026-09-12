@@ -201,6 +201,13 @@ export async function generateTaskVideo(
   // they actually are" pulls the model in two directions.
   const likeness = await likenessFor(order.requester_phone);
   const prompt = buildVideoPrompt(order, plan, Boolean(likeness));
+  // Logged either way: without this there was no way to tell whether a film
+  // had used someone's photo short of reading the stored prompt.
+  console.log(
+    likeness
+      ? `filming "${order.title}" with the requester's likeness`
+      : `filming "${order.title}" without a likeness (no consent, no photo, or no phone)`,
+  );
 
   try {
     let started: Response;
