@@ -3,6 +3,7 @@ import express from "express";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { PoolClient } from "pg";
 import { ensureSchema, pool, normalizePhone, upsertPerson } from "./db.js";
 import {
   resolveOffer, seedDemoData, purgeDemoData, removeWorker,
@@ -559,14 +560,24 @@ app.post("/v1/orders/:id/video", async (req, res) => {
     ? Number(reportedBytes) || null
     : Buffer.from(mp4_base64, "base64").length;
 
-  await pool.query(
+  const stored = await pool.query(
     `INSERT INTO order_videos (order_id, mp4, storage_key, bytes, prompt, seconds)
-     VALUES ($1, CASE WHEN $2::text IS NULL THEN NULL ELSE decode($2,'base64') END, $3, $4, $5, $6)
+     SELECT o.id, CASE WHEN $2::text IS NULL THEN NULL ELSE decode($2,'base64') END,
+            $3, $4, $5, $6
+       FROM orders o
+      WHERE o.id = $1
+        AND o.film_paid_signature IS NOT NULL
+        AND o.status IN ('submitted', 'offered', 'accepted', 'done_pending')
      ON CONFLICT (order_id) DO UPDATE
        SET mp4 = EXCLUDED.mp4, storage_key = EXCLUDED.storage_key, bytes = EXCLUDED.bytes,
-           prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
+           prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds,
+           delivered_at = NULL, created_at = now()
+     RETURNING order_id`,
     [req.params.id, mp4_base64 ?? null, storage_key ?? null, bytes, prompt ?? null, seconds ?? null],
   );
+  if (!stored.rows[0]) {
+    return res.status(409).json({ ok: false, error: "film_not_paid_or_task_not_active" });
+  }
   res.json({ ok: true, data: { order_id: req.params.id, bytes, storage_key: storage_key ?? null } });
 });
 
@@ -594,6 +605,7 @@ app.get("/v1/videos/pending-delivery", async (_req, res) => {
        JOIN people p ON p.id = o.person_id
        LEFT JOIN people w ON w.id = o.accepted_by
       WHERE v.delivered_at IS NULL
+        AND o.film_paid_signature IS NOT NULL
       ORDER BY v.created_at
       LIMIT 10`,
   );
@@ -1013,14 +1025,48 @@ app.post("/v1/orders/:id/film", async (req, res) => {
     return res.status(402).json({ ok: false, error: "payment_failed", reason: charge.reason });
   }
 
-  const saved = await pool.query(
-    `UPDATE orders SET film_requested_at = now(), film_paid_signature = $2, updated_at = now()
-      WHERE id = $1
-      RETURNING id`,
-    [order.id, charge.signature],
-  );
-  if (!saved.rows[0]) {
-    return res.status(500).json({ ok: false, error: "could_not_record_film_payment" });
+  let recorded = false;
+  let recordError: unknown;
+  for (let attempt = 0; attempt < 3 && !recorded; attempt++) {
+    let client: PoolClient | undefined;
+    try {
+      client = await pool.connect();
+      await client.query("BEGIN");
+      const saved = await client.query(
+        `UPDATE orders
+            SET film_requested_at = now(), film_paid_signature = $2, updated_at = now()
+          WHERE id = $1
+          RETURNING id`,
+        [order.id, charge.signature],
+      );
+      if (!saved.rows[0]) throw new Error("order disappeared while recording film payment");
+      // Old code could create an unpaid clip. Remove it in the same commit so
+      // this paid request always queues a fresh film.
+      await client.query(`DELETE FROM order_videos WHERE order_id = $1`, [order.id]);
+      await client.query("COMMIT");
+      recorded = true;
+    } catch (err) {
+      recordError = err;
+      await client?.query("ROLLBACK").catch(() => undefined);
+    } finally {
+      client?.release();
+    }
+  }
+  if (!recorded) {
+    // The charge carries a stable memo, so clearing the claim is safe: an
+    // immediate retry recovers that transfer instead of charging again.
+    await pool
+      .query(
+        `UPDATE orders SET film_requested_at = NULL, updated_at = now()
+          WHERE id = $1 AND film_paid_signature IS NULL`,
+        [order.id],
+      )
+      .catch(() => undefined);
+    return res.status(500).json({
+      ok: false,
+      error: "could_not_record_film_payment",
+      reason: recordError instanceof Error ? recordError.message : undefined,
+    });
   }
   console.log(`film requested for "${order.title}" - charged ${fee} railcoins`);
   res.json({

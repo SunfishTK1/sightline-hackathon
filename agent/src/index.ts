@@ -555,39 +555,17 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
-    // The job, its picture and its film go out as one message: an offer that
-    // arrives first and is chased by its own trailer reads as two unrelated
-    // texts. So nothing is sent until every asset exists - capped, because a
-    // job that never goes out is worse than one that goes out plain.
+    // Hold briefly for the illustration only. Films are a separate paid
+    // request and must never delay ordinary job outreach.
     const orderId = String(offer.order_id ?? "");
     const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
     // Only the picture is waited for. Films are no longer made for every task -
     // they are requested and paid for on the live board - so holding an offer
     // for one would hold most offers forever.
     const png = await imageFor(orderId);
-    const mp4 = null;
 
-    if ((!png || !mp4) && waited < ASSET_WAIT_MS) {
-      // Start the film here rather than waiting for the loop to come round.
-      // The illustration has its own loop already.
-      if (!mp4 && !filming.has(orderId)) {
-        void filmOrder({
-          id: orderId,
-          title: offer.title,
-          details: offer.details ?? offer.title,
-          category: offer.category ?? null,
-          pickup_location: offer.pickup_location ?? null,
-          dropoff_location: offer.dropoff_location ?? null,
-          budget_usd: offer.budget_usd ?? null,
-          // Needed, not decorative: this is how the film finds out whether the
-          // requester agreed to appear in it. Passing "" here meant every film
-          // started by an outreach hold - which is most of them - silently
-          // skipped the likeness.
-          requester_phone: offer.requester_phone ?? "",
-        }).catch(() => false);
-      }
-      const missing = [!png && "its picture"].filter(Boolean).join(" and ");
-      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for ${missing}`);
+    if (!png && waited < ASSET_WAIT_MS) {
+      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its picture`);
       continue;
     }
 
@@ -596,13 +574,8 @@ async function sendOutreach(): Promise<void> {
       const id = await uploadAttachment(png, "image/png");
       if (id) attachments.push(id);
     }
-    if (mp4) {
-      const id = await uploadAttachment(mp4, "video/mp4");
-      if (id) attachments.push(id);
-    }
-    if (!png || !mp4) {
-      const missing = [!png && "a picture"].filter(Boolean).join(" or ");
-      log(`offer ${offer.id} going out without ${missing} after ${Math.round(waited / 1000)}s`);
+    if (!png) {
+      log(`offer ${offer.id} going out without a picture after ${Math.round(waited / 1000)}s`);
     }
 
     const message = shorten(text);
@@ -1283,7 +1256,14 @@ async function deliverFilmsToRequesters(): Promise<void> {
 
   // The point of paying for one is that everyone taking work sees the job.
   const pitch = `Someone wants this done: "${film.title}". Sixteen seconds on why it matters. Text me if you'll take it.`;
-  const active = await market.activeWorkers().catch(() => []);
+  let active: Array<{ phone?: string }> = [];
+  try {
+    active = await market.activeWorkers();
+  } catch (err) {
+    log(`could not load the film audience for "${film.title}": ${(err as Error).message}`);
+    return;
+  }
+  let allDelivered = sent.accepted || sent.permanent;
   for (const worker of active) {
     if (!worker.phone || worker.phone === requester) continue;
     const out = await sendText(
@@ -1298,12 +1278,13 @@ async function deliverFilmsToRequesters(): Promise<void> {
         { role: "assistant", content: pitch, at: new Date().toISOString() },
       ]);
     }
+    if (!out.accepted && !out.permanent) allDelivered = false;
     log(`trailer broadcast -> ${worker.phone}: ${out.detail}`);
   }
 
-  // Mark it done on a permanent failure too, or an unusable number is retried
-  // every minute forever.
-  if (sent.accepted || sent.permanent) {
+  // Stable idempotency keys make retries safe. Do not close the queue row
+  // until every intended recipient either accepted or failed permanently.
+  if (allDelivered) {
     await market.markVideoDelivered(String(film.order_id)).catch(() => null);
   }
   if (sent.accepted) {

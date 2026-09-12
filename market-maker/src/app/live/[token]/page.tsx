@@ -27,6 +27,7 @@ type OrderDetail = {
   budget_usd: string | null;
   requester_phone: string | null;
   film_requested_at?: string | null;
+  film_paid_signature?: string | null;
   status: string | null;
   payment_status: string | null;
   solana_signature: string | null;
@@ -125,7 +126,7 @@ export default async function LivePage({
         <FilmButton
           token={token}
           fee={filmFee}
-          alreadyRequested={Boolean(order?.film_requested_at)}
+          alreadyRequested={Boolean(order?.film_paid_signature)}
         />
       </div>
     ) : null}
