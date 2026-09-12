@@ -103,11 +103,16 @@ export async function loadLiveDeal(board: LiveBoardView): Promise<LiveDeal> {
     : [];
   const counter = counters.find((row) => row.order_id === board.orderId) ?? null;
   const originalUsd = order?.budget_usd ? Number(order.budget_usd) : null;
-  const cancellable = matching && order?.status !== "completed" && order?.status !== "cancelled";
+  const cancellable =
+    matching &&
+    order?.status !== "completed" &&
+    order?.status !== "cancelled" &&
+    order?.status !== "done_pending" &&
+    order?.status !== "accepted";
 
   if (counter) {
     return {
-      canCancel: Boolean(cancellable || matching),
+      canCancel: Boolean(cancellable),
       canAccept: true,
       canDecline: true,
       kind: "counter",
@@ -119,7 +124,7 @@ export async function loadLiveDeal(board: LiveBoardView): Promise<LiveDeal> {
   }
 
   return {
-    canCancel: Boolean(cancellable || matching),
+    canCancel: Boolean(cancellable),
     canAccept: false,
     canDecline: Boolean(matching && (active?.offerId || active)),
     kind: active ? "offer" : null,
@@ -140,9 +145,10 @@ export async function decideLiveDeal(
 
   if (action === "cancel") {
     if (!deal.canCancel) return board;
-    await voicePost(`/v1/orders/${encodeURIComponent(board.orderId)}/cancel`, {
+    const result = await voicePost(`/v1/orders/${encodeURIComponent(board.orderId)}/cancel`, {
       reason: "Cancelled from the live board.",
     });
+    if (!result.ok) return board;
     return recordLiveEvent({
       token,
       kind: "stopped",

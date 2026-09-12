@@ -307,6 +307,18 @@ app.post("/v1/offers", async (req, res) => {
            responded_at = CASE
              WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.responded_at
              ELSE NULL
+           END,
+           counter_rounds = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_rounds
+             ELSE 0
+           END,
+           counter_price_usd = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_price_usd
+             ELSE NULL
+           END,
+           countered_at = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
+             ELSE NULL
            END
      RETURNING id, order_id, phone, status, offered_usd, travel_note`,
     [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],

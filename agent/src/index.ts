@@ -266,6 +266,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       turns.push({ role: "assistant", content: reply, at: new Date().toISOString() });
     }
     log(`-> ${phone} [reaction] ${sent.accepted ? "sent" : "FAILED"}: ${reply}`);
+    await saveTurns(phone, turns);
+    if (sent.accepted || sent.permanent) {
+      await completeEvent(event.id);
+    }
+    return;
   }
   await saveTurns(phone, turns);
   await completeEvent(event.id);
@@ -623,8 +628,9 @@ async function sendOutreach(): Promise<void> {
       continue;
     }
     if (attempt >= MAX_OUTREACH_ATTEMPTS) {
-      // Stop asking. Otherwise an unreachable number is re-texted forever.
-      await market.markOutreachSent(offer.id);
+      // They never got the text. Marking it sent would hold the exclusive
+      // slot for ten minutes; decline so rematch can move on now.
+      await market.respond(offer.id, false).catch(() => null);
       log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
       continue;
     }
