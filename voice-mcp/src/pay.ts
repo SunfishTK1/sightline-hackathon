@@ -43,6 +43,15 @@ export async function payForTask(input: {
     return { settled: false, reason: "nothing to pay - the task had no price", railcoins: 0 };
   }
 
+  const already = await pool.query<{ solana_signature: string }>(
+    `SELECT solana_signature FROM payments
+      WHERE order_id = $1 AND solana_signature IS NOT NULL`,
+    [input.orderId],
+  );
+  if (already.rows[0]?.solana_signature) {
+    return { settled: true, signature: already.rows[0].solana_signature, railcoins };
+  }
+
   try {
     const [payer, payee] = await Promise.all([
       ensureWallet(input.payerPhone),

@@ -92,7 +92,7 @@ export async function registerSignup(input: SignupInput) {
        VALUES ($1,$2,$3,$4,$5::text[],$6, now())
        ON CONFLICT (person_id) DO UPDATE
          SET phone = EXCLUDED.phone,
-             is_available = EXCLUDED.is_available,
+             is_available = worker_profiles.is_available AND EXCLUDED.is_available,
              blurb = COALESCE(EXCLUDED.blurb, worker_profiles.blurb),
              categories = EXCLUDED.categories,
              min_price_usd = COALESCE(EXCLUDED.min_price_usd, worker_profiles.min_price_usd),

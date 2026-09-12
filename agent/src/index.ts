@@ -456,7 +456,14 @@ async function matchOpenOrders(): Promise<void> {
     }
 
     const candidates = await market.candidates(order.id);
-    if (!candidates.length) continue;
+    if (!candidates.length) {
+      const result = await market.noMatch(String(order.id)).catch(() => null);
+      log(
+        `no candidates left for "${order.title}"` +
+          (result?.parked ? " - parked, requester told" : ""),
+      );
+      continue;
+    }
 
     const picks = await pickWorkers(order, candidates);
     if (!picks.length) {
@@ -1011,6 +1018,22 @@ async function chaseStuckItems(): Promise<void> {
           item.offer_id,
         );
         log(`expired counter ${item.offer_id} after ${strike - 1} notices`);
+      } else if (item.reason === "question_unanswered" && item.question_id) {
+        await market
+          .answerQuestion(
+            item.question_id,
+            item.phone,
+            "No answer in time. The worker can go ahead without this.",
+          )
+          .catch(() => null);
+        await sayTo(
+          item.phone,
+          `No answer on that question about "${item.about}", so I've closed it. The job is still moving.`,
+          `gotchu-questionexpired-${item.question_id}`,
+          "question_expired",
+          item.question_id,
+        );
+        log(`expired question ${item.question_id} after ${strike - 1} notices`);
       }
       continue;
     }

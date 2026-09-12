@@ -424,11 +424,15 @@ export async function confirmTaskDone(
   }
 
   if (!confirmed) {
-    await pool.query(
+    const disputed = await pool.query(
       `UPDATE orders SET status = 'accepted', done_marked_at = NULL, updated_at = now()
-        WHERE id = $1`,
+        WHERE id = $1 AND status = 'done_pending'
+        RETURNING id`,
       [order.id],
     );
+    if (!disputed.rows[0]) {
+      return { status: "unchanged", error: "No task of theirs is waiting to be confirmed." };
+    }
     await pool.query(
       `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
        VALUES ($1,$2,$3,'task_disputed',$4::jsonb)`,
@@ -438,11 +442,15 @@ export async function confirmTaskDone(
     return { status: "disputed" };
   }
 
-  await pool.query(
+  const completed = await pool.query(
     `UPDATE orders SET status = 'completed', completed_at = now(), updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1 AND status = 'done_pending'
+      RETURNING id`,
     [order.id],
   );
+  if (!completed.rows[0]) {
+    return { status: "unchanged", error: "That task is no longer waiting to be confirmed." };
+  }
 
   // Record what is owed. Nothing moves until a verified Connect account exists.
   const amount = Number(order.budget_usd ?? 0);
@@ -976,6 +984,7 @@ export async function recordNoMatch(orderId: string) {
  * rather than left waiting on a job that no longer exists.
  *
  * A completed task cannot be cancelled - that money has already moved.
+ * A task waiting on confirmation must be confirmed or disputed, not cancelled.
  */
 export async function cancelOrder(orderId: string, reason?: string) {
   const client = await pool.connect();
@@ -983,7 +992,7 @@ export async function cancelOrder(orderId: string, reason?: string) {
     await client.query("BEGIN");
     const { rows } = await client.query(
       `UPDATE orders SET status = 'cancelled', updated_at = now()
-        WHERE id = $1 AND status NOT IN ('completed', 'cancelled')
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'done_pending')
         RETURNING id, title, person_id`,
       [orderId],
     );

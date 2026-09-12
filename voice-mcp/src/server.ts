@@ -271,7 +271,9 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
         AND (wp.email IS NULL OR COALESCE((wp.doc->>'emailVerified')::boolean, false))
         AND w.person_id <> o.person_id
         AND NOT EXISTS (
-          SELECT 1 FROM job_offers j WHERE j.order_id = o.id AND j.phone = w.phone)
+          SELECT 1 FROM job_offers j
+           WHERE j.order_id = o.id AND j.phone = w.phone
+             AND j.status IN ('offered', 'countered', 'accepted'))
       LIMIT 25`,
     [req.params.orderId],
   );
@@ -293,7 +295,19 @@ app.post("/v1/offers", async (req, res) => {
      ON CONFLICT (order_id, phone) DO UPDATE
        SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
            offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
-           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note)
+           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note),
+           status = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.status
+             ELSE 'offered'
+           END,
+           outreach_sent_at = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.outreach_sent_at
+             ELSE NULL
+           END,
+           responded_at = CASE
+             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.responded_at
+             ELSE NULL
+           END
      RETURNING id, order_id, phone, status, offered_usd, travel_note`,
     [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
   );
