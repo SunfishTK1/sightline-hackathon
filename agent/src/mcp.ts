@@ -169,10 +169,15 @@ export const market = {
 
   /** Tasks with no illustration yet, and the store for them. */
   ordersNeedingImage: () => get<any[]>("/v1/orders/needing-image"),
-  storeOrderImage: (orderId: string, pngBase64: string, prompt: string) =>
-    post(`/v1/orders/${orderId}/image`, { png_base64: pngBase64, prompt }),
+  storeOrderImage: (
+    orderId: string,
+    image: { storage_key?: string; png_base64?: string; bytes?: number },
+    prompt: string,
+  ) => post(`/v1/orders/${orderId}/image`, { ...image, prompt }),
   orderImage: (orderId: string) =>
-    get<{ png_base64: string }>(`/v1/orders/${orderId}/image`).catch(() => null),
+    get<{ png_base64: string | null; storage_key: string | null; bytes: number | null }>(
+      `/v1/orders/${orderId}/image`,
+    ).catch(() => null),
 
   /** Things stuck long enough to be worth chasing. */
   escalations: (staleMinutes: number) =>

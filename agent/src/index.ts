@@ -8,7 +8,9 @@ import {
 import { buildNudgeHtml } from "./nudge.js";
 import { generateTaskImage } from "./illustrate.js";
 import { generateTaskVideo, type FilmableOrder } from "./video.js";
-import { ensureBucket, putVideo, getVideo, storageConfigured } from "./storage.js";
+import {
+  ensureBucket, putVideo, putImage, getVideo, getImage, storageConfigured,
+} from "./storage.js";
 import {
   pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
   type RelayEvent,
@@ -379,9 +381,9 @@ async function sendOutreach(): Promise<void> {
     const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
     const attachments: string[] = [];
 
-    const stored = await market.orderImage(orderId).catch(() => null);
-    if (stored?.png_base64) {
-      const id = await uploadAttachment(Buffer.from(stored.png_base64, "base64"), "image/png");
+    const png = await imageFor(orderId);
+    if (png) {
+      const id = await uploadAttachment(png, "image/png");
       if (id) attachments.push(id);
     } else if (waited < IMAGE_WAIT_MS) {
       log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
@@ -787,7 +789,12 @@ async function illustrateOrders(): Promise<void> {
       log(`could not illustrate "${order.title}"`);
       continue;
     }
-    await market.storeOrderImage(order.id, made.png.toString("base64"), made.prompt);
+    const imgKey = await putImage(order.id, made.png);
+    await market.storeOrderImage(
+      order.id,
+      imgKey ? { storage_key: imgKey, bytes: made.png.length } : { png_base64: made.png.toString("base64") },
+      made.prompt,
+    );
     log(`illustrated "${order.title}" (${made.png.length} bytes)`);
 
     // Show the requester what the agent understood, in a picture.
@@ -855,6 +862,15 @@ async function filmOpenTasks(): Promise<void> {
   const order = pending.find((o: { id: string }) => !filming.has(o.id));
   if (!order) return;
   await filmOrder(order);
+}
+
+/** The illustration for a task, from the bucket or from an older inline row. */
+async function imageFor(orderId: string): Promise<Buffer | null> {
+  const stored = await market.orderImage(orderId).catch(() => null);
+  if (!stored) return null;
+  if (stored.storage_key) return getImage(stored.storage_key);
+  if (stored.png_base64) return Buffer.from(stored.png_base64, "base64");
+  return null;
 }
 
 /** The clip for an offer, from the bucket or from an older inline row. */
@@ -947,11 +963,9 @@ async function main() {
         // same thread with the picture rather than as a bare resend.
         let attachmentIds: string[] | undefined;
         if (body.order_id) {
-          const stored = await market.orderImage(String(body.order_id)).catch(() => null);
-          if (stored?.png_base64) {
-            const id = await uploadAttachment(
-              Buffer.from(stored.png_base64, "base64"), "image/png",
-            );
+          const png = await imageFor(String(body.order_id));
+          if (png) {
+            const id = await uploadAttachment(png, "image/png");
             if (id) attachmentIds = [id];
           }
         }

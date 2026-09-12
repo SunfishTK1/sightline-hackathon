@@ -67,6 +67,8 @@ export const onboardingSchema = z.object({
   consentText: z
     .boolean()
     .refine((value) => value, "You must opt in to being texted"),
+  // Deliberately not refined: this one is allowed to be false.
+  consentLikeness: z.boolean().optional().default(false),
   photoDataUrl: photoDataUrlSchema.optional(),
 });
 
