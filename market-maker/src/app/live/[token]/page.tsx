@@ -24,6 +24,8 @@ type OrderDetail = {
   budget_usd: string | null;
   requester_phone: string | null;
   status: string | null;
+  payment_status: string | null;
+  solana_signature: string | null;
 };
 
 /** The board stores no locations, so the task itself is the source for them. */
@@ -91,6 +93,9 @@ export default async function LivePage({
   const wallet = await loadWallet(order?.requester_phone ?? null);
 
   const railcoins = order?.budget_usd ? Math.round(Number(order.budget_usd)) : null;
+  const alreadyPaid = Boolean(order?.solana_signature) || order?.payment_status === "paid";
+  const needsRetry =
+    order?.status === "completed" && !alreadyPaid && Boolean(railcoins && railcoins > 0);
 
   return (
     <LiveBoard
@@ -103,8 +108,9 @@ export default async function LivePage({
         requesterBalance: wallet.railcoins,
         publicKey: wallet.publicKey,
         cluster: wallet.cluster,
-        canPay: CLOSEABLE.has(order?.status ?? ""),
-        alreadyPaid: order?.status === "completed",
+        canPay: CLOSEABLE.has(order?.status ?? "") || needsRetry,
+        alreadyPaid,
+        needsRetry,
       }}
     />
   );

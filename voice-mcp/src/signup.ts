@@ -74,8 +74,7 @@ export async function registerSignup(input: SignupInput) {
             doc = jsonb_set(
               COALESCE(doc, '{}'::jsonb),
               '{emailVerified}',
-              CASE WHEN $3 IS NOT NULL AND $3 <> '' THEN 'true'::jsonb
-                   ELSE COALESCE(doc->'emailVerified', 'false'::jsonb) END
+              COALESCE(doc->'emailVerified', 'false'::jsonb)
             )
       WHERE id = $1
       RETURNING id, phone, display_name, email, phone_verified`,

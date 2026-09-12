@@ -1,5 +1,5 @@
 import { pool, normalizePhone, upsertPerson } from "./db.js";
-import { payForTask, recordSettlement, type Settlement } from "./pay.js";
+import { payForTask, type Settlement } from "./pay.js";
 import { getWallet } from "./wallet.js";
 import { RAILCOINS_PER_SOL } from "./pay.js";
 
@@ -486,7 +486,13 @@ export async function confirmTaskDone(
     `INSERT INTO payments (order_id, payer_id, payee_id, amount_usd, platform_fee_usd,
                            status, stripe_mode, note)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-     ON CONFLICT (order_id) DO UPDATE SET status = EXCLUDED.status, updated_at = now()
+     ON CONFLICT (order_id) DO UPDATE SET
+       status = CASE
+         WHEN payments.solana_signature IS NOT NULL OR payments.status IN ('paid', 'paying')
+           THEN payments.status
+         ELSE EXCLUDED.status
+       END,
+       updated_at = now()
      RETURNING id, amount_usd, platform_fee_usd, status`,
     [
       order.id, order.person_id, order.accepted_by, amount, fee, payState,
@@ -506,7 +512,6 @@ export async function confirmTaskDone(
       payeePhone: order.worker_phone,
       amountUsd: amount - fee,
     });
-    await recordSettlement(order.id, settlement).catch(() => null);
     console.log(
       settlement.settled
         ? `paid ${settlement.railcoins} railcoins for "${order.title}" (${settlement.signature})`
@@ -619,7 +624,6 @@ export async function receiveAndPay(orderId: string, requesterPhone?: string) {
       payeePhone: order.worker_phone,
       amountUsd: amount - fee,
     });
-    await recordSettlement(orderId, settlement).catch(() => null);
     return { status: "completed", settlement };
   }
   if (!order.worker_phone) return { error: "nobody_has_taken_it" as const };

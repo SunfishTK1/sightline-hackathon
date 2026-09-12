@@ -922,10 +922,10 @@ async function autoNegotiate(): Promise<void> {
         if (offer.order_id) {
           await postLiveEvent({
             orderId: offer.order_id,
-            kind: "declined",
-            message: "Declined. Trying the next person.",
+            kind: "timeout",
+            message: "Trying the next person.",
             offerId: String(offer.id),
-            state: "declined",
+            state: "dropped",
           });
         }
         log(`broker said try next on offer ${offer.id}`);

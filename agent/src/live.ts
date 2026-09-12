@@ -125,13 +125,13 @@ export async function announceHandoffOnLive(handoff: {
   if (handoff.kind === "counter_released" || handoff.kind === "negotiation_cancelled") {
     await postLiveEvent({
       orderId,
-      kind: "declined",
+      kind: "timeout",
       message:
         handoff.kind === "negotiation_cancelled"
           ? "The back-and-forth was called off. Trying the next person."
-          : "They moved on. Trying the next person.",
+          : "Trying the next person.",
       offerId,
-      state: "declined",
+      state: "dropped",
     });
     return;
   }

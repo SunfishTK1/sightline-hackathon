@@ -983,9 +983,11 @@ app.get("/v1/orders/:id", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
             o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
-            p.phone AS requester_phone
+            p.phone AS requester_phone,
+            pay.status AS payment_status, pay.solana_signature
        FROM orders o
        LEFT JOIN people p ON p.id = o.person_id
+       LEFT JOIN payments pay ON pay.order_id = o.id
       WHERE o.id = $1`,
     [req.params.id],
   );
