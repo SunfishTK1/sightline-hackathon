@@ -92,24 +92,50 @@ export async function resolveOffer(
   return { status: "accepted", order_id: offer.order_id };
 }
 
+/**
+ * Move an order to the person who actually asked for it. Needed when a number
+ * was mis-heard on a call and the task landed under a stranger.
+ */
+export async function reassignOrder(
+  orderId: string,
+  phone: string,
+): Promise<{ status: string; error?: string; title?: string; requester?: string }> {
+  const e164 = normalizePhone(phone);
+  const person = await upsertPerson(e164);
+  const { rows } = await pool.query(
+    `UPDATE orders SET person_id = $2, updated_at = now()
+      WHERE id = $1
+      RETURNING id, title, status`,
+    [orderId, person.id],
+  );
+  if (!rows[0]) return { status: "unchanged", error: "No order with that id." };
+  return { status: "reassigned", title: rows[0].title, requester: e164 };
+}
+
 // ---------------------------------------------------------------- counters
 
 /**
  * A worker proposes different terms. The offer is held open but is no longer
  * theirs to simply accept - the requester decides.
  */
+/** Two rounds of haggling, a warning on the third, cancelled on a fourth. */
+const WARN_AT_ROUND = 3;
+const CANCEL_AFTER_ROUND = 3;
+
 export async function counterOffer(
   offerId: string | number,
   phone: string,
   priceUsd: number,
   note?: string,
-): Promise<{ status: string; error?: string; counter_price_usd?: number }> {
+): Promise<{
+  status: string; error?: string; counter_price_usd?: number; final_round?: boolean;
+}> {
   const { rows } = await pool.query(
     `UPDATE job_offers
         SET status = 'countered', counter_price_usd = $3, counter_note = $4,
-            countered_at = now()
+            countered_at = now(), counter_rounds = counter_rounds + 1
       WHERE id = $1 AND phone = $2 AND status = 'offered'
-      RETURNING id, order_id, phone, counter_price_usd`,
+      RETURNING id, order_id, phone, counter_price_usd, counter_rounds`,
     [offerId, normalizePhone(phone), priceUsd, note ?? null],
   );
   const offer = rows[0];
@@ -121,6 +147,46 @@ export async function counterOffer(
     [offer.order_id],
   );
   const o = order.rows[0];
+  const rounds = Number(offer.counter_rounds);
+
+  // Past the limit the deal is off for both sides, not just paused.
+  if (rounds > CANCEL_AFTER_ROUND) {
+    await pool.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now() WHERE id = $1`,
+      [offer.id],
+    );
+    const worker = await pool.query(`SELECT id FROM people WHERE phone = $1`, [offer.phone]);
+    const payload = JSON.stringify({ title: o?.title, rounds });
+    await pool.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'negotiation_cancelled',$4::jsonb)`,
+      [worker.rows[0]?.id ?? null, offer.phone, offer.order_id, payload],
+    );
+    if (o) {
+      await pool.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'negotiation_cancelled',$4::jsonb)`,
+        [o.requester_id, o.requester_phone, offer.order_id, payload],
+      );
+    }
+    return { status: "cancelled_too_many_rounds" };
+  }
+
+  // On the last permitted round, warn the person doing the countering too.
+  if (rounds >= WARN_AT_ROUND) {
+    const worker = await pool.query(`SELECT id FROM people WHERE phone = $1`, [offer.phone]);
+    await pool.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'counter_warning',$4::jsonb)`,
+      [
+        worker.rows[0]?.id ?? null,
+        offer.phone,
+        offer.order_id,
+        JSON.stringify({ title: o?.title, rounds }),
+      ],
+    );
+  }
+
   if (o) {
     await pool.query(
       `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
@@ -135,11 +201,16 @@ export async function counterOffer(
           asking_usd: Number(offer.counter_price_usd),
           original_usd: o.budget_usd ? Number(o.budget_usd) : null,
           note: note ?? null,
+          final_round: rounds >= WARN_AT_ROUND,
         }),
       ],
     );
   }
-  return { status: "countered", counter_price_usd: Number(offer.counter_price_usd) };
+  return {
+    status: "countered",
+    counter_price_usd: Number(offer.counter_price_usd),
+    final_round: rounds >= WARN_AT_ROUND,
+  };
 }
 
 /** Counters waiting on this requester's decision. */

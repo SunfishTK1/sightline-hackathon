@@ -117,6 +117,8 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_price_usd numeric(10,2);
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_note text;
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS countered_at timestamptz;
+    -- Haggling has to end: counted so a negotiation cannot run forever.
+    ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_rounds int NOT NULL DEFAULT 0;
 
     -- A worker's agent asking the requester something about the job, rather
     -- than the job stalling on a detail nobody clarified.

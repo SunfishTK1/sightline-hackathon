@@ -236,7 +236,16 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "counter_received") {
     const was = handoff.payload?.original_usd ? ` instead of $${handoff.payload.original_usd}` : "";
     const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
-    return `Someone will do "${handoff.payload?.title}" for $${handoff.payload?.asking_usd}${was}.${note} Reply YES to agree or NO to pass.`;
+    const last = handoff.payload?.final_round
+      ? " This is the last round - one more counter and the offer is off."
+      : "";
+    return `Someone will do "${handoff.payload?.title}" for $${handoff.payload?.asking_usd}${was}.${note} Reply YES to agree or NO to pass.${last}`;
+  }
+  if (handoff.kind === "counter_warning") {
+    return `That's ${handoff.payload?.rounds} rounds of haggling on "${handoff.payload?.title}". One more counter from either side and the offer is cancelled.`;
+  }
+  if (handoff.kind === "negotiation_cancelled") {
+    return `Called off the back-and-forth on "${handoff.payload?.title}" after ${handoff.payload?.rounds} rounds. The offer is cancelled for both sides.`;
   }
   if (handoff.kind === "counter_accepted") {
     return `Your price was accepted: "${handoff.payload?.title}" at $${handoff.payload?.agreed_usd}. It's yours.`;

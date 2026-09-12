@@ -6,7 +6,7 @@ import { ensureSchema, pool, normalizePhone, upsertPerson } from "./db.js";
 import {
   resolveOffer, seedDemoData, purgeDemoData, removeWorker,
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
-  askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
+  askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 
@@ -360,6 +360,20 @@ app.post("/v1/offers/:id/counter/respond", async (req, res) => {
 /** Counters awaiting a requester's decision. */
 app.get("/v1/counters/open", async (req, res) => {
   res.json({ ok: true, data: await listOpenCounters(String(req.query.phone ?? "")) });
+});
+
+/** Point an order at the person who actually requested it. */
+app.post("/v1/orders/:id/reassign", async (req, res) => {
+  const phone = req.body?.phone;
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    const result = await reassignOrder(req.params.id, String(phone));
+    if (result.error) return res.status(404).json({ ok: false, error: result.error });
+    console.log(`reassigned order ${req.params.id} to ${result.requester}`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 /** Recent orders, with where they came from. */

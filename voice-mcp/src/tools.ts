@@ -30,35 +30,75 @@ export const tools: ToolDef[] = [
     name: "identify_caller",
     title: "Identify caller",
     description:
-      "Look up who is calling by phone number and return their recent orders and any open call. Call this first so you can greet them with context instead of asking what they already told us.",
+      "Everything known about the person on this number: the tasks they have asked for and where each stands, jobs they have been offered, counter-offers and questions waiting on them, whether they take work themselves, and what past calls covered. Call this first with the number from caller ID, and use what comes back instead of asking them things the system already knows.",
     shape: {
-      phone: z.string().describe("Caller's phone number in any format"),
+      phone: z.string().describe("Caller's number from caller ID, in any format"),
       display_name: z.string().optional().describe("Name if they give one"),
     },
     handler: async ({ phone, display_name }) => {
       const e164 = normalizePhone(phone);
       const person = await upsertPerson(e164, display_name);
-      const [orders, openCall] = await Promise.all([
-        pool.query(
-          `SELECT id, title, status, budget_usd, created_at
-             FROM orders WHERE person_id = $1
-            ORDER BY created_at DESC LIMIT 5`,
-          [person.id],
-        ),
-        pool.query(
-          `SELECT id, started_at FROM calls
-            WHERE caller_phone = $1 AND status = 'open'
-            ORDER BY started_at DESC LIMIT 1`,
-          [e164],
-        ),
-      ]);
+
+      const [orders, openCall, worker, pastCalls, offers, counters, askedOfThem, theyAsked] =
+        await Promise.all([
+          pool.query(
+            `SELECT o.id, o.title, o.status, o.budget_usd, o.category, o.deadline_at,
+                    o.created_at, w.phone AS being_done_by
+               FROM orders o
+               LEFT JOIN people w ON w.id = o.accepted_by
+              WHERE o.person_id = $1
+              ORDER BY o.created_at DESC LIMIT 8`,
+            [person.id],
+          ),
+          pool.query(
+            `SELECT id, started_at FROM calls
+              WHERE caller_phone = $1 AND status = 'open'
+              ORDER BY started_at DESC LIMIT 1`,
+            [e164],
+          ),
+          pool.query(
+            `SELECT is_available, blurb, categories, min_price_usd, auto_counter, auto_accept
+               FROM worker_profiles WHERE phone = $1`,
+            [e164],
+          ),
+          pool.query(
+            `SELECT id, started_at, summary, resolution, resolution_status
+               FROM calls WHERE caller_phone = $1 AND status = 'completed'
+              ORDER BY started_at DESC LIMIT 3`,
+            [e164],
+          ),
+          listOpenOffers(e164),
+          listOpenCounters(e164),
+          listOpenQuestions(e164),
+          listMyQuestions(e164),
+        ]);
+
+      const live = orders.rows.filter((o: { status: string }) =>
+        ["submitted", "offered", "accepted"].includes(o.status),
+      );
+
       return {
         person_id: person.id,
         phone: e164,
         display_name: person.display_name,
         known_caller: (orders.rowCount ?? 0) > 0,
-        recent_orders: orders.rows,
         open_call_id: openCall.rows[0]?.id ?? null,
+
+        // Tasks they asked for.
+        open_requests: live,
+        recent_orders: orders.rows,
+
+        // Work they could pick up.
+        is_worker: (worker.rowCount ?? 0) > 0,
+        worker_profile: worker.rows[0] ?? null,
+        job_offers_held: offers,
+
+        // Waiting on a decision or an answer from them.
+        counters_awaiting_them: counters,
+        questions_awaiting_them: askedOfThem,
+        answers_they_received: theyAsked.filter((q: { answer?: string | null }) => q.answer),
+
+        previous_calls: pastCalls.rows,
       };
     },
   },
