@@ -7,6 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { PhoneField } from "./PhoneField";
 import { PhotoField } from "./PhotoField";
+import { TermsDialog } from "./TermsDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -60,6 +61,7 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
       lastName: existing?.lastName ?? "",
       phone: existing ? formatPhoneMask(existing.phone) : "",
       cmuEmail: existing?.cmuEmail ?? "",
+      acceptedTerms: existing?.consents.acceptedTerms ?? false,
       ageConfirmed: existing?.consents.age18 ?? false,
       consentCall: existing?.consents.canCall ?? false,
       consentText: existing?.consents.canText ?? false,
@@ -106,6 +108,7 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
         lastName: user.lastName,
         phone: formatPhoneMask(user.phone),
         cmuEmail: user.cmuEmail,
+        acceptedTerms: true,
         ageConfirmed: true,
         consentCall: true,
         consentText: true,
@@ -200,8 +203,28 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
 
       <fieldset className="space-y-4 border-t border-[var(--ink)]/10 pt-7">
         <legend className="mb-1 text-sm font-medium text-[var(--ink)]">
-          You&apos;ll need to agree to all of these
+          You&apos;ll need to agree to the first three
         </legend>
+        <div className="space-y-1">
+          <label htmlFor="acceptedTerms" className="flex items-start gap-3 text-sm text-[var(--ink)]">
+            <input
+              id="acceptedTerms"
+              type="checkbox"
+              checked={form.watch("acceptedTerms")}
+              onChange={(event) =>
+                form.setValue("acceptedTerms", event.target.checked, { shouldValidate: true })
+              }
+              className="mt-0.5 size-4 accent-[var(--broker)]"
+            />
+            <span>
+              I have read and agree to the{" "}
+              <TermsDialog onAgree={() => form.setValue("acceptedTerms", true, { shouldValidate: true })} />
+            </span>
+          </label>
+          {errors.acceptedTerms ? (
+            <p className="text-sm text-destructive">{errors.acceptedTerms.message}</p>
+          ) : null}
+        </div>
         <ConsentCheck
           id="ageConfirmed"
           label="I am 18 or older"

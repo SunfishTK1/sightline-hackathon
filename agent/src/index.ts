@@ -20,6 +20,7 @@ import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } 
 import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
+import { learnStyle } from "./style.js";
 import { ackLiveSkip, listLiveSkips, postLiveEvent, postLiveMedia, startLiveBoard } from "./live.js";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
@@ -101,6 +102,7 @@ async function handleEvent(event: RelayEvent): Promise<void> {
       },
       who?.wallet ?? null,
       history.length === 0,
+      who?.style ?? null,
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;
@@ -123,12 +125,19 @@ async function handleEvent(event: RelayEvent): Promise<void> {
   if (sent.accepted) {
     // Tool actions are stored between the question and the answer, so the
     // agent can later recall what it did, not just what it said.
-    await saveTurns(phone, [
+    const updatedHistory = [
       ...history,
-      { role: "user", content: text, at: receivedAt },
+      { role: "user", content: text, at: receivedAt } as Turn,
       ...toolTurns,
-      { role: "assistant", content: reply, at: new Date().toISOString() },
-    ]);
+      { role: "assistant", content: reply, at: new Date().toISOString() } as Turn,
+    ];
+    await saveTurns(phone, updatedHistory);
+
+    // Re-learn their style every so often, not on every message - it costs
+    // two model calls and their style doesn't change message to message.
+    if (updatedHistory.length % 8 < 2) {
+      learnStyle(phone, updatedHistory).catch(() => {});
+    }
   }
 }
 
@@ -339,6 +348,9 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "question_answered") {
     return `On "${handoff.payload?.title}" you asked: ${handoff.payload?.question} They said: ${handoff.payload?.answer}`;
   }
+  if (handoff.kind === "no_takers") {
+    return `Nobody has taken "${handoff.payload?.title}" after asking around, so I've paused it rather than keep pestering people. Tell me a different price or looser terms and I'll put it back out.`;
+  }
   if (handoff.kind === "task_cancelled") {
     const why = handoff.payload?.reason ? ` (${handoff.payload.reason})` : "";
     return `"${handoff.payload?.title}" was called off${why}, so you're off the hook for it. Nothing owed either way.`;
@@ -378,7 +390,13 @@ async function matchOpenOrders(): Promise<void> {
 
     const picks = await pickWorkers(order, candidates);
     if (!picks.length) {
-      log(`no suitable worker for "${order.title}" among ${candidates.length} available`);
+      // Count the miss. A task the pool keeps declining gets parked and the
+      // requester told, rather than retried every twenty seconds in silence.
+      const result = await market.noMatch(String(order.id)).catch(() => null);
+      log(
+        `no suitable worker for "${order.title}" among ${candidates.length} available` +
+          (result?.parked ? " - parked, requester told" : ""),
+      );
       continue;
     }
     const pick = picks[0];

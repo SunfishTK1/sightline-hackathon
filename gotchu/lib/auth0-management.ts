@@ -21,13 +21,23 @@ declare global {
   var _gotchuAuth0MgmtToken: CachedToken | undefined;
 }
 
+const REQUIRED_ENV_VARS = [
+  "AUTH0_DOMAIN",
+  "AUTH0_M2M_CLIENT_ID",
+  "AUTH0_M2M_CLIENT_SECRET",
+  // Not the M2M app - this is the "Gotchu CMU" Regular Web App's client id,
+  // required by Auth0's verification-email job to pick the right email
+  // template. Easy to forget when only the M2M app was set up.
+  "AUTH0_CLIENT_ID",
+] as const;
+
+/** Which of the required vars are unset, if any - empty when fully configured. */
+export function missingAuth0EnvVars(): string[] {
+  return REQUIRED_ENV_VARS.filter((name) => !process.env[name]);
+}
+
 export function auth0ManagementConfigured(): boolean {
-  return Boolean(
-    process.env.AUTH0_DOMAIN &&
-      process.env.AUTH0_M2M_CLIENT_ID &&
-      process.env.AUTH0_M2M_CLIENT_SECRET &&
-      process.env.AUTH0_CLIENT_ID,
-  );
+  return missingAuth0EnvVars().length === 0;
 }
 
 function domain(): string {

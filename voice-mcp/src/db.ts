@@ -223,6 +223,11 @@ export async function ensureSchema(): Promise<void> {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS payments_order_idx ON payments (order_id);
 
+    -- Settlement happens on devnet in railcoins, so the row keeps the on-chain
+    -- signature: without it there is no way to show the money actually moved.
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS solana_signature text;
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS railcoins int;
+
     -- One devnet wallet per person, created the first time the agent hears
     -- from them. The secret key is encrypted at rest; devnet SOL is worthless
     -- but the key format is identical to mainnet, so it is not stored in the
@@ -234,6 +239,34 @@ export async function ensureSchema(): Promise<void> {
       cluster               text NOT NULL DEFAULT 'devnet',
       funded_at             timestamptz,
       created_at            timestamptz NOT NULL DEFAULT now()
+    );
+
+    -- Learned from how this person actually writes, not anything they filled
+    -- into a form. Re-learned periodically as more of their history comes in,
+    -- and read back to condition how the agent talks to them.
+    CREATE TABLE IF NOT EXISTS person_style (
+      person_id   uuid PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+      summary     text NOT NULL,
+      style_tag   text NOT NULL,
+      embedding   jsonb NOT NULL,
+      updated_at  timestamptz NOT NULL DEFAULT now()
+    );
+    -- How many times the matcher looked at this task and picked nobody. A task
+    -- nobody will take should say so once, not be retried every twenty seconds
+    -- for the rest of the day.
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS match_attempts int NOT NULL DEFAULT 0;
+
+    -- A link the agent can text someone so they can see and manage their
+    -- wallet. Opening it is the proof: it was sent to their number and only
+    -- they received it. Anyone holding the link has the same access, which is
+    -- why it expires and why this is devnet play money.
+    CREATE TABLE IF NOT EXISTS wallet_links (
+      token       text PRIMARY KEY,
+      person_id   uuid NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+      phone       text NOT NULL,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      expires_at  timestamptz NOT NULL,
+      opened_at   timestamptz
     );
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_by uuid REFERENCES people(id);

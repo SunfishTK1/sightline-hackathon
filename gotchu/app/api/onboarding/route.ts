@@ -15,6 +15,7 @@ import { cookies } from "next/headers";
 import {
   auth0ManagementConfigured,
   findOrCreateAuth0User,
+  missingAuth0EnvVars,
   sendAuth0VerificationEmail,
   setAuth0EmailUnverified,
 } from "@/lib/auth0-management";
@@ -29,6 +30,7 @@ import {
 } from "@/lib/users";
 import { isCmuEmail, onboardingSchema } from "@/lib/validate";
 import { activateParticipant } from "@/lib/activate";
+import { TERMS_VERSION } from "@/lib/terms";
 import type { User } from "@/lib/types/user";
 
 export async function POST(req: Request) {
@@ -57,20 +59,40 @@ export async function POST(req: Request) {
   let emailVerifiedAt: string | undefined;
 
   if (auth0ManagementConfigured()) {
-    const auth0User = await findOrCreateAuth0User(input.cmuEmail);
-    auth0Sub = auth0User.user_id;
-    if (auth0User.email_verified) {
-      await setAuth0EmailUnverified(auth0User.user_id);
+    try {
+      const auth0User = await findOrCreateAuth0User(input.cmuEmail);
+      auth0Sub = auth0User.user_id;
+      if (auth0User.email_verified) {
+        await setAuth0EmailUnverified(auth0User.user_id);
+      }
+      await sendAuth0VerificationEmail(auth0User.user_id);
+      emailVerified = false;
+      emailVerifiedAt = undefined;
+    } catch (err) {
+      // Never silently mark someone verified because Auth0 hiccuped - that's
+      // the exact bug this is guarding against. Log loudly (this should show
+      // up in Railway's deploy logs) and fail the request for a brand-new
+      // identity; for an existing one, keep going but leave them unverified.
+      console.error(
+        `Auth0 email verification failed for ${input.cmuEmail}: ${(err as Error).message}`,
+      );
+      if (!auth0Sub) {
+        return fail("Could not send a verification email right now. Please try again shortly.", 502);
+      }
+      emailVerified = false;
+      emailVerifiedAt = undefined;
     }
-    await sendAuth0VerificationEmail(auth0User.user_id);
-    emailVerified = false;
-    emailVerifiedAt = undefined;
   } else {
-    // Dev fallback so onboarding still works without an Auth0 tenant configured.
+    // Dev-only fallback so onboarding still works without an Auth0 tenant
+    // configured locally. In production this should never trigger - if it
+    // does, these are exactly the env vars missing on the deploy.
+    console.error(
+      `Auth0 Management API not configured (missing: ${missingAuth0EnvVars().join(", ") || "unknown"}) ` +
+        "- skipping real email verification.",
+    );
     auth0Sub ??= `local|${input.cmuEmail}`;
     emailVerified = true;
     emailVerifiedAt = new Date().toISOString();
-    console.warn("AUTH0_M2M_* not configured — skipping email verification.");
   }
 
   const now = new Date().toISOString();
@@ -94,6 +116,8 @@ export async function POST(req: Request) {
       age18: input.ageConfirmed,
       canCall: input.consentCall,
       canText: input.consentText,
+      acceptedTerms: input.acceptedTerms,
+      termsVersion: TERMS_VERSION,
       canUseLikeness: input.consentLikeness ?? false,
       acceptedAt: now,
     },

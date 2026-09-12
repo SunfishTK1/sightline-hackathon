@@ -1,11 +1,17 @@
 /** @owner Daphne — open task pool */
+import Link from "next/link";
 import { FeedList } from "@/components/feed/FeedList";
 
 export default function FeedPage() {
   return (
     <main className="mx-auto w-full max-w-2xl px-6 py-12">
       <h1 className="mb-2 text-3xl font-semibold">Open tasks</h1>
-      <p className="mb-8 text-muted-foreground">What&apos;s available on campus right now.</p>
+      <p className="mb-8 text-muted-foreground">
+        What&apos;s available on campus right now.{" "}
+        <Link href="/map" className="underline-offset-4 hover:underline">
+          Campus map
+        </Link>
+      </p>
       <FeedList />
     </main>
   );
