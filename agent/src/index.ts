@@ -7,6 +7,7 @@ import {
 } from "./db.js";
 import { buildNudgeHtml } from "./nudge.js";
 import { generateTaskImage } from "./illustrate.js";
+import { generateTaskVideo } from "./video.js";
 import {
   pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
   type RelayEvent,
@@ -768,6 +769,57 @@ async function illustrateOrders(): Promise<void> {
   }
 }
 
+/**
+ * Film the job as a pitch. It goes to whoever is being asked to take it, so
+ * the clip is made while the task is still open. Generation runs for over a
+ * minute, so this loop is slow and does one at a time.
+ */
+async function filmOpenTasks(): Promise<void> {
+  const pending = await market.ordersNeedingVideo();
+  const order = pending[0];
+  if (!order) return;
+
+  log(`filming "${order.title}"...`);
+  const made = await generateTaskVideo(order);
+  if (!made) {
+    log(`could not film "${order.title}"`);
+    return;
+  }
+  await market.storeOrderVideo(order.id, made.mp4.toString("base64"), made.prompt, made.seconds);
+  log(`filmed "${order.title}" (${made.mp4.length} bytes, ${made.seconds}s)`);
+
+  // Anyone already holding this offer got the text before the film existed.
+  const holders = await market.offerHolders(order.id).catch(() => []);
+  if (!holders.length) return;
+
+  const attachmentId = await uploadAttachment(made.mp4, "video/mp4");
+  if (!attachmentId) {
+    log(`could not upload the film for "${order.title}"`);
+    return;
+  }
+  const pay = order.budget_usd && Number(order.budget_usd) > 0 ? ` ($${order.budget_usd})` : "";
+  const caption = `The job, in motion: ${order.title}${pay}. Reply YES if you'll take it.`;
+
+  let sentAny = false;
+  for (const holder of holders) {
+    const sent = await sendText(
+      holder.phone, shorten(caption),
+      `gotchu-film-${order.id}-${holder.phone.replace(/\D/g, "")}`, [attachmentId],
+    );
+    await recordSent(sent.requestId, holder.phone, "film", order.id, caption);
+    if (sent.accepted) {
+      sentAny = true;
+      const history = await loadTurns(holder.phone);
+      await saveTurns(holder.phone, [
+        ...history,
+        { role: "assistant", content: caption, at: new Date().toISOString() },
+      ]);
+    }
+    log(`film -> ${holder.phone}: ${sent.detail}`);
+  }
+  if (sentAny) await market.markVideoDelivered(order.id).catch(() => null);
+}
+
 async function loop(name: string, fn: () => Promise<void>, seconds: number) {
   for (;;) {
     try {
@@ -896,6 +948,7 @@ async function main() {
   loop("expire", expireStaleOffers, 30);
   loop("chase", chaseStuckItems, 60);
   loop("illustrate", illustrateOrders, 30);
+  loop("film", filmOpenTasks, 120);
 }
 
 main().catch((err) => {
