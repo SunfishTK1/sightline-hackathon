@@ -786,6 +786,56 @@ export async function purgeDemoData(): Promise<{
   }
 }
 
+/**
+ * Call a task off. Anyone currently holding or negotiating the offer is told,
+ * rather than left waiting on a job that no longer exists.
+ *
+ * A completed task cannot be cancelled - that money has already moved.
+ */
+export async function cancelOrder(orderId: string, reason?: string) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `UPDATE orders SET status = 'cancelled', updated_at = now()
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled')
+        RETURNING id, title, person_id`,
+      [orderId],
+    );
+    const order = rows[0];
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { error: "not_cancellable" as const };
+    }
+
+    const open = await client.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE order_id = $1 AND status IN ('offered', 'accepted', 'countered')
+        RETURNING phone, person_id`,
+      [orderId],
+    );
+    for (const holder of open.rows) {
+      await client.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'task_cancelled',$4::jsonb)`,
+        [
+          holder.person_id,
+          holder.phone,
+          orderId,
+          JSON.stringify({ title: order.title, reason: reason ?? null }),
+        ],
+      );
+    }
+    await client.query("COMMIT");
+    return { cancelled: order.id, title: order.title, told: open.rows.length };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** Take one person out of the worker pool entirely. */
 export async function removeWorker(phone: string): Promise<boolean> {
   const { rowCount } = await pool.query(`DELETE FROM worker_profiles WHERE phone = $1`, [

@@ -137,6 +137,35 @@ export async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS job_questions_unanswered_idx
       ON job_questions (order_id) WHERE answered_at IS NULL;
 
+    -- The ethics gate's verdict, and the job as first allowed. A task may flex
+    -- on price or detail, but it may not become a different job.
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS ethics_verdict text;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS ethics_reason text;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS ethics_conditions jsonb;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS original_structured jsonb;
+
+    -- Web signup. A person may arrive by phone, by text, or by signing up, and
+    -- all three have to land on the same row - the phone is the identity.
+    ALTER TABLE people ADD COLUMN IF NOT EXISTS auth0_sub text;
+    ALTER TABLE people ADD COLUMN IF NOT EXISTS email text;
+    -- Defaults true so everyone already in the pool keeps working; signup sets
+    -- it false until a code sent to that number comes back.
+    ALTER TABLE people ADD COLUMN IF NOT EXISTS phone_verified boolean NOT NULL DEFAULT true;
+    ALTER TABLE people ADD COLUMN IF NOT EXISTS signed_up_at timestamptz;
+    CREATE UNIQUE INDEX IF NOT EXISTS people_auth0_sub_idx
+      ON people (auth0_sub) WHERE auth0_sub IS NOT NULL;
+
+    -- Nobody gets automated texts about jobs at a number they have not proven
+    -- is theirs. One live code per phone; attempts are capped.
+    CREATE TABLE IF NOT EXISTS phone_verifications (
+      phone       text PRIMARY KEY,
+      code        text NOT NULL,
+      attempts    int NOT NULL DEFAULT 0,
+      sent_at     timestamptz NOT NULL DEFAULT now(),
+      expires_at  timestamptz NOT NULL,
+      verified_at timestamptz
+    );
+
     -- Completion: the worker says done, the requester confirms. Two steps,
     -- because neither side's word alone should release money.
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS done_marked_at timestamptz;
