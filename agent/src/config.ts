@@ -1,0 +1,32 @@
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is not set`);
+  return value;
+}
+
+export const config = {
+  databaseUrl: required("DATABASE_URL"),
+  imessageUrl: process.env.IMESSAGE_API_URL || "https://imessage.velroi.com",
+  imessageKey: required("IMESSAGE_API_KEY"),
+  openaiKey: required("OPENAI_API_KEY"),
+  model: process.env.OPENAI_AGENT_MODEL || "gpt-6-astra",
+  voiceMcpUrl: required("VOICE_MCP_URL"),
+
+  /** Only these numbers get answered. Empty means answer every enrolled sender. */
+  allowedNumbers: (process.env.ALLOWED_NUMBERS || "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean),
+
+  /** Unset until the voice agent is live - the agent must not invent a number. */
+  voiceCallNumber: process.env.VOICE_CALL_NUMBER || "",
+
+  maxReplyChars: 320,
+  /** Hard cap on stored turns per person, counting tool actions. */
+  historyTurns: 100,
+  maxToolIterations: 4,
+  /** Let the person answer for themselves before their agent acts. */
+  negotiationGraceMs: 45_000,
+  pollSeconds: 3,
+  port: Number(process.env.PORT || 3000),
+};

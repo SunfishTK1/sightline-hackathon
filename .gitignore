@@ -1,1 +1,4 @@
 .env
+.astra_state.json
+astra.log
+__pycache__/

@@ -1,0 +1,427 @@
+import express from "express";
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ensureSchema, pool, normalizePhone, upsertPerson } from "./db.js";
+import {
+  resolveOffer, seedDemoData, purgeDemoData, removeWorker,
+  counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
+  askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
+} from "./marketplace.js";
+import { tools, toolsByName } from "./tools.js";
+
+const PORT = Number(process.env.PORT || 3000);
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
+
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+
+// Every request is logged: without this there is no way to tell whether a
+// voice agent ever reached us, or what it asked for.
+app.use((req, _res, next) => {
+  if (req.path !== "/health") {
+    const body = req.body as any;
+    const detail = req.path.startsWith("/v1/tools/")
+      ? ""
+      : body?.method === "tools/call"
+        ? ` tools/call ${body?.params?.name ?? "?"}`
+        : body?.method
+          ? ` ${body.method}`
+          : "";
+    console.log(`${new Date().toISOString()} ${req.method} ${req.path}${detail}`);
+  }
+  next();
+});
+
+function authorized(req: express.Request): boolean {
+  if (!AUTH_TOKEN) return true;
+  const header = req.header("authorization") || "";
+  return header === `Bearer ${AUTH_TOKEN}` || req.header("x-api-key") === AUTH_TOKEN;
+}
+
+app.use((req, res, next) => {
+  if (req.path === "/health" || authorized(req)) return next();
+  res.status(401).json({ error: "unauthorized" });
+});
+
+app.get("/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true, tools: tools.map((t) => t.name) });
+  } catch (err) {
+    res.status(503).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Build a server per request: stateless, so a dropped call leaks nothing. */
+function buildMcpServer(): McpServer {
+  const server = new McpServer({ name: "gotchu-voice", version: "0.1.0" });
+  for (const tool of tools) {
+    server.registerTool(
+      tool.name,
+      { title: tool.title, description: tool.description, inputSchema: tool.shape },
+      async (input: any) => {
+        try {
+          const result = await tool.handler(input);
+          return { content: [{ type: "text", text: JSON.stringify(result) }] };
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
+            isError: true,
+          };
+        }
+      },
+    );
+  }
+  return server;
+}
+
+// Mounted at both /mcp and / - clients are often configured with the bare
+// origin, and a 404 there just looks like the server is down.
+async function handleMcp(req: express.Request, res: express.Response) {
+  const server = buildMcpServer();
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  res.on("close", () => {
+    transport.close();
+    server.close();
+  });
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error("mcp error", err);
+    if (!res.headersSent) res.status(500).json({ error: (err as Error).message });
+  }
+}
+
+app.post("/mcp", handleMcp);
+app.post("/", handleMcp);
+
+// Stateless transport: these verbs carry no session to resume.
+app.get("/mcp", (_req, res) => {
+  res.status(405).json({ error: "method_not_allowed" });
+});
+app.delete("/mcp", (_req, res) => {
+  res.status(405).json({ error: "method_not_allowed" });
+});
+app.get("/", (_req, res) => {
+  res.json({
+    service: "gotchu-voice-mcp",
+    mcp_endpoint: "/mcp",
+    rest_endpoint: "/v1/tools/{name}",
+    tools: tools.map((t) => t.name),
+  });
+});
+
+/**
+ * REST mirror of the same handlers, for voice platforms that can call a webhook
+ * but not an MCP server.
+ */
+app.post("/v1/tools/:name", async (req, res) => {
+  const tool = toolsByName.get(req.params.name);
+  if (!tool) return res.status(404).json({ error: `no tool ${req.params.name}` });
+  const parsed = z.object(tool.shape).safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_input", issues: parsed.error.issues });
+  }
+  try {
+    res.json({ ok: true, data: await tool.handler(parsed.data) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------- marketplace
+
+/** Who is in the worker pool, and how they are doing. */
+app.get("/v1/workers", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT w.phone, w.is_available, w.blurb, w.categories, w.min_price_usd, w.updated_at,
+            p.display_name,
+            (SELECT count(*) FROM job_offers j
+              WHERE j.phone = w.phone AND j.status = 'offered')::int AS open_offers,
+            (SELECT count(*) FROM job_offers j
+              WHERE j.phone = w.phone AND j.status = 'accepted')::int AS jobs_accepted,
+            (SELECT count(*) FROM job_offers j
+              WHERE j.phone = w.phone AND j.status = 'declined')::int AS jobs_declined
+       FROM worker_profiles w
+       LEFT JOIN people p ON p.id = w.person_id
+      ORDER BY w.updated_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 25, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Orders still looking for someone, with nobody currently on the hook. */
+app.get("/v1/orders/open", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.deadline_at, o.budget_usd, o.urgency, o.created_at, p.phone AS requester_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+      WHERE o.status IN ('submitted', 'offered')
+        AND NOT EXISTS (
+          SELECT 1 FROM job_offers j
+           WHERE j.order_id = o.id AND j.status IN ('offered', 'accepted'))
+      ORDER BY o.created_at
+      LIMIT 10`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Who could plausibly take this order: available, and not the requester. */
+app.get("/v1/orders/:orderId/candidates", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT w.phone, w.blurb, w.categories, w.min_price_usd
+       FROM worker_profiles w
+       JOIN orders o ON o.id = $1
+      WHERE w.is_available
+        AND w.person_id <> o.person_id
+        AND NOT EXISTS (
+          SELECT 1 FROM job_offers j WHERE j.order_id = o.id AND j.phone = w.phone)
+      LIMIT 25`,
+    [req.params.orderId],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** The marketplace agent decided this person is eligible: put it to them. */
+app.post("/v1/offers", async (req, res) => {
+  const { order_id, phone, reason } = req.body ?? {};
+  if (!order_id || !phone) {
+    return res.status(400).json({ ok: false, error: "order_id and phone are required" });
+  }
+  const e164 = normalizePhone(String(phone));
+  const person = await upsertPerson(e164);
+  const { rows } = await pool.query(
+    `INSERT INTO job_offers (order_id, person_id, phone, reason)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (order_id, phone) DO NOTHING
+     RETURNING id, order_id, phone, status`,
+    [order_id, person.id, e164, reason ?? null],
+  );
+  await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
+    order_id,
+  ]);
+  res.json({ ok: true, data: rows[0] ?? null });
+});
+
+/** Every recent offer, including ones whose outreach has not gone out yet. */
+app.get("/v1/offers", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT j.id, j.phone, j.status, j.reason, j.outreach_sent_at, j.responded_at,
+            j.created_at, o.title, o.budget_usd
+       FROM job_offers j
+       JOIN orders o ON o.id = j.order_id
+      ORDER BY j.created_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Offers that still need the outreach text sent. */
+app.get("/v1/offers/outreach", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT j.id, j.phone, j.reason, o.title, o.details, o.budget_usd, o.deadline_at,
+            o.pickup_location, o.dropoff_location, o.category
+       FROM job_offers j
+       JOIN orders o ON o.id = j.order_id
+      WHERE j.outreach_sent_at IS NULL AND j.status = 'offered'
+      ORDER BY j.created_at
+      LIMIT 10`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/offers/:id/sent", async (req, res) => {
+  await pool.query(`UPDATE job_offers SET outreach_sent_at = now() WHERE id = $1`, [
+    req.params.id,
+  ]);
+  res.json({ ok: true });
+});
+
+/**
+ * Every job this person is currently being asked about. One person can hold
+ * several open offers at once, so this is a list.
+ */
+app.get("/v1/offers/open", async (req, res) => {
+  const phone = normalizePhone(String(req.query.phone ?? ""));
+  const { rows } = await pool.query(
+    `SELECT j.id, j.reason, o.id AS order_id, o.title, o.details, o.budget_usd,
+            o.deadline_at, o.pickup_location, o.dropoff_location
+       FROM job_offers j
+       JOIN orders o ON o.id = j.order_id
+      WHERE j.phone = $1 AND j.status = 'offered' AND j.outreach_sent_at IS NOT NULL
+      ORDER BY j.created_at
+      LIMIT 10`,
+    [phone],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Yes or no. On yes, the order is theirs and the requester gets told. */
+app.post("/v1/offers/:id/respond", async (req, res) => {
+  const result = await resolveOffer(
+    req.params.id,
+    Boolean(req.body?.accepted),
+    req.body?.phone ? String(req.body.phone) : undefined,
+  );
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** Delete the fictional demo pool and anything it created. */
+app.post("/v1/dev/purge-demo", async (_req, res) => {
+  try {
+    const counts = await purgeDemoData();
+    console.log(`purged demo data: ${JSON.stringify(counts)}`);
+    res.json({ ok: true, data: counts });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+app.delete("/v1/workers/:phone", async (req, res) => {
+  const removed = await removeWorker(req.params.phone);
+  res.json({ ok: true, data: { removed } });
+});
+
+/** Fill the marketplace with a realistic CMU pool. Safe to run more than once. */
+app.post("/v1/dev/seed", async (_req, res) => {
+  try {
+    const counts = await seedDemoData();
+    console.log(`seeded ${counts.workers} workers, ${counts.tasks} tasks`);
+    res.json({ ok: true, data: counts });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** A worker's agent asks the requester something about the job. */
+app.post("/v1/offers/:id/question", async (req, res) => {
+  const { phone, question } = req.body ?? {};
+  if (!phone || !question) {
+    return res.status(400).json({ ok: false, error: "phone and question are required" });
+  }
+  const result = await askAboutJob(req.params.id, String(phone), String(question));
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** The requester answers it. */
+app.post("/v1/questions/:id/answer", async (req, res) => {
+  const { phone, answer } = req.body ?? {};
+  if (!phone || !answer) {
+    return res.status(400).json({ ok: false, error: "phone and answer are required" });
+  }
+  const result = await answerJobQuestion(req.params.id, String(phone), String(answer));
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+app.get("/v1/questions/open", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  res.json({
+    ok: true,
+    data: {
+      waiting_on_them: await listOpenQuestions(phone),
+      they_asked: await listMyQuestions(phone),
+    },
+  });
+});
+
+/** What each side's agent could act on right now. */
+app.get("/v1/negotiation/pending", async (_req, res) => {
+  res.json({ ok: true, data: await pendingNegotiation() });
+});
+
+/** A worker proposes different terms. */
+app.post("/v1/offers/:id/counter", async (req, res) => {
+  const { phone, price_usd, note } = req.body ?? {};
+  if (!phone || typeof price_usd !== "number") {
+    return res.status(400).json({ ok: false, error: "phone and price_usd are required" });
+  }
+  const result = await counterOffer(req.params.id, String(phone), price_usd, note);
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** The requester answers a counter. */
+app.post("/v1/offers/:id/counter/respond", async (req, res) => {
+  const { phone, accept } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const result = await respondToCounter(req.params.id, Boolean(accept), String(phone));
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** Counters awaiting a requester's decision. */
+app.get("/v1/counters/open", async (req, res) => {
+  res.json({ ok: true, data: await listOpenCounters(String(req.query.phone ?? "")) });
+});
+
+/** Recent orders, with where they came from. */
+app.get("/v1/orders", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.source, o.call_id, o.status, o.budget_usd,
+            o.category, o.deadline_at, o.created_at, p.phone
+       FROM orders o
+       LEFT JOIN people p ON p.id = o.person_id
+      ORDER BY o.created_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Recent calls, for checking what the voice agent actually did. */
+app.get("/v1/calls", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT c.id, c.caller_phone, c.agent, c.external_call_id, c.status,
+            c.started_at, c.ended_at, c.summary, c.resolution, c.resolution_status,
+            (SELECT count(*) FROM call_notes n WHERE n.call_id = c.id)::int AS note_count,
+            (SELECT count(*) FROM orders o WHERE o.call_id = c.id)::int AS order_count
+       FROM calls c
+      ORDER BY c.started_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** What the iMessage agent polls: calls and orders it hasn't told anyone about yet. */
+app.get("/v1/handoffs", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT h.*, c.summary, c.resolution, c.resolution_status
+       FROM agent_handoffs h
+       LEFT JOIN calls c ON c.id = h.call_id
+      WHERE h.delivered_at IS NULL
+      ORDER BY h.created_at
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/handoffs/:id/delivered", async (req, res) => {
+  const { rowCount } = await pool.query(
+    `UPDATE agent_handoffs SET delivered_at = now()
+      WHERE id = $1 AND delivered_at IS NULL`,
+    [req.params.id],
+  );
+  res.json({ ok: true, marked: rowCount });
+});
+
+ensureSchema()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`gotchu-voice-mcp listening on ${PORT}`);
+      console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
+    });
+  })
+  .catch((err) => {
+    console.error("schema init failed", err);
+    process.exit(1);
+  });
