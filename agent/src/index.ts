@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { config } from "./config.js";
 import {
   ensureAgentSchema, getCursor, setCursor, claimEvent, completeEvent, loadTurns,
@@ -342,7 +342,10 @@ function handoffText(handoff: Handoff): string | null {
     // wording said it was "recorded as owed" and told everyone to set up
     // payouts - a Stripe leftover that was never built and never true.
     if (handoff.payload?.paid && coins) {
-      return `Confirmed - "${handoff.payload?.title}" is done, and ${coins} railcoins just landed in your wallet. Ask me for your wallet any time to see the balance.`;
+      // Every simulated worker asked the same two things: how much do I have
+      // now, and is there a step left. Answer both, unprompted.
+      const bal = handoff.payload?.balance != null ? ` You're at ${handoff.payload.balance}.` : "";
+      return `Confirmed - "${handoff.payload?.title}" is done, and ${coins} railcoins just landed in your wallet.${bal} Nothing for you to set up. 1 railcoin = $1 of task value, spendable on Gotchu tasks.`;
     }
     if (handoff.payload?.settlement_error) {
       return `Confirmed - "${handoff.payload?.title}" is done, but the ${coins ?? ""} railcoins haven't moved yet. I'm chasing it - you're still owed them.`;
@@ -351,7 +354,10 @@ function handoffText(handoff: Handoff): string | null {
   }
   if (handoff.kind === "payment_sent") {
     const coins = handoff.payload?.railcoins;
-    return `Paid for "${handoff.payload?.title}": ${coins} railcoins left your wallet. Ask me for your wallet any time to see what's left.`;
+    // Without "you're square", requesters said they would Venmo the worker as
+    // well rather than risk having stiffed them - paying twice for one task.
+    const bal = handoff.payload?.balance != null ? ` You're at ${handoff.payload.balance}.` : "";
+    return `Paid for "${handoff.payload?.title}": ${coins} railcoins went from your wallet to theirs.${bal} You're square - nothing to hand over or Venmo.`;
   }
   if (handoff.kind === "task_disputed") {
     const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
@@ -1184,7 +1190,7 @@ async function main() {
     log(`first boot: starting from cursor ${end}`);
   }
 
-  createServer(async (req, res) => {
+  const handleHttp = async (req: IncomingMessage, res: ServerResponse) => {
     if (req.method === "GET" && req.url === "/health") {
       try {
         await pool.query("SELECT 1");
@@ -1272,6 +1278,18 @@ async function main() {
     }
 
     res.writeHead(404).end();
+  };
+
+  createServer((req, res) => {
+    // Node ignores the promise an async listener returns, so one unguarded
+    // await in any route rejects unhandled and takes the process down - and
+    // with it every loop that does the texting. Catch it here once, so no
+    // future route has to remember.
+    handleHttp(req, res).catch((err) => {
+      log(`http error on ${req.url}: ${(err as Error).message}`);
+      if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
+      if (!res.writableEnded) res.end('{"ok":false,"error":"internal"}');
+    });
   }).listen(config.port, () => log(`http on :${config.port}`));
 
   log(`gotchu agent up - model ${config.model}, market-maker ${config.marketMakerUrl}, numbers: ${config.allowedNumbers.join(", ") || "all enrolled"}`);
@@ -1287,6 +1305,16 @@ async function main() {
   loop("film", filmOpenTasks, 120);
   loop("trailer", deliverFilmsToRequesters, 60);
 }
+
+// Last line of defence. A background loop or a stray await must not be able
+// to end the process silently: log it and keep the other loops running, so a
+// single bad poll does not stop every text the system sends.
+process.on("unhandledRejection", (reason) => {
+  console.error(`unhandled rejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`uncaught exception: ${err.stack ?? err.message}`);
+});
 
 main().catch((err) => {
   console.error("fatal", err);

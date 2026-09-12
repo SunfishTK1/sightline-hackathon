@@ -9,6 +9,15 @@ export const pool = new Pool({
   max: 5,
 });
 
+/**
+ * A Postgres restart errors every idle client. pg emits those on the pool, and
+ * an "error" event with no listener is thrown - which would kill the process
+ * outright, with no request involved and nothing in the logs to explain it.
+ */
+pool.on("error", (err) => {
+  console.error(`pg pool error: ${err.message}`);
+});
+
 export type Turn = {
   role: "user" | "assistant" | "tool";
   content: string;
