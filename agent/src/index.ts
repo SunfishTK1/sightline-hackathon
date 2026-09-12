@@ -435,12 +435,16 @@ async function matchOpenOrders(): Promise<void> {
     if (offer) {
       log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
       const offerId = String((offer as { id?: string }).id ?? "");
+      // Picked, but not asked: outreach holds the text until the picture and
+      // the film exist, which can be minutes. Saying "considering" here put a
+      // countdown against someone who had not been messaged - and if the
+      // assets never arrived, the slot ran out having contacted nobody.
       await postLiveEvent({
         orderId: order.id,
-        kind: "considering",
-        message: live && !live.created ? "Moving to the next person." : "Asking someone now.",
+        kind: "queued",
+        message: live && !live.created ? "Lining up the next person." : "Lining someone up.",
         offerId,
-        state: "considering",
+        state: "queued",
         addSlot: Boolean(live && !live.created),
         slot: live && !live.created ? undefined : 0,
       });
@@ -540,8 +544,10 @@ async function sendOutreach(): Promise<void> {
         await postLiveEvent({
           orderId: offer.order_id,
           kind: "waiting",
-          message: "Waiting to hear back.",
+          message: "Asked them - waiting to hear back.",
           offerId: String(offer.id),
+          // live.ts starts the ten-minute clock on "waiting", which is now
+          // the first moment they have actually been asked.
           state: "waiting",
         });
       }
