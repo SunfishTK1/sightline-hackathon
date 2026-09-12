@@ -72,6 +72,7 @@ export type Outreach = OpenJob & {
   phone: string;
   category: string | null;
   offered_usd?: string | null;
+  created_at?: string;
 };
 
 /** A worker's proposed price, waiting on the requester. */

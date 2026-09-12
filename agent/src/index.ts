@@ -227,6 +227,8 @@ async function pollInbound(): Promise<void> {
 
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
+/** How long an offer waits for its picture before going out as text only. */
+const IMAGE_WAIT_MS = 90_000;
 
 function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "call_summary") {
@@ -328,12 +330,21 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
-    // Send the task's picture with the offer, so they can see the job.
+    // Send the task's picture with the offer, so they can see the job. The
+    // illustration takes about 20 seconds, so wait briefly for it rather than
+    // texting the offer bare - but never let a failed drawing block the work.
     let attachments: string[] | undefined;
     const stored = await market.orderImage(String(offer.order_id ?? "")).catch(() => null);
     if (stored?.png_base64) {
       const id = await uploadAttachment(Buffer.from(stored.png_base64, "base64"), "image/png");
       if (id) attachments = [id];
+    } else {
+      const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
+      if (waited < IMAGE_WAIT_MS) {
+        log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
+        continue;
+      }
+      log(`offer ${offer.id} going out without an illustration after ${Math.round(waited / 1000)}s`);
     }
 
     const message = shorten(text);
@@ -733,6 +744,19 @@ async function main() {
         const body = JSON.parse(raw || "{}");
         const text = String(body.text ?? "").trim();
         const phones: string[] = Array.isArray(body.phones) ? body.phones : [];
+
+        // Optionally attach a task's illustration, so a follow-up lands in the
+        // same thread with the picture rather than as a bare resend.
+        let attachmentIds: string[] | undefined;
+        if (body.order_id) {
+          const stored = await market.orderImage(String(body.order_id)).catch(() => null);
+          if (stored?.png_base64) {
+            const id = await uploadAttachment(
+              Buffer.from(stored.png_base64, "base64"), "image/png",
+            );
+            if (id) attachmentIds = [id];
+          }
+        }
         if (!text || !phones.length) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "phones and text are required" }));
@@ -749,7 +773,7 @@ async function main() {
           }
           const message = shorten(text);
           const key = `gotchu-say-${Date.now()}-${phone.replace(/\D/g, "")}`;
-          const sent = await sendText(phone, message, key);
+          const sent = await sendText(phone, message, key, attachmentIds);
           if (sent.accepted) {
             const history = await loadTurns(phone);
             await saveTurns(phone, [

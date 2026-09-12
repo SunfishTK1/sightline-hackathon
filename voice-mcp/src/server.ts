@@ -248,8 +248,9 @@ app.post("/v1/offers/:id/price", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT j.id, j.phone, j.reason, j.offered_usd, o.id AS order_id, o.title, o.details,
-            o.budget_usd, o.deadline_at, o.pickup_location, o.dropoff_location, o.category
+    `SELECT j.id, j.phone, j.reason, j.offered_usd, j.created_at, o.id AS order_id,
+            o.title, o.details, o.budget_usd, o.deadline_at,
+            o.pickup_location, o.dropoff_location, o.category
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
       WHERE j.outreach_sent_at IS NULL AND j.status = 'offered'

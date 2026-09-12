@@ -15,6 +15,37 @@ export type IllustratableOrder = {
 };
 
 /**
+ * Who appears in the picture. Left unsaid, the model draws the same young man
+ * every time, which does not look like this campus. The person is chosen from
+ * the task id, so one task always draws the same way while the set rotates
+ * across tasks.
+ */
+const CAST = [
+  "a Black woman student with locs",
+  "an East Asian man student with glasses",
+  "a South Asian woman student wearing a hijab",
+  "a Latino man student with curly hair",
+  "a white woman student with short red hair",
+  "a Black man student with a fade and a backpack",
+  "an East Asian woman student with a long ponytail",
+  "a Middle Eastern man student with a trimmed beard",
+  "a South Asian man student in a hoodie",
+  "a white man student with a beanie",
+  "a Latina woman student with braided hair",
+  "a student using a wheelchair, moving confidently",
+  "a Black woman student in athletic clothes",
+  "an older student in their thirties, returning to study",
+  "an East Asian man student with dyed blond hair",
+  "a white woman student wearing glasses and a puffer jacket",
+];
+
+function castFor(id: string): string {
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return CAST[hash % CAST.length];
+}
+
+/**
  * A picture of the task itself, not a poster about it. Generated models garble
  * lettering, so the prompt asks for no text at all - the caption carries the
  * words, the image carries the thing.
@@ -30,6 +61,7 @@ export function buildImagePrompt(order: IllustratableOrder): string {
   return [
     `A clean, friendly flat illustration showing this task: ${order.title}.`,
     `Details: ${order.details}`,
+    `The person doing it is ${castFor(order.id)}.`,
     `Show the actual object or activity involved, ${route}.`,
     "Style: simple shapes, muted natural colours, soft daylight, collegiate brick and green quad setting.",
     "No text, no lettering, no numbers, no signage, no logos, no watermarks.",
