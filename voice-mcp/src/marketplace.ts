@@ -134,7 +134,12 @@ export async function resolveOffer(
         [offer.order_id, offer.person_id, offer.offered_usd],
       );
       if (!updated.rows[0]) {
-        await client.query("ROLLBACK");
+        await client.query(
+          `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+            WHERE id = $1 AND status = 'offered'`,
+          [offer.id],
+        );
+        await client.query("COMMIT");
         return { status: "unchanged", error: "That task is no longer open." };
       }
     }
@@ -338,7 +343,8 @@ export async function respondToCounter(
     // Every path locks the order before its offer, matching offer creation and
     // serializing two requester decisions against competing accepts.
     const orderResult = await client.query(
-      `SELECT o.id, o.title, o.budget_usd, o.status, o.accepted_by
+      `SELECT o.id, o.title, o.budget_usd, o.status, o.accepted_by,
+              o.person_id AS requester_id, p.phone AS requester_phone
          FROM orders o
          JOIN people p ON p.id = o.person_id
         WHERE o.id = $1 AND p.phone = $2
@@ -495,6 +501,20 @@ export async function respondToCounter(
         offer.phone,
         offer.order_id,
         JSON.stringify({ title: order.title, agreed_usd: counterPrice }),
+      ],
+    );
+    await client.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'worker_accepted',$4::jsonb)`,
+      [
+        order.requester_id,
+        order.requester_phone,
+        offer.order_id,
+        JSON.stringify({
+          title: order.title,
+          worker_phone: offer.phone,
+          agreed_usd: counterPrice,
+        }),
       ],
     );
     await client.query("COMMIT");
@@ -1157,6 +1177,10 @@ export async function recordNoMatch(orderId: string) {
             END,
             updated_at = now()
       WHERE id = $1 AND status IN ('submitted', 'offered')
+        AND NOT EXISTS (
+          SELECT 1 FROM job_offers
+           WHERE order_id = $1 AND status IN ('offered', 'countered', 'accepted')
+        )
       RETURNING id, title, person_id, match_attempts, status`,
     [orderId, NO_MATCH_PARK_AFTER],
   );

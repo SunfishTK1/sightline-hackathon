@@ -697,8 +697,8 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (result?.id && args.deadline_at) {
       await postLiveEvent({
         orderId: String(args.request_id),
-        kind: "need_time",
-        message: "A new time was proposed.",
+        kind: "updated",
+        message: "The deadline was updated.",
       });
     } else if (result?.id && args.budget_usd > 0) {
       await postLiveEvent({

@@ -155,6 +155,8 @@ export const market = {
     post<{ status: string }>(`/v1/orders/${orderId}/done`, { phone }),
   confirmDone: (orderId: string, phone: string, confirmed: boolean, note?: string) =>
     post<{ status: string }>(`/v1/orders/${orderId}/confirm`, { phone, confirmed, note }),
+  relayChat: (orderId: string, body: string, to: "worker" | "requester") =>
+    post<{ sent: boolean }>(`/v1/orders/${orderId}/relay-chat`, { body, to }),
   work: (phone: string) =>
     get<{ doing: WorkItem[]; awaiting_their_confirmation: WorkItem[] }>(
       `/v1/work?phone=${encodeURIComponent(phone)}`,
