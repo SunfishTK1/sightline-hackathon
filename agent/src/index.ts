@@ -330,14 +330,28 @@ function handoffText(handoff: Handoff): string | null {
     return `Your price was accepted: "${handoff.payload?.title}" at $${handoff.payload?.agreed_usd}. It's yours.`;
   }
   if (handoff.kind === "task_done_pending") {
-    const amount = handoff.payload?.amount_usd ? ` The $${handoff.payload.amount_usd} is released when you do.` : "";
+    // Say what confirming actually costs, in the unit it is charged in.
+    const amount = handoff.payload?.amount_usd
+      ? ` Confirming moves ${Math.round(Number(handoff.payload.amount_usd))} railcoins from your wallet to theirs.`
+      : "";
     return `"${handoff.payload?.title}" is marked done. Reply YES to confirm, or tell me what's still outstanding.${amount}`;
   }
   if (handoff.kind === "task_completed") {
-    const setup = handoff.payload?.payouts_ready === false
-      ? " You'll need to set up payouts before it can actually be paid out."
-      : "";
-    return `Confirmed - "${handoff.payload?.title}" is done and $${handoff.payload?.amount_usd} is recorded as owed to you.${setup}`;
+    const coins = handoff.payload?.railcoins;
+    // The money has already moved by the time this is sent, so say so. The old
+    // wording said it was "recorded as owed" and told everyone to set up
+    // payouts - a Stripe leftover that was never built and never true.
+    if (handoff.payload?.paid && coins) {
+      return `Confirmed - "${handoff.payload?.title}" is done, and ${coins} railcoins just landed in your wallet. Ask me for your wallet any time to see the balance.`;
+    }
+    if (handoff.payload?.settlement_error) {
+      return `Confirmed - "${handoff.payload?.title}" is done, but the ${coins ?? ""} railcoins haven't moved yet. I'm chasing it - you're still owed them.`;
+    }
+    return `Confirmed - "${handoff.payload?.title}" is done. Thanks for doing it.`;
+  }
+  if (handoff.kind === "payment_sent") {
+    const coins = handoff.payload?.railcoins;
+    return `Paid for "${handoff.payload?.title}": ${coins} railcoins left your wallet. Ask me for your wallet any time to see what's left.`;
   }
   if (handoff.kind === "task_disputed") {
     const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
