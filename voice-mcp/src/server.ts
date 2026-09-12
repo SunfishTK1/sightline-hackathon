@@ -219,6 +219,19 @@ app.post("/v1/style/save", async (req, res) => {
 
 // ---------------------------------------------------------------- marketplace
 
+/**
+ * Offer ids are bigints. Handing Postgres "abc" - or the literal "None" a
+ * caller built from a null - made it throw mid-query and the request came back
+ * as a 500, which reads as "the server is broken" rather than "that is not an
+ * id". Checked once here so every /v1/offers/:id route inherits it.
+ */
+app.use("/v1/offers/:id", (req, res, next) => {
+  if (!/^\d{1,18}$/.test(req.params.id)) {
+    return res.status(400).json({ ok: false, error: "bad_offer_id" });
+  }
+  next();
+});
+
 /** Who is in the worker pool, and how they are doing. */
 app.get("/v1/workers", async (req, res) => {
   const { rows } = await pool.query(
@@ -1280,7 +1293,16 @@ app.post("/v1/handoffs/:id/delivered", async (req, res) => {
 
 ensureSchema()
   .then(() => {
-    app.listen(PORT, () => {
+    // Last resort. Express hands a rejected route promise here; without it an
+// unexpected database error answered with an empty 500 and no explanation in
+// the logs, which is indistinguishable from the service being down.
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`unhandled route error: ${err?.message ?? err}`);
+  if (res.headersSent) return;
+  res.status(500).json({ ok: false, error: "internal_error" });
+});
+
+app.listen(PORT, () => {
       console.log(`gotchu-voice-mcp listening on ${PORT}`);
       console.log(`tools: ${tools.map((t) => t.name).join(", ")}`);
     });

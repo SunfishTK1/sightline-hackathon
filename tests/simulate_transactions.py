@@ -176,17 +176,23 @@ def run():
     a1 = offered_job(oid3, W1)
     a2 = offered_job(oid3, W2)
     a3 = offered_job(oid3, W3)
-    check("18 three workers hold the same job", all([a1, a2, a3]))
+    # Offers are exclusive now: one person is asked at a time, so a second
+    # worker cannot be given the same job while the first is still deciding.
+    check("18 only one worker can hold a job at a time",
+          bool(a1) and not a2 and not a3, f"a1={a1} a2={a2} a3={a3}")
     # Re-quoting a worker updates their existing offer rather than creating a
     # second one: the broker may re-price a live offer.
     dup, s, b = make_offer(oid3, W1, offered=33)
     check("19 re-offering the same worker upserts one offer", str(dup) == str(a1),
           f"first={a1} second={dup}")
-    api("POST", f"/v1/offers/{a2}/respond", {"accepted": True, "phone": W2})
-    check("20 winner is accepted", offer_status(a2) == "accepted", str(offer_status(a2)))
-    check("21 loser's offer is cancelled", offer_status(a1) == "cancelled", str(offer_status(a1)))
-    s, b = api("POST", f"/v1/offers/{a3}/respond", {"accepted": True, "phone": W3})
-    check("22 a loser cannot accept afterwards", s == 409, f"HTTP {s}")
+    api("POST", f"/v1/offers/{a1}/respond", {"accepted": True, "phone": W1})
+    check("20 the holder is accepted", offer_status(a1) == "accepted", str(offer_status(a1)))
+    # A volunteer answering a broadcast takes a task nobody offered them.
+    s, b = api("POST", f"/v1/orders/{oid3}/claim", {"phone": W2})
+    check("21 a second person cannot claim a taken job", s == 409, f"HTTP {s}")
+    # A malformed id is a bad request, not a crash.
+    s, b = api("POST", "/v1/offers/not-an-id/respond", {"accepted": True, "phone": W3})
+    check("22 a malformed offer id is rejected cleanly", s == 400, f"HTTP {s}")
 
     # 23-29 counter-offers and the round cap
     print("\n--- haggling ---")
