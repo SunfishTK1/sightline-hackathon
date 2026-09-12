@@ -440,6 +440,9 @@ function handoffText(handoff: Handoff): string | null {
       : " It's still open at the original price if you want it.";
     return `They passed on $${handoff.payload?.asked_usd} for "${handoff.payload?.title}".${still}`;
   }
+  if (handoff.kind === "counter_released") {
+    return `They moved on from your counter on "${handoff.payload?.title}", so I'm asking someone else.`;
+  }
   return null;
 }
 

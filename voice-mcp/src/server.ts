@@ -610,8 +610,11 @@ app.post("/v1/orders/:id/done", async (req, res) => {
 app.post("/v1/orders/:id/confirm", async (req, res) => {
   const { phone, confirmed, note } = req.body ?? {};
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  if (typeof confirmed !== "boolean") {
+    return res.status(400).json({ ok: false, error: "confirmed is required" });
+  }
   const result = await confirmTaskDone(
-    req.params.id, String(phone), confirmed !== false, note,
+    req.params.id, String(phone), confirmed, note,
   );
   if (result.error) return res.status(409).json({ ok: false, error: result.error });
   res.json({ ok: true, data: result });

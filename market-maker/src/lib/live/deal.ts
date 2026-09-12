@@ -126,7 +126,7 @@ export async function loadLiveDeal(board: LiveBoardView): Promise<LiveDeal> {
   return {
     canCancel: Boolean(cancellable),
     canAccept: false,
-    canDecline: Boolean(matching && (active?.offerId || active)),
+    canDecline: Boolean(matching && active?.offerId),
     kind: active ? "offer" : null,
     offerId: active?.offerId ?? null,
     askingUsd: originalUsd,
@@ -177,7 +177,7 @@ export async function decideLiveDeal(
   }
 
   if (action === "decline") {
-    if (!deal.canDecline) return board;
+    if (!deal.canDecline || !deal.offerId) return board;
     const order = await voiceGet<OrderRow>(`/v1/orders/${encodeURIComponent(board.orderId)}`);
     const phone = order?.requester_phone;
     if (deal.kind === "counter" && deal.offerId && phone) {

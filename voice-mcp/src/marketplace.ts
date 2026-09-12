@@ -297,6 +297,20 @@ export async function respondToCounter(
             )`,
         [offer.order_id, offer.id],
       );
+      await pool.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'counter_released',$4::jsonb)`,
+        [
+          offer.person_id,
+          offer.phone,
+          offer.order_id,
+          JSON.stringify({
+            title: offer.title,
+            asked_usd: Number(offer.counter_price_usd),
+            offer_id: String(offer.id),
+          }),
+        ],
+      );
       return { status: "released" };
     }
     await pool.query(
@@ -680,6 +694,7 @@ export async function askAboutJob(
         title: offer.title,
         question,
         question_id: String(inserted.rows[0].id),
+        offer_id: String(offer.id),
       }),
     ],
   );
@@ -698,7 +713,7 @@ export async function answerJobQuestion(
        FROM orders o, people p
       WHERE q.id = $1 AND q.answered_at IS NULL
         AND o.id = q.order_id AND p.id = o.person_id AND p.phone = $2
-      RETURNING q.id, q.order_id, q.asker_phone, q.question, o.title`,
+      RETURNING q.id, q.order_id, q.offer_id, q.asker_phone, q.question, o.title`,
     [questionId, normalizePhone(requesterPhone), answer],
   );
   const q = rows[0];
@@ -712,7 +727,12 @@ export async function answerJobQuestion(
       asker.rows[0]?.id ?? null,
       q.asker_phone,
       q.order_id,
-      JSON.stringify({ title: q.title, question: q.question, answer }),
+      JSON.stringify({
+        title: q.title,
+        question: q.question,
+        answer,
+        offer_id: q.offer_id != null ? String(q.offer_id) : undefined,
+      }),
     ],
   );
   return { status: "answered" };
