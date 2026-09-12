@@ -7,7 +7,7 @@ import {
   releaseLiveMedia,
   setLiveMediaProgress,
 } from "@/lib/db/live";
-import { ensureBucket, storageConfigured } from "@/lib/storage/s3";
+import { ensureBucket, getObject, storageConfigured } from "@/lib/storage/s3";
 
 const IMAGE_URL = "https://api.openai.com/v1/images/generations";
 const VIDEO_URL = "https://api.openai.com/v1/videos";
@@ -93,14 +93,24 @@ async function pullVoiceMedia(
     });
     if (!response.ok) return null;
     const body = (await response.json()) as {
-      data?: { png_base64?: string; mp4_base64?: string };
+      data?: { png_base64?: string; mp4_base64?: string; storage_key?: string | null };
     };
+    const contentType = kind === "image" ? "image/png" : "video/mp4";
+
+    // voice-mcp moved its media into object storage, so the inline base64 is
+    // null for anything recent and only a key comes back. Without following it
+    // the reuse path silently found nothing and this board re-generated a clip
+    // that already existed - minutes of Sora time per task, for nothing.
+    const key = body.data?.storage_key;
+    if (key) {
+      const bytes = await getObject(key);
+      if (bytes) return { bytes, contentType };
+      return null;
+    }
+
     const b64 = kind === "image" ? body.data?.png_base64 : body.data?.mp4_base64;
     if (!b64) return null;
-    return {
-      bytes: Buffer.from(b64, "base64"),
-      contentType: kind === "image" ? "image/png" : "video/mp4",
-    };
+    return { bytes: Buffer.from(b64, "base64"), contentType };
   } catch {
     return null;
   }

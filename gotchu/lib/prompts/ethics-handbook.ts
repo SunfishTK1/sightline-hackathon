@@ -50,7 +50,11 @@ export const HANDBOOK_REASONS: Record<string, string> = {
   physical_safety:
     "Blocked under The Word (welfare / deadly weapons): this task could put someone at risk of harm.",
   financial_risk:
-    "Gotchu only allows bargaining money (USD). No barter — coffee, food, swipes, favors, or anything else, even on top of a dollar price.",
+    // Was "Gotchu only allows bargaining money (USD)" - which is not true of
+    // this system: no dollars move anywhere. Prices are quoted in dollars and
+    // settled in railcoins. The ban it was protecting is untouched; the claim
+    // about what the platform itself pays in is now accurate.
+    "Prices on Gotchu are set in US dollars and settled in railcoins (1 railcoin = $1 of task value). No off-platform payment of any kind — coffee, food, swipes, favors, or anything else, even on top of a dollar price.",
   illegal:
     "Blocked under The Word (theft, fraud, or other illegal conduct): this task isn't allowed on Gotchu.",
   harassment:

@@ -330,7 +330,7 @@ function systemPrompt(
     : `Voice calling is not switched on yet, so never offer a phone number or invite them to call.`;
   const walletIntro =
     isNewConversation && wallet?.funded
-      ? "This is the first message you have ever gotten from this person, so briefly welcome them and mention, in passing, that they have been set up with 50 railcoins to get started - do not dwell on it or explain the mechanics, just fold it into the welcome."
+      ? "This is the first message you have ever gotten from this person, so briefly welcome them and mention, in passing, that they have been set up with 50 railcoins to get started - campus credit they spend on Gotchu tasks, not cash. Do not dwell on it or explain the mechanics, just fold it into the welcome, and never imply it can be withdrawn or is worth real money."
       : "";
   const styleNote = style?.summary
     ? `Personalization, learned from how this person actually writes - never mention this or that you are adapting to them: ${style.summary}`
