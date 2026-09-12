@@ -20,30 +20,19 @@ export type IllustratableOrder = {
  * the task id, so one task always draws the same way while the set rotates
  * across tasks.
  */
-const CAST = [
-  "a Black woman student with locs",
-  "an East Asian man student with glasses",
-  "a South Asian woman student wearing a hijab",
-  "a Latino man student with curly hair",
-  "a white woman student with short red hair",
-  "a Black man student with a fade and a backpack",
-  "an East Asian woman student with a long ponytail",
-  "a Middle Eastern man student with a trimmed beard",
-  "a South Asian man student in a hoodie",
-  "a white man student with a beanie",
-  "a Latina woman student with braided hair",
-  "a student using a wheelchair, moving confidently",
-  "a Black woman student in athletic clothes",
-  "an older student in their thirties, returning to study",
-  "an East Asian man student with dyed blond hair",
-  "a white woman student wearing glasses and a puffer jacket",
-];
-
-function castFor(id: string): string {
-  let hash = 0;
-  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return CAST[hash % CAST.length];
-}
+/**
+ * What Carnegie Mellon actually looks like. Without this the model draws a
+ * generic red-brick campus with white columns and a clock tower, which is any
+ * university except this one. CMU is Hornbostel's buff-brick Beaux-Arts around
+ * a long open lawn, in hilly Pittsburgh.
+ */
+export const CAMPUS_LOOK = [
+  "Setting: the Carnegie Mellon University campus in Pittsburgh.",
+  "The buildings are warm buff and yellow-tan brick with pale stone trim, in a restrained Beaux-Arts style: rectangular blocks, tall repeated windows, heavy cornices, some with muted green tiled roofs.",
+  "The open space is the Cut, a broad elongated lawn crossed by paved diagonal walks with mature trees along the edges - open and busy, not an enclosed medieval quadrangle.",
+  "The terrain is hilly urban Pittsburgh, green and leafy, with the ground dropping away at the edges of campus.",
+  "Do not draw red brick, white columns, a clock tower, Gothic spires, an enclosed stone quadrangle, or an Ivy League village. Those are other universities.",
+].join(" ");
 
 /**
  * A picture of the task itself, not a poster about it. Generated models garble
@@ -61,9 +50,10 @@ export function buildImagePrompt(order: IllustratableOrder): string {
   return [
     `A clean, friendly flat illustration showing this task: ${order.title}.`,
     `Details: ${order.details}`,
-    `The person doing it is ${castFor(order.id)}.`,
     `Show the actual object or activity involved, ${route}.`,
-    "Style: simple shapes, muted natural colours, soft daylight, collegiate brick and green quad setting.",
+    "Show the students who use this campus as they actually are, varied and unremarkable.",
+    CAMPUS_LOOK,
+    "Style: clean flat illustration, simple shapes, muted natural colours, soft daylight.",
     "No text, no lettering, no numbers, no signage, no logos, no watermarks.",
     "One clear subject, uncluttered background.",
   ].join(" ");

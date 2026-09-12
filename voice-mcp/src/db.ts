@@ -156,6 +156,17 @@ export async function ensureSchema(): Promise<void> {
       created_at  timestamptz NOT NULL DEFAULT now()
     );
 
+    -- A short clip of the finished job. Generation takes minutes, so it is
+    -- stored and delivered separately from anything a person is waiting on.
+    CREATE TABLE IF NOT EXISTS order_videos (
+      order_id    uuid PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+      mp4         bytea NOT NULL,
+      prompt      text,
+      seconds     int,
+      delivered_at timestamptz,
+      created_at  timestamptz NOT NULL DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS payments (
       id                    bigserial PRIMARY KEY,
       order_id              uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

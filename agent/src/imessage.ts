@@ -102,11 +102,20 @@ export async function sendText(
   // Bare ids; a list of objects is rejected.
   if (attachmentIds?.length) payload.attachments = attachmentIds;
 
-  const res = await fetch(`${config.imessageUrl}/v1/messages`, {
-    method: "POST",
-    headers: { ...headers(), "Idempotency-Key": idempotencyKey.slice(0, 120) },
-    body: JSON.stringify(payload),
-  });
+  // The relay runs one automation at a time and answers 429 when it is busy.
+  // That is a wait, not a failure: retry the same request with the same key,
+  // or the message is simply lost.
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(`${config.imessageUrl}/v1/messages`, {
+      method: "POST",
+      headers: { ...headers(), "Idempotency-Key": idempotencyKey.slice(0, 120) },
+      body: JSON.stringify(payload),
+    });
+    if (res.status !== 429 || attempt >= 3) break;
+    const after = Number(res.headers.get("retry-after")) || 2;
+    await new Promise((r) => setTimeout(r, Math.min(after, 15) * 1000));
+  }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 202) {
     return { accepted: true, requestId: String(body.requestId ?? ""), detail: "submitted" };

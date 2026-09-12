@@ -325,6 +325,83 @@ app.post("/v1/dev/seed", async (_req, res) => {
   }
 });
 
+/**
+ * Live tasks with no clip yet. The film is a pitch, not a record: it goes to
+ * the people being asked to take the job, so it is made while the task is
+ * still looking for someone.
+ */
+app.get("/v1/orders/needing-video", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.budget_usd, o.deadline_at, o.created_at, p.phone AS requester_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN order_videos v ON v.order_id = o.id
+      WHERE v.order_id IS NULL AND o.status IN ('submitted', 'offered')
+      ORDER BY o.created_at DESC
+      LIMIT 3`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Who currently holds an open offer on a task - the audience for its film. */
+app.get("/v1/orders/:id/offer-holders", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT phone, status FROM job_offers
+      WHERE order_id = $1 AND status IN ('offered', 'countered')`,
+    [req.params.id],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/orders/:id/video", async (req, res) => {
+  const { mp4_base64, prompt, seconds } = req.body ?? {};
+  if (!mp4_base64) return res.status(400).json({ ok: false, error: "mp4_base64 is required" });
+  const bytes = Buffer.from(mp4_base64, "base64").length;
+  await pool.query(
+    `INSERT INTO order_videos (order_id, mp4, prompt, seconds)
+     VALUES ($1, decode($2,'base64'), $3, $4)
+     ON CONFLICT (order_id) DO UPDATE
+       SET mp4 = EXCLUDED.mp4, prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
+    [req.params.id, mp4_base64, prompt ?? null, seconds ?? null],
+  );
+  res.json({ ok: true, data: { order_id: req.params.id, bytes } });
+});
+
+app.get("/v1/orders/:id/video", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT encode(mp4,'base64') AS mp4_base64, seconds, delivered_at, octet_length(mp4) AS bytes
+       FROM order_videos WHERE order_id = $1`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ ok: false, error: "no video for that order" });
+  res.json({ ok: true, data: rows[0] });
+});
+
+/** Clips generated but not yet sent - the relay cannot carry video yet. */
+app.get("/v1/videos/pending-delivery", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT v.order_id, v.seconds, octet_length(v.mp4) AS bytes, v.created_at,
+            o.title, p.phone AS requester_phone, w.phone AS worker_phone
+       FROM order_videos v
+       JOIN orders o ON o.id = v.order_id
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+      WHERE v.delivered_at IS NULL
+      ORDER BY v.created_at
+      LIMIT 10`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/orders/:id/video/delivered", async (req, res) => {
+  await pool.query(
+    `UPDATE order_videos SET delivered_at = now() WHERE order_id = $1 AND delivered_at IS NULL`,
+    [req.params.id],
+  );
+  res.json({ ok: true });
+});
+
 /** Tasks that still have no illustration. */
 app.get("/v1/orders/needing-image", async (_req, res) => {
   const { rows } = await pool.query(

@@ -145,6 +145,21 @@ export const market = {
       `/v1/work?phone=${encodeURIComponent(phone)}`,
     ),
 
+  /**
+   * Completed tasks with no clip yet. Delivery waits on the relay learning to
+   * carry video; until then these are generated and stored.
+   */
+  ordersNeedingVideo: () => get<any[]>("/v1/orders/needing-video"),
+  storeOrderVideo: (orderId: string, mp4Base64: string, prompt: string, seconds: string) =>
+    post(`/v1/orders/${orderId}/video`, { mp4_base64: mp4Base64, prompt, seconds: Number(seconds) }),
+  markVideoDelivered: (orderId: string) => post(`/v1/orders/${orderId}/video/delivered`),
+  /** Who is being asked to take this job right now. */
+  offerHolders: (orderId: string) =>
+    get<Array<{ phone: string; status: string }>>(`/v1/orders/${orderId}/offer-holders`),
+  videosPendingDelivery: () => get<any[]>("/v1/videos/pending-delivery"),
+  orderVideo: (orderId: string) =>
+    get<{ mp4_base64: string }>(`/v1/orders/${orderId}/video`).catch(() => null),
+
   /** Tasks with no illustration yet, and the store for them. */
   ordersNeedingImage: () => get<any[]>("/v1/orders/needing-image"),
   storeOrderImage: (orderId: string, pngBase64: string, prompt: string) =>
