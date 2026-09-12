@@ -8,6 +8,9 @@ import { reviewTask, reviewAmendment, arbitrateMove } from "../lib/agents/ethics
 import {
   MOCK_ALCOHOL_21,
   MOCK_COFFEE_BARTER,
+  MOCK_BURGER_PAY_COFFEES,
+  MOCK_BURGER_PAY_COOKIES,
+  MOCK_HOODIE_BARTER,
   MOCK_COFFEE_FOOD_RUN,
   MOCK_MONEY_AND_COFFEES,
   MOCK_REQUESTER_COFFEES_OPEN_PRICE,
@@ -85,6 +88,29 @@ async function main() {
     "2f reviewTask pick up coffees for USD ALLOW or ALLOW_WITH_CONDITIONS",
     coffeeRun.verdict === "ALLOW" || coffeeRun.verdict === "ALLOW_WITH_CONDITIONS",
     coffeeRun,
+  );
+
+  const burgerCoffees = await reviewTask(MOCK_BURGER_PAY_COFFEES);
+  check(
+    "2g reviewTask burger paid in 5 coffees BLOCK financial_risk",
+    burgerCoffees.verdict === "BLOCK" &&
+      burgerCoffees.categories.includes("financial_risk"),
+    burgerCoffees,
+  );
+
+  const burgerCookies = await reviewTask(MOCK_BURGER_PAY_COOKIES);
+  check(
+    "2h reviewTask burger paid in 5 cookies BLOCK (any barter)",
+    burgerCookies.verdict === "BLOCK" &&
+      burgerCookies.categories.includes("financial_risk"),
+    burgerCookies,
+  );
+
+  const hoodie = await reviewTask(MOCK_HOODIE_BARTER);
+  check(
+    "2i reviewTask fridge for a hoodie BLOCK financial_risk",
+    hoodie.verdict === "BLOCK" && hoodie.categories.includes("financial_risk"),
+    hoodie,
   );
 
   const navy = await reviewAmendment(MOCK_FENCE_WHITE, MOCK_FENCE_NAVY);

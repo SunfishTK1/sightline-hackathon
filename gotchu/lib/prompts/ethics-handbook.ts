@@ -50,7 +50,7 @@ export const HANDBOOK_REASONS: Record<string, string> = {
   physical_safety:
     "Blocked under The Word (welfare / deadly weapons): this task could put someone at risk of harm.",
   financial_risk:
-    "Gotchu only allows bargaining money (USD). You cannot add coffee, food, swipes, or favors — even on top of a dollar price.",
+    "Gotchu only allows bargaining money (USD). No barter — coffee, food, swipes, favors, or anything else, even on top of a dollar price.",
   illegal:
     "Blocked under The Word (theft, fraud, or other illegal conduct): this task isn't allowed on Gotchu.",
   harassment:
