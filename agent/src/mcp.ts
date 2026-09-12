@@ -150,15 +150,22 @@ export const market = {
    * carry video; until then these are generated and stored.
    */
   ordersNeedingVideo: () => get<any[]>("/v1/orders/needing-video"),
-  storeOrderVideo: (orderId: string, mp4Base64: string, prompt: string, seconds: string) =>
-    post(`/v1/orders/${orderId}/video`, { mp4_base64: mp4Base64, prompt, seconds: Number(seconds) }),
+  /** Records where the clip is. The bytes go to the bucket, not through here. */
+  storeOrderVideo: (
+    orderId: string,
+    video: { storage_key?: string; mp4_base64?: string; bytes?: number },
+    prompt: string,
+    seconds: string,
+  ) => post(`/v1/orders/${orderId}/video`, { ...video, prompt, seconds: Number(seconds) }),
   markVideoDelivered: (orderId: string) => post(`/v1/orders/${orderId}/video/delivered`),
   /** Who is being asked to take this job right now. */
   offerHolders: (orderId: string) =>
     get<Array<{ phone: string; status: string }>>(`/v1/orders/${orderId}/offer-holders`),
   videosPendingDelivery: () => get<any[]>("/v1/videos/pending-delivery"),
   orderVideo: (orderId: string) =>
-    get<{ mp4_base64: string }>(`/v1/orders/${orderId}/video`).catch(() => null),
+    get<{ mp4_base64: string | null; storage_key: string | null; bytes: number | null }>(
+      `/v1/orders/${orderId}/video`,
+    ).catch(() => null),
 
   /** Tasks with no illustration yet, and the store for them. */
   ordersNeedingImage: () => get<any[]>("/v1/orders/needing-image"),
@@ -174,6 +181,22 @@ export const market = {
   /** What each side's agent could act on for its principal. */
   pendingNegotiation: () =>
     get<{ offers: PendingOffer[]; counters: PendingCounter[] }>("/v1/negotiation/pending"),
+};
+
+export type Wallet = {
+  public_key: string;
+  cluster: string;
+  funded_at: string | null;
+  balance_sol?: number;
+};
+
+/**
+ * identify_caller already ensures a wallet for everyone the agent talks to;
+ * these exist for anything that wants wallet info without a full identify.
+ */
+export const wallet = {
+  ensure: (phone: string) => post<Wallet>("/v1/wallets/ensure", { phone }),
+  get: (phone: string) => get<Wallet | null>(`/v1/wallets/${encodeURIComponent(phone)}`),
 };
 
 export type WorkItem = {

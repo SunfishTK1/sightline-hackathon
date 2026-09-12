@@ -196,6 +196,12 @@ export async function ensureSchema(): Promise<void> {
       created_at  timestamptz NOT NULL DEFAULT now()
     );
 
+    -- The clips live in object storage now; the row keeps the key. The inline
+    -- column stays for ones already stored that way, so it becomes optional.
+    ALTER TABLE order_videos ADD COLUMN IF NOT EXISTS storage_key text;
+    ALTER TABLE order_videos ALTER COLUMN mp4 DROP NOT NULL;
+    ALTER TABLE order_videos ADD COLUMN IF NOT EXISTS bytes int;
+
     CREATE TABLE IF NOT EXISTS payments (
       id                    bigserial PRIMARY KEY,
       order_id              uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -211,6 +217,19 @@ export async function ensureSchema(): Promise<void> {
       updated_at            timestamptz NOT NULL DEFAULT now()
     );
     CREATE UNIQUE INDEX IF NOT EXISTS payments_order_idx ON payments (order_id);
+
+    -- One devnet wallet per person, created the first time the agent hears
+    -- from them. The secret key is encrypted at rest; devnet SOL is worthless
+    -- but the key format is identical to mainnet, so it is not stored in the
+    -- clear.
+    CREATE TABLE IF NOT EXISTS wallets (
+      person_id             uuid PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+      public_key            text UNIQUE NOT NULL,
+      encrypted_secret_key  text NOT NULL,
+      cluster               text NOT NULL DEFAULT 'devnet',
+      funded_at             timestamptz,
+      created_at            timestamptz NOT NULL DEFAULT now()
+    );
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_by uuid REFERENCES people(id);
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at timestamptz;

@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,9 +12,10 @@ import {
   cancelOrder,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
+import { ensureWallet, getWallet } from "./wallet.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3010);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
 
 const app = express();
@@ -131,6 +133,28 @@ app.post("/v1/tools/:name", async (req, res) => {
   }
   try {
     res.json({ ok: true, data: await tool.handler(parsed.data) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// -------------------------------------------------------------------- wallets
+
+/** Create (if needed) and fund this person's devnet wallet. Idempotent. */
+app.post("/v1/wallets/ensure", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await ensureWallet(String(phone)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** This person's wallet and its live devnet balance, or null if they have none yet. */
+app.get("/v1/wallets/:phone", async (req, res) => {
+  try {
+    res.json({ ok: true, data: await getWallet(req.params.phone) });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -359,22 +383,35 @@ app.get("/v1/orders/:id/offer-holders", async (req, res) => {
 });
 
 app.post("/v1/orders/:id/video", async (req, res) => {
-  const { mp4_base64, prompt, seconds } = req.body ?? {};
-  if (!mp4_base64) return res.status(400).json({ ok: false, error: "mp4_base64 is required" });
-  const bytes = Buffer.from(mp4_base64, "base64").length;
+  const { mp4_base64, storage_key, bytes: reportedBytes, prompt, seconds } = req.body ?? {};
+  if (!mp4_base64 && !storage_key) {
+    return res.status(400).json({ ok: false, error: "storage_key or mp4_base64 is required" });
+  }
+
+  // Preferred: the bytes are already in the bucket and only the key is kept.
+  // The inline form stays for anything not going through storage.
+  const bytes = storage_key
+    ? Number(reportedBytes) || null
+    : Buffer.from(mp4_base64, "base64").length;
+
   await pool.query(
-    `INSERT INTO order_videos (order_id, mp4, prompt, seconds)
-     VALUES ($1, decode($2,'base64'), $3, $4)
+    `INSERT INTO order_videos (order_id, mp4, storage_key, bytes, prompt, seconds)
+     VALUES ($1, CASE WHEN $2::text IS NULL THEN NULL ELSE decode($2,'base64') END, $3, $4, $5, $6)
      ON CONFLICT (order_id) DO UPDATE
-       SET mp4 = EXCLUDED.mp4, prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
-    [req.params.id, mp4_base64, prompt ?? null, seconds ?? null],
+       SET mp4 = EXCLUDED.mp4, storage_key = EXCLUDED.storage_key, bytes = EXCLUDED.bytes,
+           prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
+    [req.params.id, mp4_base64 ?? null, storage_key ?? null, bytes, prompt ?? null, seconds ?? null],
   );
-  res.json({ ok: true, data: { order_id: req.params.id, bytes } });
+  res.json({ ok: true, data: { order_id: req.params.id, bytes, storage_key: storage_key ?? null } });
 });
 
 app.get("/v1/orders/:id/video", async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT encode(mp4,'base64') AS mp4_base64, seconds, delivered_at, octet_length(mp4) AS bytes
+    // Only inline the bytes for rows that predate object storage; once there is
+    // a key, the caller reads the clip from the bucket instead.
+    `SELECT storage_key, seconds, delivered_at,
+            COALESCE(bytes, octet_length(mp4)) AS bytes,
+            CASE WHEN storage_key IS NULL THEN encode(mp4,'base64') END AS mp4_base64
        FROM order_videos WHERE order_id = $1`,
     [req.params.id],
   );

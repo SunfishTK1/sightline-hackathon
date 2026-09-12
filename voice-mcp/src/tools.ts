@@ -6,7 +6,9 @@ import {
   counterOffer, respondToCounter, listOpenCounters,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
   markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
+  blockOrder,
 } from "./marketplace.js";
+import { ensureWallet } from "./wallet.js";
 
 /**
  * One definition per tool, shared by the MCP transport and the REST mirror.
@@ -40,6 +42,14 @@ export const tools: ToolDef[] = [
     handler: async ({ phone, display_name }) => {
       const e164 = normalizePhone(phone);
       const person = await upsertPerson(e164, display_name);
+
+      // Everyone who reaches the agent - by call or by text - gets a devnet
+      // wallet the first time, funded from the treasury. A failed transfer
+      // (treasury dry, RPC hiccup) should never block the rest of the reply.
+      const wallet = await ensureWallet(e164).catch((err) => {
+        console.error(`ensureWallet(${e164}) failed: ${(err as Error).message}`);
+        return null;
+      });
 
       const [orders, openCall, worker, pastCalls, offers, counters, askedOfThem, theyAsked] =
         await Promise.all([
@@ -90,6 +100,9 @@ export const tools: ToolDef[] = [
         display_name: person.display_name,
         known_caller: (orders.rowCount ?? 0) > 0,
         open_call_id: openCall.rows[0]?.id ?? null,
+        wallet: wallet
+          ? { public_key: wallet.public_key, cluster: wallet.cluster, funded: !!wallet.funded_at }
+          : null,
 
         // Tasks they asked for.
         open_requests: live,
@@ -597,7 +610,9 @@ tools.push({
               dropoff_location: current.original_structured.dropoffLocation,
             }
           : current;
-        const amendment = await reviewAmendment(original, { ...current, details });
+        const proposed = { ...current, details };
+
+        const amendment = await reviewAmendment(original, proposed);
         if (amendment?.verdict === "REJECT") {
           return {
             error: "same_task_check_failed",
@@ -606,6 +621,42 @@ tools.push({
               "That edit changes what the job is, not just its terms. Cancel this one and post the new task.",
           };
         }
+
+        // "Still the same task" is not the same question as "still allowed".
+        // An edit can keep the shape of the job - a pickup is still a pickup -
+        // while changing what is actually being fetched, so the amended task
+        // goes back through the gate itself, not just the same-task check.
+        const reviewed = await reviewTask(proposed);
+        if (reviewed?.verdict === "BLOCK") {
+          const reason = reviewed.reason ?? "That change cannot be listed.";
+          await blockOrder(order_id, reason);
+          return {
+            error: "blocked_after_edit",
+            blocked: true,
+            reason,
+            categories: reviewed.categories ?? [],
+            say: "Tell them the change cannot be listed and why. The task is pulled, and anyone holding it has been told. Do not offer a way around it.",
+          };
+        }
+        if (!reviewed && ethicsConfigured()) {
+          // Refuse the edit rather than apply one nobody reviewed.
+          return {
+            error: "review_unavailable",
+            reason: "That change could not be reviewed just now, so it has not been applied. Try again in a moment.",
+          };
+        }
+
+        // Record what the gate said about the version that is now live.
+        await pool.query(
+          `UPDATE orders SET ethics_verdict = $2, ethics_reason = $3, ethics_conditions = $4::jsonb
+            WHERE id = $1`,
+          [
+            order_id,
+            reviewed?.verdict ?? null,
+            reviewed?.reason ?? null,
+            JSON.stringify(reviewed?.conditions ?? []),
+          ],
+        );
       }
     }
 

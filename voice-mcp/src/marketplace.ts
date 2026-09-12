@@ -836,6 +836,57 @@ export async function cancelOrder(orderId: string, reason?: string) {
   }
 }
 
+/**
+ * Pull a task that should never have been open. Unlike a cancellation this
+ * records why, and it has to reach anyone already holding the offer: a task
+ * that is blocked after it was put to someone leaves a worker expecting a job
+ * that is not going to happen.
+ */
+export async function blockOrder(orderId: string, reason: string) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(
+      `UPDATE orders
+          SET status = 'blocked', ethics_verdict = 'BLOCK', ethics_reason = $2, updated_at = now()
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled')
+        RETURNING id, title`,
+      [orderId, reason],
+    );
+    const order = rows[0];
+    if (!order) {
+      await client.query("ROLLBACK");
+      return { error: "not_blockable" as const };
+    }
+
+    const open = await client.query(
+      `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+        WHERE order_id = $1 AND status IN ('offered', 'accepted', 'countered')
+        RETURNING phone, person_id`,
+      [orderId],
+    );
+    for (const holder of open.rows) {
+      await client.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'task_cancelled',$4::jsonb)`,
+        [
+          holder.person_id,
+          holder.phone,
+          orderId,
+          JSON.stringify({ title: order.title, reason }),
+        ],
+      );
+    }
+    await client.query("COMMIT");
+    return { blocked: order.id, title: order.title, told: open.rows.length };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** Take one person out of the worker pool entirely. */
 export async function removeWorker(phone: string): Promise<boolean> {
   const { rowCount } = await pool.query(`DELETE FROM worker_profiles WHERE phone = $1`, [

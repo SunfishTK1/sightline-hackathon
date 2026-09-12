@@ -7,7 +7,8 @@ import {
 } from "./db.js";
 import { buildNudgeHtml } from "./nudge.js";
 import { generateTaskImage } from "./illustrate.js";
-import { generateTaskVideo } from "./video.js";
+import { generateTaskVideo, type FilmableOrder } from "./video.js";
+import { ensureBucket, putVideo, getVideo, storageConfigured } from "./storage.js";
 import {
   pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
   type RelayEvent,
@@ -95,6 +96,8 @@ async function handleEvent(event: RelayEvent): Promise<void> {
         doing: who?.jobs_in_progress ?? [],
         awaitingConfirmation: who?.awaiting_their_confirmation ?? [],
       },
+      who?.wallet ?? null,
+      history.length === 0,
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;
@@ -230,6 +233,8 @@ const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
 /** How long an offer waits for its picture before going out as text only. */
 const IMAGE_WAIT_MS = 90_000;
+/** How long an offer waits for its film. Sora runs for minutes. */
+const VIDEO_WAIT_MS = Number(process.env.VIDEO_WAIT_MS || 420_000);
 
 function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "call_summary") {
@@ -370,18 +375,48 @@ async function sendOutreach(): Promise<void> {
     // Send the task's picture with the offer, so they can see the job. The
     // illustration takes about 20 seconds, so wait briefly for it rather than
     // texting the offer bare - but never let a failed drawing block the work.
-    let attachments: string[] | undefined;
-    const stored = await market.orderImage(String(offer.order_id ?? "")).catch(() => null);
+    const orderId = String(offer.order_id ?? "");
+    const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
+    const attachments: string[] = [];
+
+    const stored = await market.orderImage(orderId).catch(() => null);
     if (stored?.png_base64) {
       const id = await uploadAttachment(Buffer.from(stored.png_base64, "base64"), "image/png");
-      if (id) attachments = [id];
+      if (id) attachments.push(id);
+    } else if (waited < IMAGE_WAIT_MS) {
+      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
+      continue;
     } else {
-      const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
-      if (waited < IMAGE_WAIT_MS) {
-        log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
-        continue;
-      }
       log(`offer ${offer.id} going out without an illustration after ${Math.round(waited / 1000)}s`);
+    }
+
+    // The film is the pitch, so the offer waits for it rather than arriving
+    // first and being followed by a clip nobody asked about. Sora takes
+    // minutes, so the hold is long - but it is a cap, not a promise: past it
+    // the job goes out with whatever exists.
+    const mp4 = await videoFor(orderId);
+    if (mp4) {
+      const id = await uploadAttachment(mp4, "video/mp4");
+      if (id) attachments.push(id);
+    } else if (waited < VIDEO_WAIT_MS) {
+      // Start it now rather than waiting for the film loop to come round.
+      if (!filming.has(orderId)) {
+        void filmOrder({
+          id: orderId,
+          title: offer.title,
+          details: offer.details ?? offer.title,
+          category: offer.category ?? null,
+          pickup_location: offer.pickup_location ?? null,
+          dropoff_location: offer.dropoff_location ?? null,
+          budget_usd: offer.budget_usd ?? null,
+          // Only used to attribute the clip; the outreach row does not carry it.
+          requester_phone: "",
+        }).catch(() => false);
+      }
+      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its film`);
+      continue;
+    } else {
+      log(`offer ${offer.id} going out without a film after ${Math.round(waited / 1000)}s`);
     }
 
     const message = shorten(text);
@@ -778,57 +813,57 @@ async function illustrateOrders(): Promise<void> {
 }
 
 /**
- * Film the job as a pitch. It goes to whoever is being asked to take it, so
- * the clip is made while the task is still open. Generation runs for over a
- * minute, so this loop is slow and does one at a time.
+ * Orders being filmed right now. Generation takes minutes, and both the film
+ * loop and an offer waiting to go out can ask for the same clip, so the set
+ * stops a task being filmed twice.
  */
+const filming = new Set<string>();
+
+/**
+ * Film one task and put the clip in the bucket. Delivery is not done here:
+ * the film goes out attached to the offer itself, so there is exactly one
+ * path a clip reaches a person by.
+ */
+async function filmOrder(order: FilmableOrder & { id: string; title: string }): Promise<boolean> {
+  if (filming.has(order.id)) return false;
+  filming.add(order.id);
+  try {
+    log(`filming "${order.title}"...`);
+    const made = await generateTaskVideo(order);
+    if (!made) {
+      log(`could not film "${order.title}"`);
+      return false;
+    }
+
+    const key = await putVideo(order.id, made.mp4);
+    await market.storeOrderVideo(
+      order.id,
+      key ? { storage_key: key, bytes: made.mp4.length } : { mp4_base64: made.mp4.toString("base64") },
+      made.prompt,
+      made.seconds,
+    );
+    log(`filmed "${order.title}" (${made.mp4.length} bytes, ${made.seconds}s${key ? `, ${key}` : ", inline"})`);
+    return true;
+  } finally {
+    filming.delete(order.id);
+  }
+}
+
+/** Keep clips ready for tasks that do not have one yet. */
 async function filmOpenTasks(): Promise<void> {
   const pending = await market.ordersNeedingVideo();
-  const order = pending[0];
+  const order = pending.find((o: { id: string }) => !filming.has(o.id));
   if (!order) return;
+  await filmOrder(order);
+}
 
-  log(`filming "${order.title}"...`);
-  const made = await generateTaskVideo(order);
-  if (!made) {
-    log(`could not film "${order.title}"`);
-    return;
-  }
-  await market.storeOrderVideo(order.id, made.mp4.toString("base64"), made.prompt, made.seconds);
-  log(`filmed "${order.title}" (${made.mp4.length} bytes, ${made.seconds}s)`);
-
-  // Anyone already holding this offer got the text before the film existed.
-  const holders = await market.offerHolders(order.id).catch(() => []);
-  if (!holders.length) return;
-
-  const attachmentId = await uploadAttachment(made.mp4, "video/mp4");
-  if (!attachmentId) {
-    log(`could not upload the film for "${order.title}"`);
-    return;
-  }
-  const pay = order.budget_usd && Number(order.budget_usd) > 0 ? ` ($${order.budget_usd})` : "";
-  // The film says the steps out loud; the caption leaves them in writing, so
-  // whoever takes it still has the instructions after the video stops.
-  const steps = made.plan.steps.map((s, i) => `${i + 1}. ${s}`).join(" ");
-  const caption = `Your mission${pay}: ${made.plan.objective} ${steps} Reply YES if you accept.`;
-
-  let sentAny = false;
-  for (const holder of holders) {
-    const sent = await sendText(
-      holder.phone, shorten(caption),
-      `gotchu-film-${order.id}-${holder.phone.replace(/\D/g, "")}`, [attachmentId],
-    );
-    await recordSent(sent.requestId, holder.phone, "film", order.id, caption);
-    if (sent.accepted) {
-      sentAny = true;
-      const history = await loadTurns(holder.phone);
-      await saveTurns(holder.phone, [
-        ...history,
-        { role: "assistant", content: caption, at: new Date().toISOString() },
-      ]);
-    }
-    log(`film -> ${holder.phone}: ${sent.detail}`);
-  }
-  if (sentAny) await market.markVideoDelivered(order.id).catch(() => null);
+/** The clip for an offer, from the bucket or from an older inline row. */
+async function videoFor(orderId: string): Promise<Buffer | null> {
+  const stored = await market.orderVideo(orderId).catch(() => null);
+  if (!stored) return null;
+  if (stored.storage_key) return getVideo(stored.storage_key);
+  if (stored.mp4_base64) return Buffer.from(stored.mp4_base64, "base64");
+  return null;
 }
 
 async function loop(name: string, fn: () => Promise<void>, seconds: number) {
@@ -844,6 +879,15 @@ async function loop(name: string, fn: () => Promise<void>, seconds: number) {
 
 async function main() {
   await ensureAgentSchema();
+
+  // Clips go to object storage; without it they fall back to living in the
+  // database, so say which one is in play rather than failing quietly.
+  if (storageConfigured()) {
+    const ready = await ensureBucket();
+    log(ready ? "object storage ready" : "object storage unreachable - clips will be stored inline");
+  } else {
+    log("no object storage configured - clips will be stored inline");
+  }
 
   // First boot: skip the backlog sitting in the relay rather than answering
   // months of old messages.
