@@ -12,7 +12,7 @@
  * swallowed - the task is still complete, the payment simply did not settle.
  */
 import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
-import { connection, loadWalletKeypair, ensureWallet } from "./wallet.js";
+import { connection, loadWalletKeypair, ensureWallet, treasuryKeypair } from "./wallet.js";
 import { pool } from "./db.js";
 
 /** Users see railcoins; 50,000 railcoins is 1 SOL. One railcoin is one dollar of task value. */
@@ -193,6 +193,45 @@ export async function payForTask(input: {
     const result: Settlement = { settled: false, reason: (err as Error).message, railcoins };
     await recordSettlement(input.orderId, result).catch(() => undefined);
     return result;
+  }
+}
+
+/**
+ * Charge someone a fee that goes to the house, not to another person. Same
+ * rails as a task payment - a real transfer with a signature - because a fee
+ * that is only bookkeeping is a fee nobody can audit.
+ */
+export async function chargeToTreasury(
+  phone: string,
+  railcoins: number,
+): Promise<Settlement> {
+  if (!(railcoins > 0)) return { settled: false, reason: "nothing to charge", railcoins: 0 };
+  try {
+    const payer = await ensureWallet(phone);
+    const from = await loadWalletKeypair(payer.person_id);
+    if (!from) return { settled: false, reason: "no usable wallet", railcoins };
+
+    const lamports = railcoinsToLamports(railcoins);
+    const balance = await connection.getBalance(from.publicKey);
+    if (balance < lamports + 5_000) {
+      return {
+        settled: false,
+        reason: `not enough railcoins: ${railcoins} needed, ${Math.floor((balance / LAMPORTS_PER_SOL) * RAILCOINS_PER_SOL)} available`,
+        railcoins,
+      };
+    }
+
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: from.publicKey,
+        toPubkey: treasuryKeypair().publicKey,
+        lamports,
+      }),
+    );
+    const signature = await sendAndConfirmTransaction(connection, tx, [from]);
+    return { settled: true, signature, railcoins };
+  } catch (err) {
+    return { settled: false, reason: (err as Error).message, railcoins };
   }
 }
 

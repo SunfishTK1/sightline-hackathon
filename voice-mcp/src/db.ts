@@ -258,6 +258,12 @@ export async function ensureSchema(): Promise<void> {
     -- for the rest of the day.
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS match_attempts int NOT NULL DEFAULT 0;
 
+    -- Films are no longer made for every task. One is made only when the
+    -- requester asks for it and pays the fee, so the request itself has to be
+    -- recorded - it is what the film queue now reads.
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS film_requested_at timestamptz;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS film_paid_signature text;
+
     -- A link the agent can text someone so they can see and manage their
     -- wallet. Opening it is the proof: it was sent to their number and only
     -- they received it. Anyone holding the link has the same access, which is

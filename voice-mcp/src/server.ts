@@ -15,6 +15,7 @@ import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
 import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
+import { chargeToTreasury } from "./pay.js";
 import { reviewTask } from "./ethics.js";
 import { createWalletLink, resolveWalletLink, createWalletForLink } from "./walletlink.js";
 
@@ -233,6 +234,18 @@ app.get("/v1/workers", async (req, res) => {
       ORDER BY w.updated_at DESC
       LIMIT $1`,
     [Math.min(Number(req.query.limit) || 25, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/** Everyone who can actually be sent something right now. */
+app.get("/v1/workers/active", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT w.phone, p.display_name
+       FROM worker_profiles w
+       JOIN people p ON p.id = w.person_id
+      WHERE w.is_available AND p.phone_verified
+      ORDER BY w.updated_at DESC`,
   );
   res.json({ ok: true, data: rows });
 });
@@ -493,7 +506,9 @@ app.get("/v1/orders/needing-video", async (_req, res) => {
        FROM orders o
        JOIN people p ON p.id = o.person_id
        LEFT JOIN order_videos v ON v.order_id = o.id
-      WHERE v.order_id IS NULL AND o.status IN ('submitted', 'offered')
+      WHERE v.order_id IS NULL
+        AND o.film_requested_at IS NOT NULL
+        AND o.status IN ('submitted', 'offered', 'accepted', 'done_pending')
         AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 3`,
@@ -915,6 +930,45 @@ app.post("/v1/orders/:id/received", async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
+});
+
+/**
+ * The requester asks for a film and pays for it. Charged before anything is
+ * generated: a fee taken after the fact is one the person never agreed to, and
+ * a film is minutes of expensive rendering.
+ */
+app.post("/v1/orders/:id/film", async (req, res) => {
+  const fee = Number(process.env.FILM_FEE_RAILCOINS || 5);
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.film_requested_at, p.phone AS requester_phone
+       FROM orders o JOIN people p ON p.id = o.person_id
+      WHERE o.id = $1`,
+    [req.params.id],
+  );
+  const order = rows[0];
+  if (!order) return res.status(404).json({ ok: false, error: "no_such_task" });
+  if (order.film_requested_at) {
+    return res.status(409).json({ ok: false, error: "already_requested" });
+  }
+  if (!order.requester_phone) {
+    return res.status(409).json({ ok: false, error: "no_requester" });
+  }
+
+  const charge = await chargeToTreasury(order.requester_phone, fee);
+  if (!charge.settled) {
+    return res.status(402).json({ ok: false, error: "payment_failed", reason: charge.reason });
+  }
+
+  await pool.query(
+    `UPDATE orders SET film_requested_at = now(), film_paid_signature = $2, updated_at = now()
+      WHERE id = $1`,
+    [order.id, charge.signature],
+  );
+  console.log(`film requested for "${order.title}" - charged ${fee} railcoins`);
+  res.json({
+    ok: true,
+    data: { queued: true, railcoins: fee, signature: charge.signature, title: order.title },
+  });
 });
 
 /** Call a task off, telling anyone who was holding it. */

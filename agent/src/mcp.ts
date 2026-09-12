@@ -162,6 +162,10 @@ export const market = {
    * Completed tasks with no clip yet. Delivery waits on the relay learning to
    * carry video; until then these are generated and stored.
    */
+  /** Everyone who can be sent something right now. */
+  activeWorkers: () =>
+    get<Array<{ phone: string; display_name: string | null }>>("/v1/workers/active"),
+
   /** May we picture this person, and with what. Null when they said no. */
   likeness: (phone: string) =>
     get<{ consented: boolean; has_photo: boolean; avatar_data_url: string | null }>(

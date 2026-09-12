@@ -54,7 +54,7 @@ function decryptSecretKey(encrypted: string): Uint8Array {
  * is more than a handful of users.
  */
 let treasury: Keypair | null = null;
-function treasuryKeypair(): Keypair {
+export function treasuryKeypair(): Keypair {
   if (treasury) return treasury;
   const raw = process.env.SOLANA_TREASURY_SECRET_KEY;
   if (!raw) throw new Error("SOLANA_TREASURY_SECRET_KEY is not set");

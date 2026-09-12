@@ -561,7 +561,11 @@ async function sendOutreach(): Promise<void> {
     // job that never goes out is worse than one that goes out plain.
     const orderId = String(offer.order_id ?? "");
     const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
-    const [png, mp4] = await Promise.all([imageFor(orderId), videoFor(orderId)]);
+    // Only the picture is waited for. Films are no longer made for every task -
+    // they are requested and paid for on the live board - so holding an offer
+    // for one would hold most offers forever.
+    const png = await imageFor(orderId);
+    const mp4 = null;
 
     if ((!png || !mp4) && waited < ASSET_WAIT_MS) {
       // Start the film here rather than waiting for the loop to come round.
@@ -582,7 +586,7 @@ async function sendOutreach(): Promise<void> {
           requester_phone: offer.requester_phone ?? "",
         }).catch(() => false);
       }
-      const missing = [!png && "its picture", !mp4 && "its film"].filter(Boolean).join(" and ");
+      const missing = [!png && "its picture"].filter(Boolean).join(" and ");
       log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for ${missing}`);
       continue;
     }
@@ -597,7 +601,7 @@ async function sendOutreach(): Promise<void> {
       if (id) attachments.push(id);
     }
     if (!png || !mp4) {
-      const missing = [!png && "a picture", !mp4 && "a film"].filter(Boolean).join(" or ");
+      const missing = [!png && "a picture"].filter(Boolean).join(" or ");
       log(`offer ${offer.id} going out without ${missing} after ${Math.round(waited / 1000)}s`);
     }
 
@@ -1249,12 +1253,12 @@ async function imageFor(orderId: string): Promise<Buffer | null> {
 }
 
 /**
- * Send each film to the person who asked for the task. The requester never
- * sees the offer it goes out on, so without this the only people who ever
- * watch the thing are the ones being pitched the job.
+ * Send a finished film to the person who paid for it and to everyone
+ * currently taking work. A film is now something a requester asks for and is
+ * charged for, so it goes to the whole active pool rather than to whoever
+ * happened to hold an offer.
  *
- * One per pass on purpose: a backlog should trickle out, not arrive all at
- * once as six videos in a row.
+ * One film per pass: a backlog should trickle, not arrive all at once.
  */
 async function deliverFilmsToRequesters(): Promise<void> {
   const pending = await market.videosPendingDelivery();
@@ -1269,12 +1273,33 @@ async function deliverFilmsToRequesters(): Promise<void> {
     return;
   }
 
+  const requester = String(film.requester_phone);
   const caption = `We made a trailer for your request: "${film.title}". Sixteen seconds, and it takes itself extremely seriously.`;
   const sent = await sendText(
-    String(film.requester_phone), shorten(caption),
+    requester, shorten(caption),
     `gotchu-trailer-${film.order_id}`, [attachmentId],
   );
-  await recordSent(sent.requestId, String(film.requester_phone), "trailer", String(film.order_id), caption);
+  await recordSent(sent.requestId, requester, "trailer", String(film.order_id), caption);
+
+  // The point of paying for one is that everyone taking work sees the job.
+  const pitch = `Someone wants this done: "${film.title}". Sixteen seconds on why it matters. Text me if you'll take it.`;
+  const active = await market.activeWorkers().catch(() => []);
+  for (const worker of active) {
+    if (!worker.phone || worker.phone === requester) continue;
+    const out = await sendText(
+      worker.phone, shorten(pitch),
+      `gotchu-trailer-${film.order_id}-${worker.phone.replace(/\D/g, "")}`, [attachmentId],
+    );
+    await recordSent(out.requestId, worker.phone, "trailer", String(film.order_id), pitch);
+    if (out.accepted) {
+      const history = await loadTurns(worker.phone);
+      await saveTurns(worker.phone, [
+        ...history,
+        { role: "assistant", content: pitch, at: new Date().toISOString() },
+      ]);
+    }
+    log(`trailer broadcast -> ${worker.phone}: ${out.detail}`);
+  }
 
   // Mark it done on a permanent failure too, or an unusable number is retried
   // every minute forever.

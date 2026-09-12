@@ -3,6 +3,7 @@ import { ensureSchema } from "@/lib/db/schema";
 import { loadLiveBoard } from "@/lib/db/live";
 import { boardWithDeal } from "@/lib/live/deal";
 import { LiveBoard } from "./live-board";
+import { FilmButton } from "./film-button";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,7 @@ type OrderDetail = {
   dropoff_location: string | null;
   budget_usd: string | null;
   requester_phone: string | null;
+  film_requested_at?: string | null;
   status: string | null;
   payment_status: string | null;
   solana_signature: string | null;
@@ -97,7 +99,10 @@ export default async function LivePage({
   const needsRetry =
     order?.status === "completed" && !alreadyPaid && Boolean(railcoins && railcoins > 0);
 
+  const filmFee = Number(process.env.FILM_FEE_RAILCOINS || 5);
+
   return (
+    <>
     <LiveBoard
       token={token}
       initial={board}
@@ -113,5 +118,13 @@ export default async function LivePage({
         needsRetry,
       }}
     />
+    <div className="mx-auto w-full max-w-md px-5 pb-10">
+      <FilmButton
+        token={token}
+        fee={filmFee}
+        alreadyRequested={Boolean(order?.film_requested_at)}
+      />
+    </div>
+    </>
   );
 }
