@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "tsx scripts/seed.ts",
-    "create-indexes": "tsx scripts/create-indexes.ts"
+    "create-indexes": "tsx scripts/create-indexes.ts",
+    "ethics-smoke": "tsx scripts/ethics-smoke.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
