@@ -158,7 +158,9 @@ export const tools: ToolDef[] = [
         wallet: wallet
           ? { public_key: wallet.public_key, cluster: wallet.cluster, funded: !!wallet.funded_at }
           : null,
-        style: style ? { summary: style.summary, style_tag: style.style_tag } : null,
+        style: style
+          ? { summary: style.summary, style_tag: style.style_tag, preferences: style.preferences }
+          : null,
 
         // Tasks they asked for.
         open_requests: live,

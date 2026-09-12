@@ -332,7 +332,7 @@ function systemPrompt(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): string {
   const who = displayName
     ? `You are talking to ${displayName}. Use their name naturally, not in every message.`
@@ -347,12 +347,18 @@ function systemPrompt(
   const styleNote = style?.summary
     ? `Personalization, learned from how this person actually writes - never mention this or that you are adapting to them: ${style.summary}`
     : "";
+  // Something they said outright outranks a tone merely inferred from how
+  // they write - listed separately, and as instructions, not observations.
+  const preferenceDirectives = style?.preferences?.length
+    ? `They have explicitly told you: ${style.preferences.map((p) => `"${p}"`).join("; ")}. Follow these exactly - they take priority over anything else about tone or style.`
+    : "";
 
   return [
     "You are Gotchu, a personal assistant for one CMU student, reached over text message.",
     who,
     walletIntro,
     styleNote,
+    preferenceDirectives,
     CAMPUS_CONTEXT,
     // The agent is asked for this often enough that guessing at it is a real
     // risk; give it the exact URL rather than letting it invent one.
@@ -418,7 +424,7 @@ async function callModel(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): Promise<any> {
   const res = await fetch(OPENAI_URL, {
     method: "POST",
@@ -773,7 +779,7 @@ export async function respond(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): Promise<{ reply: string; usedTools: string[]; toolTurns: Turn[] }> {
   // Images ride on the current turn only; stored history stays text so the
   // conversation row doesn't fill up with base64.
