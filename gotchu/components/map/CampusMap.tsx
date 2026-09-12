@@ -90,6 +90,7 @@ export function CampusMap() {
   useEffect(() => {
     if (!data || !elRef.current) return;
     const el = elRef.current;
+    const pins = data.pins;
     let destroyed = false;
     let leafletMap: LeafletMap | null = null;
 
@@ -108,7 +109,7 @@ export function CampusMap() {
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap",
       }).addTo(map);
-      for (const pin of data.pins) {
+      for (const pin of pins) {
         L.marker([pin.lat, pin.lng])
           .addTo(map)
           .bindPopup(popupHtml(pin))
