@@ -393,7 +393,15 @@ export async function recordSettlement(orderId: string, result: Settlement): Pro
     `UPDATE payments
         SET status = $2, solana_signature = $3, railcoins = $4,
             note = $5, updated_at = now()
-      WHERE order_id = $1`,
+      WHERE order_id = $1
+        AND (
+          $2::text = 'paid'
+          OR (
+            status IS DISTINCT FROM 'paid'
+            AND solana_signature IS NULL
+            AND COALESCE(note, '') NOT LIKE 'unrecorded:%'
+          )
+        )`,
     [
       orderId,
       result.settled ? "paid" : "settlement_failed",

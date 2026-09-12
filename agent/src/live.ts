@@ -224,9 +224,14 @@ export async function postLiveChat(input: {
 }): Promise<void> {
   const url = `${config.marketMakerUrl}/api/live/chat`;
   try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (config.voiceMcpToken) {
+      headers.Authorization = `Bearer ${config.voiceMcpToken}`;
+      headers["x-api-key"] = config.voiceMcpToken;
+    }
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(input),
       signal: AbortSignal.timeout(8_000),
     });

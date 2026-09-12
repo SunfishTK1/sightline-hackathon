@@ -57,11 +57,12 @@ export async function registerSignup(input: SignupInput) {
   let saved: any;
   try {
     await client.query("BEGIN");
-    // A phone already in use by a different account is a conflict, not an
-    // update: it would quietly hand one person's thread to another.
+    // Any phone identity not already bound to this account is a conflict. A
+    // voice-only row can contain private tasks and a wallet, so merely typing
+    // that number on the web must not claim it.
     const clash = await client.query(
       `SELECT auth0_sub FROM people
-        WHERE phone = $1 AND auth0_sub IS NOT NULL AND auth0_sub <> $2`,
+        WHERE phone = $1 AND auth0_sub IS DISTINCT FROM $2`,
       [e164, input.auth0_sub],
     );
     if (clash.rowCount) {
@@ -106,13 +107,17 @@ export async function registerSignup(input: SignupInput) {
               email = COALESCE($3, email),
               signed_up_at = COALESCE(signed_up_at, now()),
               doc = jsonb_set(
-                COALESCE(doc, '{}'::jsonb),
-                '{emailVerified}',
-                COALESCE(doc->'emailVerified', 'false'::jsonb)
+                jsonb_set(
+                  COALESCE(doc, '{}'::jsonb),
+                  '{emailVerified}',
+                  COALESCE(doc->'emailVerified', 'false'::jsonb)
+                ),
+                '{wantsWork}',
+                to_jsonb($4::boolean)
               )
         WHERE id = $1
         RETURNING id, phone, display_name, email, phone_verified`,
-      [target.id, input.auth0_sub, input.email || null],
+      [target.id, input.auth0_sub, input.email || null, input.wants_work !== false],
     );
     saved = savedResult.rows[0];
 
@@ -218,13 +223,21 @@ export async function verifySignup(auth0_sub: string, code: string) {
             doc = jsonb_set(
               COALESCE(doc, '{}'::jsonb),
               '{availability}',
-              COALESCE(doc->'availability', '{}'::jsonb) || '{"isAvailable":true}'::jsonb
+              COALESCE(doc->'availability', '{}'::jsonb)
+                || jsonb_build_object(
+                  'isAvailable',
+                  COALESCE((doc->>'wantsWork')::boolean, true)
+                )
             )
       WHERE id = $1`,
     [person.id],
   );
   await pool.query(
-    `UPDATE worker_profiles SET is_available = true, updated_at = now() WHERE person_id = $1`,
+    `UPDATE worker_profiles w
+        SET is_available = COALESCE((p.doc->>'wantsWork')::boolean, true),
+            updated_at = now()
+       FROM people p
+      WHERE p.id = w.person_id AND p.id = $1`,
     [person.id],
   );
 

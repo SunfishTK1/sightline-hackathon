@@ -545,6 +545,11 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
   return view;
 }
 
+export async function loadLiveBoardForOrder(orderId: string): Promise<LiveBoardView | null> {
+  const token = await tokenForOrder(orderId);
+  return token ? loadLiveBoard(token) : null;
+}
+
 async function tokenForOrder(orderId?: string): Promise<string | null> {
   if (!orderId) return null;
   const result = await query<{ token: string }>(

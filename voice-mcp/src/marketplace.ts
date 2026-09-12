@@ -1407,7 +1407,22 @@ export async function claimTask(orderId: string, workerPhone: string) {
     return { status: "already_yours" as const, order_id: order.id, title: order.title };
   }
 
-  const taken = await resolveOffer(offer.id, true, e164);
+  let taken: Awaited<ReturnType<typeof resolveOffer>>;
+  try {
+    taken = await resolveOffer(offer.id, true, e164);
+  } catch (err) {
+    // The upsert committed before resolveOffer opened its transaction. If that
+    // transaction dies, remove only the still-unaccepted claim row so it
+    // cannot hold exclusivity or appear actionable.
+    await pool
+      .query(
+        `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+          WHERE id = $1 AND status = 'offered'`,
+        [offer.id],
+      )
+      .catch(() => undefined);
+    throw err;
+  }
   if (taken.error) return { error: "not_available" as const, detail: taken.error };
   return { status: "accepted" as const, order_id: order.id, title: order.title, offer_id: offer.id };
 }
