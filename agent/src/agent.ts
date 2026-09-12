@@ -575,10 +575,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "countered",
-        message: `Counter offer: they asked for $${verdict.nextOfferUsd}.`,
+        kind: "waiting",
+        message: `Price adjusted to $${verdict.nextOfferUsd}. Still waiting on them.`,
         offerId: String(target.id),
-        state: "countered",
+        state: "waiting",
       });
       return { status: "countered_back", offer_usd: verdict.nextOfferUsd, say: verdict.messageHint };
     }
@@ -607,10 +607,12 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (orderId) {
       await postLiveEvent({
         orderId,
-        kind: args.accept ? "accepted" : "declined",
-        message: args.accept ? "Someone took the job." : "The counter was turned down. Still looking.",
+        kind: args.accept ? "accepted" : "countered",
+        message: args.accept
+          ? "Someone took the job."
+          : "Passed on that price — still waiting on them.",
         offerId: String(args.offer_id),
-        state: args.accept ? "accepted" : "declined",
+        state: args.accept ? "accepted" : "waiting",
       });
     }
     return result;

@@ -335,6 +335,7 @@ export async function respondToCounter(
             : offer.budget_usd
               ? Number(offer.budget_usd)
               : null,
+          offer_id: String(offer.id),
         }),
       ],
     );

@@ -101,6 +101,8 @@ export type OpenCounter = {
 
 export const market = {
   openOrders: () => get<any[]>("/v1/orders/open"),
+  getOrder: (orderId: string) =>
+    get<{ requester_phone?: string; status?: string }>(`/v1/orders/${orderId}`),
   candidates: (orderId: string) => get<any[]>(`/v1/orders/${orderId}/candidates`),
   createOffer: (
     order_id: string,

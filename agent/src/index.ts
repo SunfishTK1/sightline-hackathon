@@ -203,10 +203,10 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       if (result && pending?.order_id) {
         await postLiveEvent({
           orderId: pending.order_id,
-          kind: "declined",
-          message: "The counter was turned down. Still looking.",
+          kind: "countered",
+          message: "Passed on that price — still waiting on them.",
           offerId: String(prior.ref_id),
-          state: "declined",
+          state: "waiting",
         });
       }
     }
@@ -766,7 +766,15 @@ async function sayTo(
 async function applyLiveSkips(): Promise<void> {
   for (const skip of await listLiveSkips()) {
     if (skip.offerId) {
-      await market.respond(skip.offerId, false).catch(() => null);
+      const order = await market.getOrder(skip.orderId).catch(() => null);
+      const phone = order?.requester_phone;
+      const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
+      const countered = counters.find((c) => String(c.id) === String(skip.offerId));
+      if (countered && phone) {
+        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null);
+      } else {
+        await market.respond(skip.offerId, false).catch(() => null);
+      }
       await postLiveEvent({
         orderId: skip.orderId,
         kind: "skipped",
