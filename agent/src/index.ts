@@ -593,21 +593,19 @@ async function sendOutreach(): Promise<void> {
     const sent = await sendText(offer.phone, message, key, attachments);
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
-    if (sent.accepted || sent.permanent) {
+    if (sent.accepted) {
       const marked = await market.markOutreachSent(offer.id).catch(() => null);
       if (!marked) {
         log(`outreach offer ${offer.id} landed after it was no longer live`);
         continue;
       }
-      if (sent.accepted) {
-        // Only make the delivered offer actionable in the conversation after
-        // the marketplace has made it actionable through openJobs too.
-        const history = await loadTurns(offer.phone);
-        await saveTurns(offer.phone, [
-          ...history,
-          { role: "assistant", content: message, at: new Date().toISOString() },
-        ]);
-      }
+      // Only make the delivered offer actionable in the conversation after
+      // the marketplace has made it actionable through openJobs too.
+      const history = await loadTurns(offer.phone);
+      await saveTurns(offer.phone, [
+        ...history,
+        { role: "assistant", content: message, at: new Date().toISOString() },
+      ]);
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -622,23 +620,25 @@ async function sendOutreach(): Promise<void> {
       log(`outreach offer ${offer.id} -> ${offer.phone}: ${sent.detail}`);
       continue;
     }
-    if (attempt >= MAX_OUTREACH_ATTEMPTS) {
-      // They never got the text. Marking it sent would hold the exclusive
-      // slot for ten minutes; decline so rematch can move on now.
+    if (sent.permanent || attempt >= MAX_OUTREACH_ATTEMPTS) {
+      // They never got the text. A permanent failure cannot become actionable;
+      // release it immediately instead of starting an exclusive waiting clock.
       const released = await market.respond(offer.id, false).catch(() => null);
       if (released && offer.order_id) {
-        await market.noMatch(String(offer.order_id));
+        // recordNoMatch refuses to count while another live offer or counter
+        // exists, which is expected during a volunteer overlap.
+        await market.noMatch(String(offer.order_id)).catch(() => null);
         await postLiveEvent({
           orderId: offer.order_id,
           kind: "timeout",
-          message: "Could not reach them. Trying the next person.",
+          message: "Could not deliver the offer. Trying the next person.",
           offerId: String(offer.id),
           state: "dropped",
         });
       }
       log(
         released
-          ? `outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`
+          ? `outreach offer ${offer.id} RELEASED after ${attempt} failed attempt(s) to ${offer.phone}: ${sent.detail}`
           : `outreach offer ${offer.id} changed before give-up could release it`,
       );
       continue;
