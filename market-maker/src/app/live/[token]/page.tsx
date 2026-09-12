@@ -11,12 +11,15 @@ export const dynamic = "force-dynamic";
 const VOICE_MCP = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
 /** Matches the settlement rate in voice-mcp: 1 railcoin is $1 of task value. */
 const RAILCOINS_PER_SOL = 50_000;
+/** Someone has taken it, so there is a person to pay. */
+const CLOSEABLE = new Set(["accepted", "done_pending"]);
 
 type OrderDetail = {
   pickup_location: string | null;
   dropoff_location: string | null;
   budget_usd: string | null;
   requester_phone: string | null;
+  status: string | null;
 };
 
 /** The board stores no locations, so the task itself is the source for them. */
@@ -80,7 +83,12 @@ export default async function LivePage({
     <>
       <LiveBoard token={token} initial={board} />
       <div className="mx-auto w-full max-w-5xl px-6 pb-12">
-        <TaskMoney railcoins={railcoins} requesterBalance={balance} />
+        <TaskMoney
+          token={token}
+          railcoins={railcoins}
+          requesterBalance={balance}
+          canPay={CLOSEABLE.has(order?.status ?? "")}
+        />
         <TaskMap points={points} />
       </div>
     </>
