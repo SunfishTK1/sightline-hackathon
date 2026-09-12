@@ -287,58 +287,82 @@ app.post("/v1/offers", async (req, res) => {
     return res.status(400).json({ ok: false, error: "order_id and phone are required" });
   }
   const e164 = normalizePhone(String(phone));
-  const open = await pool.query(
-    `SELECT id FROM orders
-      WHERE id = $1
-        AND status IN ('submitted', 'offered')
-        AND ethics_verdict IS DISTINCT FROM 'BLOCK'`,
-    [order_id],
-  );
-  if (!open.rows[0]) {
-    return res.status(409).json({ ok: false, error: "order_not_open" });
-  }
   const person = await upsertPerson(e164);
   const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
-  const { rows } = await pool.query(
-    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (order_id, phone) DO UPDATE
-       SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
-           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
-           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note),
-           status = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.status
-             ELSE 'offered'
-           END,
-           outreach_sent_at = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.outreach_sent_at
-             ELSE NULL
-           END,
-           responded_at = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.responded_at
-             ELSE NULL
-           END,
-           counter_rounds = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_rounds
-             ELSE 0
-           END,
-           counter_price_usd = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_price_usd
-             ELSE NULL
-           END,
-           countered_at = CASE
-             WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
-             ELSE NULL
-           END
-     RETURNING id, order_id, phone, status, offered_usd, travel_note`,
-    [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
-  );
-  await pool.query(
-    `UPDATE orders SET status = 'offered', updated_at = now()
-      WHERE id = $1 AND status IN ('submitted', 'offered')`,
-    [order_id],
-  );
-  res.json({ ok: true, data: rows[0] ?? null });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const open = await client.query(
+      `SELECT id FROM orders
+        WHERE id = $1
+          AND status IN ('submitted', 'offered')
+          AND ethics_verdict IS DISTINCT FROM 'BLOCK'
+        FOR UPDATE`,
+      [order_id],
+    );
+    if (!open.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "order_not_open" });
+    }
+    const held = await client.query(
+      `SELECT id FROM job_offers
+        WHERE order_id = $1
+          AND status IN ('offered', 'countered', 'accepted')
+          AND phone IS DISTINCT FROM $2
+        LIMIT 1`,
+      [order_id, e164],
+    );
+    if (held.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "already_offered" });
+    }
+    const { rows } = await client.query(
+      `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (order_id, phone) DO UPDATE
+         SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
+             offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
+             travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note),
+             status = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.status
+               ELSE 'offered'
+             END,
+             outreach_sent_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.outreach_sent_at
+               ELSE NULL
+             END,
+             responded_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.responded_at
+               ELSE NULL
+             END,
+             counter_rounds = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_rounds
+               ELSE 0
+             END,
+             counter_price_usd = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.counter_price_usd
+               ELSE NULL
+             END,
+             countered_at = CASE
+               WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
+               ELSE NULL
+             END
+       RETURNING id, order_id, phone, status, offered_usd, travel_note`,
+      [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
+    );
+    await client.query(
+      `UPDATE orders SET status = 'offered', updated_at = now()
+        WHERE id = $1 AND status IN ('submitted', 'offered')`,
+      [order_id],
+    );
+    await client.query("COMMIT");
+    res.json({ ok: true, data: rows[0] ?? null });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
 });
 
 /** Every recent offer, including ones whose outreach has not gone out yet. */

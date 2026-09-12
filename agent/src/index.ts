@@ -873,6 +873,7 @@ async function autoNegotiate(): Promise<void> {
 
     const min = offer.min_price_usd != null ? Number(offer.min_price_usd) : null;
     const pays = Number(offer.offered_usd ?? offer.budget_usd ?? 0);
+    const hasPrice = Number(offer.offered_usd ?? 0) > 0 || Number(offer.budget_usd ?? 0) > 0;
 
     if (offer.auto_accept && min != null && pays >= min) {
       try {
@@ -899,6 +900,7 @@ async function autoNegotiate(): Promise<void> {
     }
 
     if (offer.auto_counter === false || min == null) continue;
+    if (!hasPrice) continue; // open budget: leave it to the human
     if (pays >= min) continue; // fine as offered; their call to take it
 
     try {

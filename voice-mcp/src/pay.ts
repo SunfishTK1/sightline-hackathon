@@ -30,28 +30,47 @@ export type Settlement =
  * Only one caller may initiate a transfer per order. Claim the payment row
  * before talking to the chain, otherwise two retries both send SOL.
  */
+const UNRECORDED_PREFIX = "unrecorded:";
+
+function signatureFromNote(note: string | null | undefined): string | null {
+  if (!note || !note.startsWith(UNRECORDED_PREFIX)) return null;
+  const signature = note.slice(UNRECORDED_PREFIX.length).trim();
+  return signature || null;
+}
+
 async function claimPayment(
   orderId: string,
 ): Promise<{ kind: "claimed" } | { kind: "already"; signature: string } | { kind: "busy"; reason: string }> {
-  const claimed = await pool.query<{ id: string }>(
+  const claimed = await pool.query<{ id: string; note: string | null }>(
     `UPDATE payments
         SET status = 'paying', updated_at = now()
       WHERE order_id = $1
         AND solana_signature IS NULL
-        AND status IS DISTINCT FROM 'paying'
         AND status IS DISTINCT FROM 'paid'
-      RETURNING id`,
+        AND (
+          status IS DISTINCT FROM 'paying'
+          OR updated_at < now() - interval '5 minutes'
+        )
+      RETURNING id, note`,
     [orderId],
   );
   if (claimed.rows[0]) return { kind: "claimed" };
 
-  const existing = await pool.query<{ solana_signature: string | null; status: string | null }>(
-    `SELECT solana_signature, status FROM payments WHERE order_id = $1`,
+  const existing = await pool.query<{
+    solana_signature: string | null;
+    status: string | null;
+    note: string | null;
+  }>(
+    `SELECT solana_signature, status, note FROM payments WHERE order_id = $1`,
     [orderId],
   );
   const row = existing.rows[0];
   if (row?.solana_signature) {
     return { kind: "already", signature: row.solana_signature };
+  }
+  const parked = signatureFromNote(row?.note);
+  if (parked) {
+    return { kind: "already", signature: parked };
   }
   if (row?.status === "paid") {
     return { kind: "already", signature: row.solana_signature || "paid" };
@@ -81,10 +100,42 @@ export async function payForTask(input: {
 
   const claim = await claimPayment(input.orderId);
   if (claim.kind === "already") {
-    return { settled: true, signature: claim.signature, railcoins };
+    const recorded: Settlement = { settled: true, signature: claim.signature, railcoins };
+    await persistSettlement(input.orderId, recorded).catch(() => undefined);
+    const stored = await pool.query<{ solana_signature: string | null }>(
+      `SELECT solana_signature FROM payments WHERE order_id = $1`,
+      [input.orderId],
+    );
+    if (stored.rows[0]?.solana_signature) {
+      return { settled: true, signature: stored.rows[0].solana_signature, railcoins };
+    }
+    return {
+      settled: false,
+      reason: `paid on-chain but not recorded: ${claim.signature}`,
+      railcoins,
+    };
   }
   if (claim.kind === "busy") {
     return { settled: false, reason: claim.reason, railcoins };
+  }
+
+  const parked = await pool.query<{ note: string | null }>(
+    `SELECT note FROM payments WHERE order_id = $1`,
+    [input.orderId],
+  );
+  const parkedSignature = signatureFromNote(parked.rows[0]?.note);
+  if (parkedSignature) {
+    const recorded: Settlement = { settled: true, signature: parkedSignature, railcoins };
+    try {
+      await persistSettlement(input.orderId, recorded);
+      return recorded;
+    } catch (err) {
+      return {
+        settled: false,
+        reason: `paid on-chain but not recorded: ${parkedSignature} (${(err as Error).message})`,
+        railcoins,
+      };
+    }
   }
 
   try {
@@ -122,9 +173,22 @@ export async function payForTask(input: {
     );
     const signature = await sendAndConfirmTransaction(connection, tx, [from]);
     const result: Settlement = { settled: true, signature, railcoins };
-    // Never mark this failed after the chain moved money — a retry would pay twice.
-    await persistSettlement(input.orderId, result).catch(() => undefined);
-    return result;
+    try {
+      await persistSettlement(input.orderId, result);
+      return result;
+    } catch (err) {
+      await pool
+        .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
+          input.orderId,
+          `${UNRECORDED_PREFIX}${signature}`,
+        ])
+        .catch(() => undefined);
+      return {
+        settled: false,
+        reason: `paid on-chain but not recorded: ${signature} (${(err as Error).message})`,
+        railcoins,
+      };
+    }
   } catch (err) {
     const result: Settlement = { settled: false, reason: (err as Error).message, railcoins };
     await recordSettlement(input.orderId, result).catch(() => undefined);
