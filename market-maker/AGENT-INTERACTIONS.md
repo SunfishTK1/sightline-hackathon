@@ -4,16 +4,14 @@ One inbox. One price brain. One ethics gate.
 
 | Agent | Package | Owns | Does not own |
 |---|---|---|---|
-| **Personal agent** | `agent/` + `voice-mcp/` + `gotchu/` | Talking to humans, intake, completion, **every SMS** | Ranking, clearing price, who wins |
-| **Market-maker** | `market-maker/` | Rank, clearing price, evaluate YES / COUNTER / decline | Sending job texts, fulfillment chat |
-| **Ethics / arbitration** | Will’s `gotchu/lib/agents/ethics.ts` (and a future teammate service) | Allow / block / cap rounds / reject hostage terms | Picking workers or inventing a price |
+| **Personal agent** | `agent/` + `voice-mcp/` | Talking to humans, intake, completion, **every SMS** | Ranking, price, ethics HTTP |
+| **Market-maker** | `market-maker/` | Rank, prime price, evaluate, **call ethics** | Sending job texts, fulfillment chat |
+| **Ethics / arbitration** | Daphne’s `gotchu/lib/agents/ethics.ts` | Allow / block / same-job referee | Picking workers or inventing a price |
 
 Phone number is the join key. The personal agent must not require `task-*` / `user-*` ids from this package.
 
 ```
-Human  <--- SMS only --->  Personal agent  <--quote/evaluate-->  Market-maker
-                                      |                              |
-                                      +-------- ethics gate ---------+
+Human  <--- SMS only --->  Personal agent  <--quote/evaluate-->  Market-maker  --HTTP-->  Gotchu ethics
 ```
 
 ## Live path
@@ -22,7 +20,7 @@ Human  <--- SMS only --->  Personal agent  <--quote/evaluate-->  Market-maker
 2. Personal agent loads open orders + worker candidates from voice-mcp.
 3. Personal agent calls **market-maker** `POST /api/broker/quote`.
 4. Market-maker returns who to ask, a **prime** `offerUsd` (max P(deal)), and a **travel quote** (distance + walk / bus / drive minutes). Typical prices come from `market_comps` keyed by category + hop length + duration. `pDeal` stays on the payload, not in SMS.
-5. Personal agent writes **one** exclusive `job_offers.offered_usd` (top pick only), texts both sides the same price **and** the hop times, and asks the worker if they can make the deadline. Do not text three people the same job.
+5. Personal agent writes **one** exclusive `job_offers.offered_usd` (top pick only), texts both sides the same price **and** the hop times, and asks the worker if they can make the deadline. It also opens a public `/live/[token]` board on market-maker and texts that URL to the requester. Do not text three people the same job.
 6. Human replies YES / NO / COUNTER / need more time. Personal agent calls **`POST /api/broker/evaluate`**.
 7. Market-maker returns `ACCEPT` | `COUNTER` | `ASK_REQUESTER` | `TRY_NEXT` | `REJECT_SCOPE`. Time asks return `ASK_REQUESTER` plus `suggestedDeadline`.
 8. Personal agent sends **one** follow-up text. It does not invent a second price. On `ACCEPT`, market-maker stores the paid price as a comp.
@@ -161,33 +159,20 @@ Workers are upserted by phone so later quotes see the same person.
 
 ## Ethics / arbitration contract
 
-Every quote and every evaluate already calls `reviewBrokerAction()` in [`src/lib/market/ethics-gate.ts`](./src/lib/market/ethics-gate.ts). Today it always returns `ALLOW`. That is the hook.
+Market-maker is the only ethics caller on the live path. The personal agent does **not** call `reviewTask` or `arbitrateMove`. See [`ETHICS-INTEGRATION.md`](../ETHICS-INTEGRATION.md) (Divya).
 
-**Will / ethics teammate: replace the body of that function** (or have it HTTP out to your service). Do not add a second gate on the SMS path.
+[`src/lib/market/ethics-gate.ts`](./src/lib/market/ethics-gate.ts) POSTs to Daphne’s Gotchu routes. Set `ETHICS_BASE_URL` (default `http://127.0.0.1:3001` so it does not collide with this app on `:3000`).
 
-Call it **before** we return a price or an action. If you `BLOCK`:
+| When | Call | If blocked |
+|---|---|---|
+| `POST /api/broker/quote` | `POST /api/ethics/review` | Empty `picks`, everyone in `skip` with the reason |
+| `POST /api/broker/evaluate` (every offer / counter except timeout / decline) | `review` then `POST /api/ethics/arbitrate` | `TRY_NEXT`. `STRIP_AMENDMENTS` keeps price/ETA only |
 
-- Quote: empty `picks`, everyone in `skip` with your reason
-- Evaluate: we treat it as `TRY_NEXT` and do not tell the personal agent to send a coercive counter
+Verdicts we honor: `ALLOW` and `ALLOW_WITH_CONDITIONS` still quote. `BLOCK` / `BLOCK_TASK` / `REJECT_MOVE` stop the deal. Package pickup and graded work will not pass `reviewTask`.
 
-What ethics should decide (not market-maker):
+If Gotchu is down, review falls back to `ALLOW_WITH_CONDITIONS` (“manual review recommended”) and a price-only arbitrate is allowed. Do not copy the deny-list here.
 
-- Task is allowed on campus (denylist + rubric you already have in `gotchu/lib/agents/ethics.ts`)
-- A counter note is hostage / extra unpaid labor / a different job
-- Too many rounds or the thread is two humans relaying through the agent
-- Block specific outbound wording if needed
-
-What ethics should **not** decide: who ranks first, or the clearing dollar amount, unless the price itself is abusive (then `BLOCK` and say why).
-
-Suggested verdict shape (already on the hook):
-
-```ts
-{ allowed: boolean; verdict: "ALLOW" | "BLOCK"; reasons: string[] }
-```
-
-If you later need `ALLOW_WITH_CONDITIONS`, return `ALLOW` plus conditions in `reasons[]` and we can thread them into `messageHint`. Until then, keep it binary.
-
-Personal agent still talks to the human. If ethics blocks, the personal agent should say the request cannot be listed — it should not bargain around the block.
+Personal agent still talks to the human. If we return no picks, it should say the request cannot be listed — it should not bargain around the block.
 
 ## Completion
 
@@ -196,14 +181,19 @@ Market-maker stops at agreement (`ACCEPT`). Personal agent owns “are you there
 ## Local run
 
 ```bash
-# terminal 1
+# terminal 1 — Daphne's ethics HTTP (review / arbitrate)
+cd gotchu
+npx next dev -p 3001
+
+# terminal 2
 cd market-maker
 # IMESSAGE_LIVE=false
+# ETHICS_BASE_URL=http://127.0.0.1:3001
 npm run dev          # :3000
 
-# terminal 2 — voice-mcp (existing VOICE_MCP_URL)
+# terminal 3 — voice-mcp (existing VOICE_MCP_URL)
 
-# terminal 3
+# terminal 4
 cd agent
 # MARKET_MAKER_URL=http://localhost:3000
 npm run dev

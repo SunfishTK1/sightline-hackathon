@@ -1,7 +1,11 @@
 import { estimateJobTravel } from "./campus-travel";
 import { MAX_NEGOTIATION_ROUNDS } from "./constants";
 import { requesterMaximum, taskFromBrokerOrder } from "./broker-order";
-import { reviewBrokerAction } from "./ethics-gate";
+import {
+  arbitrationBlocksDeal,
+  arbitrateBrokerMove,
+  reviewBrokerAction,
+} from "./ethics-gate";
 import { evaluateWorkerResponse } from "./evaluate-response";
 import { asNumber, money, quoteForWorker } from "./quote-price";
 import { looksLikeScopeChange } from "./scope-change";
@@ -97,22 +101,71 @@ function fromPolicy(
   };
 }
 
-export function evaluateBrokerDecision(
+export async function evaluateBrokerDecision(
   input: BrokerEvaluateRequest,
-): BrokerEvaluateResult {
-  const ethics = reviewBrokerAction({
-    title: input.order.title,
-    details: input.order.details ?? undefined,
-    note: input.note ?? undefined,
-  });
-  if (!ethics.allowed) return blocked();
-
+): Promise<BrokerEvaluateResult> {
   if (input.decision === "TIMEOUT") {
     return {
       action: "TRY_NEXT",
       messageHint: "No reply in time. Cancel this offer and ask the next worker.",
       askRequester: false,
     };
+  }
+
+  const ethics = await reviewBrokerAction({
+    title: input.order.title,
+    details: input.order.details ?? undefined,
+    note: input.note ?? undefined,
+    category: input.order.category,
+    pickup_location: input.order.pickup_location,
+    dropoff_location: input.order.dropoff_location,
+    deadline_at: input.order.deadline_at,
+    budget_usd: input.order.budget_usd,
+    maximum_usd: input.order.maximum_usd,
+  });
+  if (!ethics.allowed) {
+    return {
+      action: "TRY_NEXT",
+      messageHint: ethics.reasons[0] ?? "Ethics blocked this task.",
+      askRequester: false,
+    };
+  }
+
+  const skipPass =
+    input.decision === "DECLINE" || input.decision === "REQUESTER_NO";
+  if (!skipPass) {
+    const priceUsd =
+      asNumber(input.price_usd) ?? asNumber(input.current_offer_usd) ?? 0;
+    const role =
+      input.decision === "REQUESTER_YES" ||
+      input.decision === "REQUESTER_NO" ||
+      input.decision === "AUTO_REQUESTER"
+        ? "requester_agent"
+        : "worker_agent";
+    const accept =
+      input.decision === "ACCEPT" ||
+      input.decision === "REQUESTER_YES" ||
+      input.decision === "AUTO_REQUESTER";
+    const arb = await arbitrateBrokerMove({
+      order: input.order,
+      priceUsd,
+      etaMinutes: input.estimated_minutes,
+      rationale: input.note ?? "",
+      accept,
+      role,
+      amendments: looksLikeScopeChange(input.note)
+        ? [{ path: "requirements", to: input.note }]
+        : [],
+    });
+    if (arbitrationBlocksDeal(arb.verdict)) {
+      return {
+        ...blocked(),
+        messageHint: arb.reason || "Ethics rejected this move.",
+      };
+    }
+    if (arb.stripAmendments) {
+      input = { ...input, note: undefined };
+    }
   }
 
   if (looksLikeScopeChange(input.note) && input.decision !== "DECLINE") {

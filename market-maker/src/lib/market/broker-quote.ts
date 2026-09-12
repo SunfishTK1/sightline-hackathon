@@ -64,9 +64,15 @@ export async function quoteBrokerOrder(input: {
   });
   const serialized = serializeTravel(travel);
 
-  const ethics = reviewBrokerAction({
+  const ethics = await reviewBrokerAction({
     title: input.order.title,
     details: input.order.details ?? undefined,
+    category: input.order.category,
+    pickup_location: input.order.pickup_location,
+    dropoff_location: input.order.dropoff_location,
+    deadline_at: input.order.deadline_at,
+    budget_usd: input.order.budget_usd,
+    maximum_usd: input.order.maximum_usd,
   });
   if (!ethics.allowed) {
     return {

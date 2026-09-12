@@ -15,6 +15,9 @@ export interface UserConsents {
   age18: boolean;
   canCall: boolean;
   canText: boolean;
+  acceptedTerms: boolean;
+  /** Which TERMS_VERSION they agreed to - a stored acceptance only counts for that version. */
+  termsVersion: string;
   /**
    * Whether their photo may be used to picture them in generated images and
    * clips. Unlike the others this one is optional: a marketplace can insist on

@@ -29,6 +29,7 @@ import {
 } from "@/lib/users";
 import { isCmuEmail, onboardingSchema } from "@/lib/validate";
 import { activateParticipant } from "@/lib/activate";
+import { TERMS_VERSION } from "@/lib/terms";
 import type { User } from "@/lib/types/user";
 
 export async function POST(req: Request) {
@@ -94,6 +95,8 @@ export async function POST(req: Request) {
       age18: input.ageConfirmed,
       canCall: input.consentCall,
       canText: input.consentText,
+      acceptedTerms: input.acceptedTerms,
+      termsVersion: TERMS_VERSION,
       canUseLikeness: input.consentLikeness ?? false,
       acceptedAt: now,
     },

@@ -13,6 +13,7 @@ import {
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
+import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 
 const PORT = Number(process.env.PORT || 3010);
@@ -155,6 +156,29 @@ app.post("/v1/wallets/ensure", async (req, res) => {
 app.get("/v1/wallets/:phone", async (req, res) => {
   try {
     res.json({ ok: true, data: await getWallet(req.params.phone) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------- style
+
+/**
+ * The personal agent's own learned read on how this person likes to be
+ * talked to. Written from their message history, never from anything they
+ * typed into a form - that's what the ToS training clause covers.
+ */
+app.post("/v1/style/save", async (req, res) => {
+  const { phone, summary, style_tag, embedding } = req.body ?? {};
+  if (!phone || !summary || !style_tag || !Array.isArray(embedding)) {
+    return res.status(400).json({
+      ok: false,
+      error: "phone, summary, style_tag, and embedding (array) are required",
+    });
+  }
+  try {
+    await saveStyle(String(phone), String(summary), String(style_tag), embedding);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -422,7 +446,7 @@ app.get("/v1/orders/:id/video", async (req, res) => {
 /** Clips generated but not yet sent - the relay cannot carry video yet. */
 app.get("/v1/videos/pending-delivery", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT v.order_id, v.seconds, octet_length(v.mp4) AS bytes, v.created_at,
+    `SELECT v.order_id, v.seconds, COALESCE(v.bytes, octet_length(v.mp4)) AS bytes, v.created_at,
             o.title, p.phone AS requester_phone, w.phone AS worker_phone
        FROM order_videos v
        JOIN orders o ON o.id = v.order_id
