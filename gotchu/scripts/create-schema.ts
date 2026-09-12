@@ -9,12 +9,13 @@ import { Pool } from "pg";
 config({ path: resolve(process.cwd(), ".env.local") });
 config();
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error("DATABASE_URL is not set — check gotchu/.env.local");
-}
-
 async function main() {
+  // Checked here rather than at module scope so the narrowing holds below.
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is not set — check gotchu/.env.local");
+  }
+
   const isInternal = connectionString.includes(".railway.internal");
   const pool = new Pool({
     connectionString,

@@ -6,6 +6,7 @@
  */
 import { reviewTask, reviewAmendment, arbitrateMove } from "../lib/agents/ethics";
 import {
+  MOCK_ALCOHOL_21,
   MOCK_ARBITRATE_COLOR_AND_PRICE,
   MOCK_ARBITRATE_DINING_ID,
   MOCK_ARBITRATE_PRICE_ONLY,
@@ -41,6 +42,13 @@ async function main() {
     "2 reviewTask 15-213 lab BLOCK academic_integrity",
     lab.verdict === "BLOCK" && lab.categories.includes("academic_integrity"),
     lab,
+  );
+
+  const alcohol = await reviewTask(MOCK_ALCOHOL_21);
+  check(
+    "2b reviewTask beer delivery at 21 BLOCK controlled_substances",
+    alcohol.verdict === "BLOCK" && alcohol.categories.includes("controlled_substances"),
+    alcohol,
   );
 
   const navy = await reviewAmendment(MOCK_FENCE_WHITE, MOCK_FENCE_NAVY);
@@ -88,7 +96,7 @@ async function main() {
     console.error(`\n${failed} failed`);
     process.exit(1);
   }
-  console.log("\nAll 8 ethics cases passed.");
+  console.log("\nEthics smoke passed (including alcohol ban at any age).");
 }
 
 main().catch((err) => {

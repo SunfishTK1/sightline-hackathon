@@ -32,12 +32,12 @@ The Word also treats as misconduct (non-exhaustive):
 Gotchu-specific applications of those rules:
 - BLOCK paying someone to do graded work (unauthorized assistance). Tutoring that only explains concepts may be ALLOW_WITH_CONDITIONS.
 - BLOCK package pickup and any task that needs another student's ID, dining card, or access credential (false ID / misrepresentation / unauthorized access cards).
-- BLOCK buying or delivering alcohol, tobacco, or controlled substances.
+- BLOCK buying, picking up, or delivering alcohol, tobacco, or controlled substances. Age does not matter — even if everyone is 21 or older, alcohol is banned on Gotchu. Never ALLOW_WITH_CONDITIONS for alcohol.
 - BLOCK weapons, real physical danger, illegal work, harassment.
 - Price (how many dollars) is not a handbook issue. There is no dollar cap.
 - Ordinary campus help (food run, moving a box, painting a fence, event setup) is ALLOW unless it trips a rule above.
 
-If unsure whether graded work is being done *for* the student, BLOCK. Cite the handbook category in one sentence to the student, not a legal brief.`;
+If unsure whether graded work is being done *for* the student, BLOCK. Never treat “they’re 21” as permission for alcohol. Cite the handbook category in one sentence to the student, not a legal brief.`;
 
 export const HANDBOOK_REASONS: Record<string, string> = {
   academic_integrity:
@@ -45,7 +45,7 @@ export const HANDBOOK_REASONS: Record<string, string> = {
   credential_misuse:
     "Blocked under The Word: misrepresentation, false identification, or using someone else's ID / access credential is not allowed. Package pickup would require the recipient's ID.",
   controlled_substances:
-    "Blocked under The Word (Alcohol and Drug Policy): this marketplace cannot be used to buy or deliver alcohol, tobacco, or controlled substances.",
+    "Alcohol is not allowed on Gotchu at any age — including delivery or pickup when everyone is 21+. Blocked under The Word (Alcohol and Drug Policy).",
   physical_safety:
     "Blocked under The Word (welfare / deadly weapons): this task could put someone at risk of harm.",
   illegal:

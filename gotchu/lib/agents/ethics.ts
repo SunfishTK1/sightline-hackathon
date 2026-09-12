@@ -63,6 +63,9 @@ function handbookBlockReason(
   categories: EthicsCategory[],
   structuredBlob: string,
 ): string {
+  if (categories.includes("controlled_substances")) {
+    return HANDBOOK_REASONS.controlled_substances;
+  }
   if (/\bpackage\b/i.test(structuredBlob)) {
     return HANDBOOK_REASONS.credential_misuse;
   }

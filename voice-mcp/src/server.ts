@@ -9,9 +9,11 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
+  cancelOrder,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
+import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 
 const PORT = Number(process.env.PORT || 3010);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
@@ -202,8 +204,10 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT w.phone, w.blurb, w.categories, w.min_price_usd
        FROM worker_profiles w
+       JOIN people wp ON wp.id = w.person_id
        JOIN orders o ON o.id = $1
       WHERE w.is_available
+        AND wp.phone_verified
         AND w.person_id <> o.person_id
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j WHERE j.order_id = o.id AND j.phone = w.phone)
@@ -583,6 +587,18 @@ app.get("/v1/counters/open", async (req, res) => {
   res.json({ ok: true, data: await listOpenCounters(String(req.query.phone ?? "")) });
 });
 
+/** Call a task off, telling anyone who was holding it. */
+app.post("/v1/orders/:id/cancel", async (req, res) => {
+  try {
+    const result = await cancelOrder(req.params.id, req.body?.reason);
+    if (result.error) return res.status(409).json({ ok: false, error: result.error });
+    console.log(`cancelled order ${req.params.id} (told ${result.told})`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 /** Point an order at the person who actually requested it. */
 app.post("/v1/orders/:id/reassign", async (req, res) => {
   const phone = req.body?.phone;
@@ -595,6 +611,68 @@ app.post("/v1/orders/:id/reassign", async (req, res) => {
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Signup, from the website. The site holds the Auth0 session; this service
+// holds the accounts, so the site posts what it knows and nothing more.
+// ---------------------------------------------------------------------------
+
+app.post("/v1/signup", async (req, res) => {
+  const { auth0_sub, email, display_name, phone, blurb, categories, min_price_usd, wants_work } =
+    req.body ?? {};
+  if (!auth0_sub || !phone) {
+    return res.status(400).json({ ok: false, error: "auth0_sub and phone are required" });
+  }
+  try {
+    const result = await registerSignup({
+      auth0_sub: String(auth0_sub),
+      email: String(email ?? ""),
+      display_name: display_name ? String(display_name) : undefined,
+      phone: String(phone),
+      blurb: blurb ? String(blurb) : undefined,
+      categories: Array.isArray(categories) ? categories.map(String) : undefined,
+      min_price_usd: min_price_usd != null ? Number(min_price_usd) : undefined,
+      wants_work: wants_work !== false,
+    });
+    if ("error" in result && result.error) {
+      return res.status(409).json({ ok: false, error: result.error });
+    }
+    console.log(`signup ${auth0_sub} -> ${phone} (code_sent=${"code_sent" in result && result.code_sent})`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    // A mis-typed number fails here, loudly, rather than becoming a person.
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+app.post("/v1/signup/verify", async (req, res) => {
+  const { auth0_sub, code } = req.body ?? {};
+  if (!auth0_sub || !code) {
+    return res.status(400).json({ ok: false, error: "auth0_sub and code are required" });
+  }
+  const result = await verifySignup(String(auth0_sub), String(code));
+  if ("error" in result && result.error) {
+    return res.status(400).json({ ok: false, error: result.error, data: result });
+  }
+  console.log(`verified ${auth0_sub}`);
+  res.json({ ok: true, data: result });
+});
+
+app.get("/v1/signup/status", async (req, res) => {
+  const sub = String(req.query.auth0_sub ?? "");
+  if (!sub) return res.status(400).json({ ok: false, error: "auth0_sub is required" });
+  res.json({ ok: true, data: await signupStatus(sub) });
+});
+
+app.post("/v1/signup/availability", async (req, res) => {
+  const { auth0_sub, available } = req.body ?? {};
+  if (!auth0_sub) return res.status(400).json({ ok: false, error: "auth0_sub is required" });
+  const result = await setAvailability(String(auth0_sub), available !== false);
+  if ("error" in result && result.error) {
+    return res.status(404).json({ ok: false, error: result.error });
+  }
+  res.json({ ok: true, data: result });
 });
 
 /** Recent orders, with where they came from. */

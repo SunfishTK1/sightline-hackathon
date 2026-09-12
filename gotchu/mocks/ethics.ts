@@ -20,6 +20,16 @@ export const MOCK_LAB_HOMEWORK: StructuredTask = {
   requirements: ["Complete and submit the lab"],
 };
 
+export const MOCK_ALCOHOL_21: StructuredTask = {
+  title: "Deliver beer from the liquor store — I'm 21",
+  category: "food",
+  pickupLocation: "Craig Street",
+  dropoffLocation: "Morewood",
+  maxPriceUsd: 20,
+  estimatedMinutes: 30,
+  requirements: ["Buyer is 21+"],
+};
+
 export const MOCK_FENCE_WHITE: StructuredTask = {
   title: "Paint the fence white",
   category: "other",

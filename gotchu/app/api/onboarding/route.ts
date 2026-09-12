@@ -28,6 +28,7 @@ import {
   upsertUser,
 } from "@/lib/users";
 import { isCmuEmail, onboardingSchema } from "@/lib/validate";
+import { activateParticipant } from "@/lib/activate";
 import type { User } from "@/lib/types/user";
 
 export async function POST(req: Request) {
@@ -116,6 +117,16 @@ export async function POST(req: Request) {
     }
     throw err;
   }
+
+  // Saving the person is not the same as joining the marketplace: give them a
+  // worker profile and let their agent introduce itself. Deliberately after the
+  // save, and deliberately unable to fail it.
+  await activateParticipant({
+    personId: saved.uuid,
+    phone: saved.phone,
+    displayName: [saved.firstName, saved.lastName].filter(Boolean).join(" ") || null,
+    blurb: saved.preferenceText,
+  });
 
   const jar = await cookies();
   jar.set(IDENTITY_COOKIE, identityCookieValue({ auth0Sub: user.auth0Sub, cmuEmail: input.cmuEmail }), {

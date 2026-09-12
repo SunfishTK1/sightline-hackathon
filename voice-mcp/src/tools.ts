@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { pool, normalizePhone, upsertPerson } from "./db.js";
+import { reviewTask, reviewAmendment, structuredFrom, ethicsConfigured } from "./ethics.js";
 import {
   listOpenOffers, listOpenTasks, resolveOffer,
   counterOffer, respondToCounter, listOpenCounters,
@@ -236,11 +237,34 @@ export const tools: ToolDef[] = [
         callId = open.rows[0]?.id ?? null;
       }
 
+      // Every task passes the ethics gate before it can look for anyone.
+      const draft = {
+        title: input.title,
+        details: input.details,
+        category: input.category,
+        pickup_location: input.pickup_location,
+        dropoff_location: input.dropoff_location,
+        budget_usd: input.budget_usd,
+        deadline_at: input.deadline_at,
+      };
+      const verdict = await reviewTask(draft);
+
+      let status = "submitted";
+      if (verdict?.verdict === "BLOCK") {
+        status = "blocked";
+      } else if (!verdict && ethicsConfigured()) {
+        // The gate is configured but did not answer. Hold the task rather than
+        // open an ungated one; a later pass or a human can clear it.
+        status = "pending_review";
+      }
+
       const { rows } = await pool.query(
         `INSERT INTO orders (person_id, call_id, source, title, details, category,
                              pickup_location, dropoff_location, deadline_at,
-                             budget_usd, urgency, requirements)
-         VALUES ($1,$2,$12,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+                             budget_usd, urgency, requirements, status,
+                             ethics_verdict, ethics_reason, ethics_conditions,
+                             original_structured)
+         VALUES ($1,$2,$12,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$13,$14,$15,$16::jsonb,$17::jsonb)
          RETURNING *`,
         [
           person.id,
@@ -255,9 +279,26 @@ export const tools: ToolDef[] = [
           input.urgency ?? null,
           JSON.stringify(input.requirements ?? []),
           input.source ?? "voice",
+          status,
+          verdict?.verdict ?? null,
+          verdict?.reason ?? null,
+          JSON.stringify(verdict?.conditions ?? []),
+          // Frozen at the first allow: what the job was agreed to be.
+          status === "blocked" ? null : JSON.stringify(structuredFrom(draft)),
         ],
       );
       const order = rows[0];
+
+      if (status === "blocked") {
+        return {
+          order_id: order.id,
+          status,
+          blocked: true,
+          reason: verdict?.reason ?? "That request cannot be listed.",
+          categories: verdict?.categories ?? [],
+          say: "Tell them plainly that this cannot be listed, and why. Do not offer a way around it.",
+        };
+      }
 
       // Queue the confirmation the text agent will send.
       await pool.query(
@@ -548,6 +589,38 @@ tools.push({
   },
   handler: async ({ phone, order_id, budget_usd, deadline_at, details }) => {
     const e164 = normalizePhone(phone);
+
+    // Price and deadline can move freely. Rewriting what the job *is* has to
+    // clear the gate again, or a cleared task becomes a cover for a new one.
+    if (details) {
+      const { rows: before } = await pool.query(
+        `SELECT o.* FROM orders o JOIN people p ON p.id = o.person_id
+          WHERE o.id = $1 AND p.phone = $2`,
+        [order_id, e164],
+      );
+      const current = before[0];
+      if (current) {
+        const original = current.original_structured
+          ? {
+              title: current.original_structured.title,
+              details: current.original_structured.description,
+              category: current.original_structured.category,
+              pickup_location: current.original_structured.pickupLocation,
+              dropoff_location: current.original_structured.dropoffLocation,
+            }
+          : current;
+        const amendment = await reviewAmendment(original, { ...current, details });
+        if (amendment?.verdict === "REJECT") {
+          return {
+            error: "same_task_check_failed",
+            reason:
+              amendment.reason ??
+              "That edit changes what the job is, not just its terms. Cancel this one and post the new task.",
+          };
+        }
+      }
+    }
+
     const { rows } = await pool.query(
       `UPDATE orders o
           SET budget_usd = COALESCE($3, o.budget_usd),

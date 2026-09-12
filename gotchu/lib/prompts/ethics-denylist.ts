@@ -19,8 +19,15 @@ export const DENYLIST: DenylistRule[] = [
   { category: "academic_integrity", pattern: /\b15-?213\b/i },
   {
     category: "controlled_substances",
-    pattern: /\b(alcohol|beer|liquor|wine|weed|tobacco|vape|prescription)\b/i,
+    pattern:
+      /\b(alcohol|alcoholic|beer|beers|liquor|wine|wines|booze|vodka|gin|whiskey|whisky|tequila|rum|champagne|cocktail|cocktails|keg|ipa|hard\s+seltzer|seltzer)\b/i,
   },
+  {
+    category: "controlled_substances",
+    pattern:
+      /\b(liquor\s+store|wine\s+(?:shop|store)|beer\s+run|keg\s+stand|byob)\b/i,
+  },
+  { category: "controlled_substances", pattern: /\b(weed|tobacco|vape|prescription)\b/i },
   { category: "physical_safety", pattern: /\b(weapon|gun|knife|explosive)\b/i },
   {
     category: "credential_misuse",

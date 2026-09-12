@@ -283,6 +283,14 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "question_answered") {
     return `On "${handoff.payload?.title}" you asked: ${handoff.payload?.question} They said: ${handoff.payload?.answer}`;
   }
+  if (handoff.kind === "task_cancelled") {
+    const why = handoff.payload?.reason ? ` (${handoff.payload.reason})` : "";
+    return `"${handoff.payload?.title}" was called off${why}, so you're off the hook for it. Nothing owed either way.`;
+  }
+  if (handoff.kind === "welcome") {
+    const who = handoff.payload?.display_name ? `, ${String(handoff.payload.display_name).split(" ")[0]}` : "";
+    return `You're in${who}. This is your Gotchu agent. Text me anything you need on campus and I'll find someone to do it, and I'll text you when a job comes up that fits what you said you'd take. Reply STOP any time to stop hearing from me.`;
+  }
   if (handoff.kind === "counter_declined") {
     const still = handoff.payload?.still_offered_usd
       ? ` It's still open at $${handoff.payload.still_offered_usd} if you want it.`
@@ -800,7 +808,10 @@ async function filmOpenTasks(): Promise<void> {
     return;
   }
   const pay = order.budget_usd && Number(order.budget_usd) > 0 ? ` ($${order.budget_usd})` : "";
-  const caption = `The job, in motion: ${order.title}${pay}. Reply YES if you'll take it.`;
+  // The film says the steps out loud; the caption leaves them in writing, so
+  // whoever takes it still has the instructions after the video stops.
+  const steps = made.plan.steps.map((s, i) => `${i + 1}. ${s}`).join(" ");
+  const caption = `Your mission${pay}: ${made.plan.objective} ${steps} Reply YES if you accept.`;
 
   let sentAny = false;
   for (const holder of holders) {
