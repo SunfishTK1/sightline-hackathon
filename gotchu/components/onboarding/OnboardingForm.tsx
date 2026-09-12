@@ -65,6 +65,7 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
       ageConfirmed: existing?.consents.age18 ?? false,
       consentCall: existing?.consents.canCall ?? false,
       consentText: existing?.consents.canText ?? false,
+      consentLikeness: existing?.consents.canUseLikeness ?? false,
       photoDataUrl: existing?.photoDataUrl,
     },
   });
@@ -111,6 +112,9 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
         ageConfirmed: true,
         consentCall: true,
         consentText: true,
+        // The public user omits consents, so keep what they just chose. The
+        // other two are hardcoded true only because they are required to join.
+        consentLikeness: values.consentLikeness ?? false,
         photoDataUrl: user.photoDataUrl,
       });
       if (needsVerification && wasExisting) {
@@ -241,6 +245,13 @@ export function OnboardingForm({ existing }: { existing: ExistingProfile | null 
           checked={form.watch("consentText")}
           onChange={(next) => form.setValue("consentText", next, { shouldValidate: true })}
           error={errors.consentText?.message}
+        />
+        <ConsentCheck
+          id="consentLikeness"
+          label="Optional: Gotchu can use my profile photo to picture me in the images and short videos it makes about tasks. Leave this off and a generic figure is used instead. You can turn it off later by texting the agent."
+          checked={form.watch("consentLikeness") ?? false}
+          onChange={(next) => form.setValue("consentLikeness", next, { shouldValidate: true })}
+          error={errors.consentLikeness?.message}
         />
       </fieldset>
 

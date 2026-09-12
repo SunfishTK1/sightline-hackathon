@@ -10,16 +10,17 @@ import type {
   EthicsCategory,
   EthicsVerdict,
 } from "@/lib/types/ethics";
-import { matchDenylist, looksLikeOpenPriceBarter } from "@/lib/prompts/ethics-denylist";
+import {
+  matchDenylist,
+  looksLikeOpenPriceBarter,
+  looksLikeBarterPay,
+} from "@/lib/prompts/ethics-denylist";
 import { HANDBOOK_REASONS } from "@/lib/prompts/ethics-handbook";
 
 const PRICE_FIELDS = new Set(["maxPriceUsd", "estimatedMinutes"]);
 
 const EXTRA_CHORE =
   /\b(walk(?:ing)?\s+(?:the\s+)?(?:my\s+)?dog|airport|also\s+(?:write|walk|take|do|drive|paint)|and\s+write\s+my)\b/i;
-
-const BARTER =
-  /\b(for\s+free\s+if|in\s+exchange\s+for|instead\s+of\s+(?:pay|cash|money)|barter|trade\s+you)\b/i;
 
 function blob(value: unknown): string {
   return JSON.stringify(value).toLowerCase();
@@ -246,7 +247,7 @@ export async function arbitrateMove(
   const patched = applyAmendments(currentStructured, amendments);
   const amendment = await reviewAmendment(originalStructured, patched);
   const barterOrChore =
-    BARTER.test(proposed.rationale) ||
+    looksLikeBarterPay(proposed.rationale) ||
     extraChoreAdded(blob(originalStructured), proposed.rationale);
 
   if (!amendment.sameTask || amendment.verdict === "REJECT" || barterOrChore) {

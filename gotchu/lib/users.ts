@@ -61,6 +61,7 @@ function fromRow(row: PersonRow): User {
       canText: false,
       acceptedTerms: false,
       termsVersion: "",
+      canUseLikeness: false,
       acceptedAt: "",
     },
     availability: (doc.availability as User["availability"]) ?? {

@@ -202,6 +202,11 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE order_videos ALTER COLUMN mp4 DROP NOT NULL;
     ALTER TABLE order_videos ADD COLUMN IF NOT EXISTS bytes int;
 
+    -- Illustrations go to the same bucket, for the same reason.
+    ALTER TABLE order_images ADD COLUMN IF NOT EXISTS storage_key text;
+    ALTER TABLE order_images ALTER COLUMN png DROP NOT NULL;
+    ALTER TABLE order_images ADD COLUMN IF NOT EXISTS bytes int;
+
     CREATE TABLE IF NOT EXISTS payments (
       id                    bigserial PRIMARY KEY,
       order_id              uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

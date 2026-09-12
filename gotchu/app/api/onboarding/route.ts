@@ -97,6 +97,7 @@ export async function POST(req: Request) {
       canText: input.consentText,
       acceptedTerms: input.acceptedTerms,
       termsVersion: TERMS_VERSION,
+      canUseLikeness: input.consentLikeness ?? false,
       acceptedAt: now,
     },
     availability: existing?.availability ?? { isAvailable: false },

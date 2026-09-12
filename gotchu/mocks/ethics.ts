@@ -69,6 +69,36 @@ export const MOCK_COFFEE_FOOD_RUN: StructuredTask = {
   requirements: ["Pay with Venmo"],
 };
 
+export const MOCK_BURGER_PAY_COFFEES: StructuredTask = {
+  title: "bring me a burger from the UC, i will pay 5 coffees. bring to gates.",
+  category: "food",
+  pickupLocation: "UC",
+  dropoffLocation: "Gates",
+  maxPriceUsd: 0,
+  estimatedMinutes: 20,
+  requirements: ["I will pay 5 coffees"],
+};
+
+export const MOCK_BURGER_PAY_COOKIES: StructuredTask = {
+  title: "bring me a burger from the UC, i will pay 5 cookies. bring to gates.",
+  category: "food",
+  pickupLocation: "UC",
+  dropoffLocation: "Gates",
+  maxPriceUsd: 0,
+  estimatedMinutes: 20,
+  requirements: ["I will pay 5 cookies"],
+};
+
+export const MOCK_HOODIE_BARTER: StructuredTask = {
+  title: "Move a mini fridge in exchange for a hoodie",
+  category: "moving",
+  pickupLocation: "Morewood",
+  dropoffLocation: "Donner",
+  maxPriceUsd: 0,
+  estimatedMinutes: 40,
+  requirements: ["Trade for my hoodie"],
+};
+
 export const MOCK_FENCE_WHITE: StructuredTask = {
   title: "Paint the fence white",
   category: "other",

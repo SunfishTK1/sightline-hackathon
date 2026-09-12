@@ -6,6 +6,52 @@ export type DenylistRule = {
   pattern: RegExp;
 };
 
+/** USD / cash-app methods. Anything else offered as pay is barter. */
+const MONEY_METHOD =
+  /\b(venmo|zelle|paypal|cash|usd|dollars?|money|bucks?|cents?|debit|credit|apple\s+pay|apple\s+cash|cards?)\b/i;
+
+const QTY = String.raw`\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|some`;
+const MONEY_OR_TIME = String.raw`dollars?|usd|bucks?|cents?|minutes?|hours?|mins?|hrs?|people|persons?|workers?`;
+
+const SWAP_PHRASE =
+  /\b(in\s+exchange(?:\s+for)?|barter|payment\s+in\s+kind|in\s+return\s+for|instead\s+of\s+(?:pay(?:ing|ment)?|cash|money|dollars?)|trade\s+(?:you|for)|for\s+free\s+if|compensat(?:e|ed|ion)\s+(?:in|with|is))\b/i;
+
+const PAY_QTY_NOT_MONEY = new RegExp(
+  String.raw`\b(?:paid?|pay(?:ing|s)?)\s+(?:(?:you|them|him|her)\s+)?(?:${QTY})\s+(?!${MONEY_OR_TIME}\b)`,
+  "i",
+);
+
+const GIVE_QTY_NOT_MONEY = new RegExp(
+  String.raw`\bgiv(?:e|ing|es)\b[\s\S]{0,48}\b(?:${QTY})\s+(?!${MONEY_OR_TIME}\b)`,
+  "i",
+);
+
+const PLUS_QTY_NOT_MONEY = new RegExp(
+  String.raw`\b(along with|together with|throw in|plus)\b[\s\S]{0,32}\b(?:${QTY})\s+(?!${MONEY_OR_TIME}\b)`,
+  "i",
+);
+
+const PAY_WITH = /\b(?:paid?|pay(?:ing|ment|s)?)\s+(?:(?:you|them|him|her|the\s+(?:person|worker|runner))\s+)?(?:in|with|using)\s+([a-z][a-z\s]{0,24})/gi;
+
+/**
+ * True when the worker is being compensated in something other than USD.
+ * Food *runs* that buy items with Venmo/cash still return false.
+ */
+export function looksLikeBarterPay(text: string): boolean {
+  if (SWAP_PHRASE.test(text)) return true;
+  if (PAY_QTY_NOT_MONEY.test(text)) return true;
+  if (GIVE_QTY_NOT_MONEY.test(text)) return true;
+  if (PLUS_QTY_NOT_MONEY.test(text)) return true;
+
+  PAY_WITH.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PAY_WITH.exec(text))) {
+    const offered = m[1]?.trim() ?? "";
+    if (offered && !MONEY_METHOD.test(offered)) return true;
+  }
+  return false;
+}
+
 export const DENYLIST: DenylistRule[] = [
   {
     category: "academic_integrity",
@@ -14,7 +60,7 @@ export const DENYLIST: DenylistRule[] = [
   },
   {
     category: "academic_integrity",
-    pattern: /\b(exam|quiz|midterm|final|homework|problem\s*set|pset|lab\s*report)\b/i,
+    pattern: /\b(exam|quiz|midterm|final|homework|problem\s*set|pset|lab\s+report)\b/i,
   },
   { category: "academic_integrity", pattern: /\b15-?213\b/i },
   {
@@ -40,39 +86,15 @@ export const DENYLIST: DenylistRule[] = [
       /\b(package\s+pickup|pick(?:ing)?\s+up\s+(?:my\s+|a\s+|the\s+)?package|packages?\s+from\s+(?:the\s+)?(?:uc|mailroom)|pickup\s+authorization)\b/i,
   },
   { category: "illegal", pattern: /\b(steal|stolen|fraud|launder)\b/i },
-  {
-    category: "financial_risk",
-    pattern:
-      /\b(in\s+exchange\s+for|barter|payment\s+in\s+kind|instead\s+of\s+(?:pay(?:ing|ment)?|cash|money|dollars?))\b/i,
-  },
-  {
-    category: "financial_risk",
-    pattern:
-      /\b(paid?|pay(?:ment)?)\s+(?:in|with)\s+(?:coffee|coffees|pizza|pizzas|food|favou?rs?|meals?|swipes?|dining)\b/i,
-  },
-  {
-    category: "financial_risk",
-    pattern:
-      /\bfor\s+\d+\s+(?:coffees?|pizzas?|swipes?|meals?|favou?rs?)\b/i,
-  },
-  {
-    category: "financial_risk",
-    pattern:
-      /\b(give|giving|gives)\b[\s\S]{0,48}\b(\d+\s+)?(coffees?|pizzas?|swipes?|meals?)\b/i,
-  },
-  {
-    category: "financial_risk",
-    pattern:
-      /\b(along with|together with|throw in|plus)\b[\s\S]{0,24}\b(\d+\s+)?(coffees?|pizzas?|swipes?)\b/i,
-  },
+  { category: "financial_risk", pattern: SWAP_PHRASE },
 ];
 
 /** Backward-compatible list if anything still iterates patterns only. */
 export const DENYLIST_PATTERNS: RegExp[] = DENYLIST.map((r) => r.pattern);
 
 /**
- * Extra non-money compensation (coffees, pizza, swipes) is always banned,
- * even if a dollar price is also set. A food *run* that buys coffee with USD is ok.
+ * Extra non-money compensation is always banned, even if a dollar price is
+ * also set. A food *run* that buys coffee with USD is ok.
  */
 export function looksLikeOpenPriceBarter(
   text: string,
@@ -80,18 +102,15 @@ export function looksLikeOpenPriceBarter(
   category?: string,
 ): boolean {
   void _maxPriceUsd;
-  const inKind =
-    /\b\d+\s+coffees?\b/i.test(text) ||
-    /\b(coffees|pizzas|swipes|favou?rs)\b/i.test(text);
-  if (!inKind) return false;
-  const extraPay =
-    /\b(in\s+exchange|barter|throw in|along with|together with|give|giving|paid? in|pay(?:ment)? with|plus)\b/i.test(
-      text,
-    );
+  if (looksLikeBarterPay(text)) return true;
+
+  const campusInKind = /\b(coffees?|pizzas?|swipes|favou?rs)\b/i.test(text);
+  if (!campusInKind) return false;
+
   const foodFetch =
-    category === "food" &&
-    /\b(pick\s*up|pickup|get|grab|deliver|order)\b/i.test(text);
-  if (foodFetch && !extraPay) return false;
+    (category === "food" || category === "pickup" || category === "errand") &&
+    /\b(pick\s*up|pickup|get|grab|bring|deliver|order)\b/i.test(text);
+  if (foodFetch) return false;
   return true;
 }
 
@@ -99,7 +118,9 @@ export function matchDenylist(text: string): EthicsCategory[] {
   const blob = text.toLowerCase();
   const cats = new Set<EthicsCategory>();
   for (const { category, pattern } of DENYLIST) {
+    pattern.lastIndex = 0;
     if (pattern.test(blob)) cats.add(category);
   }
+  if (looksLikeBarterPay(blob)) cats.add("financial_risk");
   return [...cats];
 }
