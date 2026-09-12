@@ -149,6 +149,11 @@ export const market = {
    * Completed tasks with no clip yet. Delivery waits on the relay learning to
    * carry video; until then these are generated and stored.
    */
+  /** The matcher looked at this task and picked nobody. */
+  noMatch: (orderId: string) =>
+    post<{ counted: boolean; parked?: boolean; attempts?: number }>(
+      `/v1/orders/${orderId}/no-match`, {},
+    ),
   ordersNeedingVideo: () => get<any[]>("/v1/orders/needing-video"),
   /** Records where the clip is. The bytes go to the bucket, not through here. */
   storeOrderVideo: (

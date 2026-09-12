@@ -1,4 +1,5 @@
 import { pool, normalizePhone, upsertPerson } from "./db.js";
+import { payForTask, recordSettlement, type Settlement } from "./pay.js";
 
 /** Every job this person is being asked about. They may hold several at once. */
 export async function listOpenOffers(phone: string) {
@@ -354,7 +355,7 @@ export async function confirmTaskDone(
   requesterPhone: string,
   confirmed: boolean,
   note?: string,
-): Promise<{ status: string; error?: string; payment?: Record<string, unknown> }> {
+): Promise<{ status: string; error?: string; payment?: Record<string, unknown>; settlement?: Settlement | null }> {
   const e164 = normalizePhone(requesterPhone);
   const { rows } = await pool.query(
     `SELECT o.id, o.title, o.budget_usd, o.person_id, o.accepted_by, o.status,
@@ -409,6 +410,25 @@ export async function confirmTaskDone(
     ],
   );
 
+  // Both sides have now agreed the work is done, which is the only honest
+  // moment to move money. A failed settlement does not un-complete the task -
+  // it is recorded against the payment so it can be retried or explained.
+  let settlement: Settlement | null = null;
+  if (order.worker_phone && amount > 0) {
+    settlement = await payForTask({
+      orderId: order.id,
+      payerPhone: e164,
+      payeePhone: order.worker_phone,
+      amountUsd: amount - fee,
+    });
+    await recordSettlement(order.id, settlement).catch(() => null);
+    console.log(
+      settlement.settled
+        ? `paid ${settlement.railcoins} railcoins for "${order.title}" (${settlement.signature})`
+        : `could not settle "${order.title}": ${settlement.reason}`,
+    );
+  }
+
   await pool.query(
     `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
      VALUES ($1,$2,$3,'task_completed',$4::jsonb)`,
@@ -420,10 +440,13 @@ export async function confirmTaskDone(
         title: order.title,
         amount_usd: amount,
         payouts_ready: Boolean(order.payouts_ready),
+        railcoins: settlement?.railcoins ?? null,
+        paid: settlement?.settled ?? false,
+        settlement_error: settlement && !settlement.settled ? settlement.reason : null,
       }),
     ],
   );
-  return { status: "completed", payment: payment.rows[0] };
+  return { status: "completed", payment: payment.rows[0], settlement };
 }
 
 /** Jobs marked done that the requester has not answered yet. */

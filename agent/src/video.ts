@@ -4,9 +4,11 @@ import { CAMPUS_LOOK } from "./illustrate.js";
 const VIDEO_URL = "https://api.openai.com/v1/videos";
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const VIDEO_MODEL = process.env.OPENAI_VIDEO_MODEL || "sora-2";
-// Only multiples of four are accepted. Sixteen is the shortest length that
-// fits a brief, three steps and a closing charge without rushing any of them.
-const VIDEO_SECONDS = process.env.OPENAI_VIDEO_SECONDS || "16";
+// The API accepts 4, 8, 12, 16 and 20, and rejects everything else - twenty is
+// the ceiling however long the content wants to be. Sixteen fits a brief,
+// three steps and a closing charge; twenty buys room for a fourth step.
+const SHORT_SECONDS = process.env.OPENAI_VIDEO_SECONDS || "16";
+const LONG_SECONDS = process.env.OPENAI_VIDEO_SECONDS_LONG || "20";
 const VIDEO_SIZE = process.env.OPENAI_VIDEO_SIZE || "720x1280";
 
 /** Generation runs for minutes, so give it room but never hang forever. */
@@ -27,8 +29,13 @@ export type FilmableOrder = {
 /** The film's script: what the job is, and how it actually gets done. */
 export type MissionPlan = {
   objective: string; // one sentence, what the task is
-  steps: string[]; // three imperatives, in order
+  steps: string[]; // three or four imperatives, in order
 };
+
+/** Length follows the content: a fourth step needs the extra four seconds. */
+export function secondsFor(plan: MissionPlan): string {
+  return plan.steps.length > 3 ? LONG_SECONDS : SHORT_SECONDS;
+}
 
 const PLAN_INSTRUCTIONS = `You write mission briefs for a campus errand marketplace at Carnegie Mellon.
 
@@ -37,7 +44,7 @@ Given a task, return JSON:
 
 Rules:
 - objective: ONE sentence, under 18 words, concrete. What is being done, from where, to where. No adjectives, no hype.
-- steps: exactly three, in order, each an imperative under 12 words describing a real physical action someone would take. These are genuine instructions - someone following them should actually complete the task.
+- steps: three, or four when the job genuinely has a fourth distinct action - never pad to four. In order, each an imperative under 12 words describing a real physical action someone would take. These are genuine instructions - someone following them should actually complete the task.
 - Use the real locations given. Do not invent a building.
 - No numbering, no "first/then/finally" - just the action.
 Return only JSON.`;
@@ -98,7 +105,7 @@ export async function planMission(order: FilmableOrder): Promise<MissionPlan> {
       .replace(/```$/, "")
       .trim();
     const parsed = JSON.parse(text) as Partial<MissionPlan>;
-    const steps = (parsed.steps ?? []).filter((s) => typeof s === "string" && s.trim()).slice(0, 3);
+    const steps = (parsed.steps ?? []).filter((s) => typeof s === "string" && s.trim()).slice(0, 4);
     if (!parsed.objective || steps.length < 3) return fallback;
     return { objective: parsed.objective.trim(), steps };
   } catch {
@@ -111,32 +118,45 @@ export async function planMission(order: FilmableOrder): Promise<MissionPlan> {
  * job, so it is built like a briefing: here is the job, here is exactly how it
  * is done, and the last thing you see is that nobody has taken it yet.
  *
- * Sixteen seconds, three acts, timed so the instructions are genuinely
- * followable and the close actually asks for a decision.
+ * Three acts, timed so the instructions are genuinely followable and the close
+ * actually asks for a decision. The length follows the number of steps.
  */
 export function buildVideoPrompt(order: FilmableOrder, plan: MissionPlan): string {
-  const [one, two, three] = plan.steps;
   const arrival = order.dropoff_location ?? "the drop-off";
 
+  // Three acts, sized to the clip: a three second brief, a four second close,
+  // and everything between split evenly across however many steps there are.
+  const total = Number(secondsFor(plan));
+  const briefEnds = 3;
+  const chargeStarts = total - 4;
+  const perStep = (chargeStarts - briefEnds) / plan.steps.length;
+  const shots = plan.steps
+    .map((step, i) => {
+      const from = Math.round(briefEnds + i * perStep);
+      const to = Math.round(briefEnds + (i + 1) * perStep);
+      return `${from}-${to}s: ${step}`;
+    })
+    .join(" ");
+
   return [
-    `A sixteen-second photorealistic cinematic mission briefing for a single campus errand: ${order.title}.`,
+    `A ${total}-second photorealistic cinematic mission briefing for a single campus errand: ${order.title}.`,
     CAMPUS_LOOK,
     "Show the students who use this campus as they actually are, varied and unremarkable.",
 
     // Act I - the brief.
-    `SECONDS 0 TO 3, THE BRIEF: a slow push-in on the objective${
+    `SECONDS 0 TO ${briefEnds}, THE BRIEF: a slow push-in on the objective${
       order.pickup_location ? ` at ${order.pickup_location}` : ""
     }. A calm, low, clipped narrator states the task once, in exactly one sentence: "${plan.objective}". Nothing else is said.`,
 
     // Act II - the method. The part that has to be genuinely useful.
-    `SECONDS 3 TO 12, THE METHOD: three clean shots, roughly three seconds each, showing exactly how the job gets done, in order. Shot one: ${one} Shot two: ${two} Shot three: ${three} Shoot each step as a precise practical action - hands, doors, the object itself, the route between - so someone watching could follow it. The narrator reads each step as it happens, one line per shot, nothing added.`,
+    `SECONDS ${briefEnds} TO ${chargeStarts}, THE METHOD: ${plan.steps.length} clean shots showing exactly how the job gets done, in order, one per step: ${shots} Shoot each step as a precise practical action - hands, doors, the object itself, the route between - so someone watching could follow it. The narrator reads each step as it happens, one line per shot, nothing added.`,
 
     // Act III - the ask.
-    `SECONDS 12 TO 16, THE CHARGE: pull back to a wide hero shot of ${arrival} with nobody there yet and the job still undone. The narrator delivers the close: "This mission is yours, should you choose to accept it." Hold on the empty frame and cut to black.`,
+    `SECONDS ${chargeStarts} TO ${total}, THE CHARGE: pull back to a wide hero shot of ${arrival} with nobody there yet and the job still undone. The narrator delivers the close: "This mission is yours, should you choose to accept it." Hold on the empty frame and cut to black.`,
 
     // The joke is the treatment, not the task. Play it absolutely straight.
     "Shoot the whole thing like the cold open of a spy thriller: low hero angles, fast push-ins, one slow-motion beat, tight cuts, lens flare, shallow depth of field, handheld urgency.",
-    "Score it with an epic Mission Impossible style orchestral track - driving staccato strings under the brief, urgent percussion building through the three steps, a rising brass sting landing exactly on the final line.",
+    "Score it with an epic Mission Impossible style orchestral track - driving staccato strings under the brief, urgent percussion building through the steps, a rising brass sting landing exactly on the final line.",
     "Everyone plays it completely straight. Nobody winks at the camera, nobody laughs, there is no slapstick. The comedy is entirely in treating an ordinary errand as though the world depends on it.",
 
     "Photoreal, natural daylight, realistic textures and motion. Spoken narration only.",
@@ -166,13 +186,14 @@ export async function generateTaskVideo(
 ): Promise<{ mp4: Buffer; prompt: string; seconds: string; plan: MissionPlan } | null> {
   const plan = await planMission(order);
   const prompt = buildVideoPrompt(order, plan);
+  const seconds = secondsFor(plan);
   try {
     const started = await api("", {
       method: "POST",
       body: JSON.stringify({
         model: VIDEO_MODEL,
         prompt,
-        seconds: VIDEO_SECONDS,
+        seconds,
         size: VIDEO_SIZE,
       }),
     });
@@ -189,7 +210,7 @@ export async function generateTaskVideo(
         const content = await api(`/${job.id}/content`);
         if (!content.ok) return null;
         const mp4 = Buffer.from(await content.arrayBuffer());
-        return { mp4, prompt, seconds: VIDEO_SECONDS, plan };
+        return { mp4, prompt, seconds, plan };
       }
       if (state.status === "failed") return null;
     }
