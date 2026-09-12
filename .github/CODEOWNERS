@@ -1,0 +1,70 @@
+# Gotchu ownership — GitHub usernames
+# Will @wmontagu · Thomas @SunfishTK1 · Divya @divs997 · Daphne @daphnedavila
+
+# ◆ Shared — Will
+/gotchu/app/layout.tsx                          @wmontagu
+/gotchu/app/globals.css                         @wmontagu
+/gotchu/middleware.ts                           @wmontagu
+/gotchu/components.json                         @wmontagu
+/gotchu/components/shell/                       @wmontagu
+/gotchu/package.json                            @wmontagu
+/gotchu/package-lock.json                       @wmontagu
+
+# Will
+/gotchu/app/page.tsx                            @wmontagu
+/gotchu/app/onboarding/                         @wmontagu
+/gotchu/app/api/auth/                           @wmontagu
+/gotchu/app/api/onboarding/                     @wmontagu
+/gotchu/app/api/me/                             @wmontagu
+/gotchu/app/api/ethics/                         @wmontagu
+/gotchu/app/api/tasks/[taskId]/complete/        @wmontagu
+/gotchu/app/api/tasks/[taskId]/review/          @wmontagu
+/gotchu/components/onboarding/                  @wmontagu
+/gotchu/components/ethics/                      @wmontagu
+/gotchu/lib/types/user.ts                       @wmontagu
+/gotchu/lib/types/task.ts                       @wmontagu
+/gotchu/lib/types/review.ts                     @wmontagu
+/gotchu/lib/types/ethics.ts                     @wmontagu
+/gotchu/lib/types/status.ts                     @wmontagu
+/gotchu/lib/mongo.ts                            @wmontagu
+/gotchu/lib/db.ts                               @wmontagu
+/gotchu/lib/auth.ts                             @wmontagu
+/gotchu/lib/llm.ts                              @wmontagu
+/gotchu/lib/embed.ts                            @wmontagu
+/gotchu/lib/ids.ts                              @wmontagu
+/gotchu/lib/agents/ethics.ts                    @wmontagu
+/gotchu/lib/prompts/ethics-rubric.ts            @wmontagu
+/gotchu/lib/prompts/ethics-denylist.ts          @wmontagu
+/gotchu/scripts/                                @wmontagu
+
+# Thomas
+/gotchu/app/compose/                            @SunfishTK1
+/gotchu/app/api/tasks/route.ts                  @SunfishTK1
+/gotchu/app/api/tasks/[taskId]/route.ts         @SunfishTK1
+/gotchu/components/task/                        @SunfishTK1
+/gotchu/lib/agents/personal.ts                  @SunfishTK1
+/gotchu/lib/prompts/personal-intake.ts          @SunfishTK1
+/gotchu/lib/prompts/personal-negotiate.ts       @SunfishTK1
+/gotchu/mocks/task.ts                           @SunfishTK1
+
+# Divya
+/gotchu/app/tasks/[taskId]/matches/             @divs997
+/gotchu/app/api/tasks/[taskId]/match/           @divs997
+/gotchu/components/match/                       @divs997
+/gotchu/lib/types/match.ts                      @divs997
+/gotchu/lib/agents/market.ts                    @divs997
+/gotchu/lib/prompts/match-explain.ts            @divs997
+/gotchu/mocks/candidates.ts                     @divs997
+
+# Daphne
+/gotchu/app/feed/                               @daphnedavila
+/gotchu/app/tasks/[taskId]/page.tsx             @daphnedavila
+/gotchu/app/api/feed/                           @daphnedavila
+/gotchu/app/api/offers/                         @daphnedavila
+/gotchu/app/api/tasks/[taskId]/negotiate/       @daphnedavila
+/gotchu/components/negotiate/                   @daphnedavila
+/gotchu/components/feed/                        @daphnedavila
+/gotchu/lib/types/offer.ts                      @daphnedavila
+/gotchu/lib/types/agreement.ts                  @daphnedavila
+/gotchu/lib/agents/negotiate.ts                 @daphnedavila
+/gotchu/mocks/negotiation.ts                    @daphnedavila

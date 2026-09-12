@@ -49,14 +49,21 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  /* Gotchu palette (§9) — @owner Will @shared */
+  --page: #f2f4f3;
+  --ink: #16201c;
+  --broker: #1f5c3a;
+  --hold: #e8c547;
+  --stop: #b3321e;
+
+  --background: var(--page);
+  --foreground: var(--ink);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
+  --primary: var(--broker);
+  --primary-foreground: #f2f4f3;
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);

@@ -1,0 +1,55 @@
+/** @owner Divya — 5 fake ranked candidates */
+import type { Candidate } from "@/lib/types/match";
+
+export const MOCK_CANDIDATES: Candidate[] = [
+  {
+    uuid: "usr_mock_01",
+    matchScore: 0.91,
+    reasons: ["Does package pickups, usually near Gates"],
+    vectorScore: 0.88,
+    ratingScore: 0.96,
+    experienceScore: 0.8,
+    firstName: "Alex",
+    stats: { avgRating: 4.8, tasksCompleted: 12 },
+  },
+  {
+    uuid: "usr_mock_02",
+    matchScore: 0.84,
+    reasons: ["Food runs + errands around UC"],
+    vectorScore: 0.8,
+    ratingScore: 0.9,
+    experienceScore: 0.5,
+    firstName: "Sam",
+    stats: { avgRating: 4.5, tasksCompleted: 5 },
+  },
+  {
+    uuid: "usr_mock_03",
+    matchScore: 0.79,
+    reasons: ["Available afternoons near GHC"],
+    vectorScore: 0.75,
+    ratingScore: 0.84,
+    experienceScore: 0.3,
+    firstName: "Jordan",
+    stats: { avgRating: 4.2, tasksCompleted: 3 },
+  },
+  {
+    uuid: "usr_mock_04",
+    matchScore: 0.72,
+    reasons: ["Happy to do campus deliveries"],
+    vectorScore: 0.7,
+    ratingScore: 0.7,
+    experienceScore: 0.2,
+    firstName: "Riley",
+    stats: { avgRating: 3.5, tasksCompleted: 2 },
+  },
+  {
+    uuid: "usr_mock_05",
+    matchScore: 0.68,
+    reasons: ["Min $8, flexible evenings"],
+    vectorScore: 0.65,
+    ratingScore: 0.7,
+    experienceScore: 0.1,
+    firstName: "Casey",
+    stats: { avgRating: null, tasksCompleted: 0 },
+  },
+];
