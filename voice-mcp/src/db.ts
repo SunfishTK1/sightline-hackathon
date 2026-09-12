@@ -183,6 +183,19 @@ export async function ensureSchema(): Promise<void> {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS payments_order_idx ON payments (order_id);
 
+    -- One devnet wallet per person, created the first time the agent hears
+    -- from them. The secret key is encrypted at rest; devnet SOL is worthless
+    -- but the key format is identical to mainnet, so it is not stored in the
+    -- clear.
+    CREATE TABLE IF NOT EXISTS wallets (
+      person_id             uuid PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+      public_key            text UNIQUE NOT NULL,
+      encrypted_secret_key  text NOT NULL,
+      cluster               text NOT NULL DEFAULT 'devnet',
+      funded_at             timestamptz,
+      created_at            timestamptz NOT NULL DEFAULT now()
+    );
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_by uuid REFERENCES people(id);
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at timestamptz;
 

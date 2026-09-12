@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -10,8 +11,9 @@ import {
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
+import { ensureWallet, getWallet } from "./wallet.js";
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3010);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
 
 const app = express();
@@ -129,6 +131,28 @@ app.post("/v1/tools/:name", async (req, res) => {
   }
   try {
     res.json({ ok: true, data: await tool.handler(parsed.data) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// -------------------------------------------------------------------- wallets
+
+/** Create (if needed) and fund this person's devnet wallet. Idempotent. */
+app.post("/v1/wallets/ensure", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await ensureWallet(String(phone)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** This person's wallet and its live devnet balance, or null if they have none yet. */
+app.get("/v1/wallets/:phone", async (req, res) => {
+  try {
+    res.json({ ok: true, data: await getWallet(req.params.phone) });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }

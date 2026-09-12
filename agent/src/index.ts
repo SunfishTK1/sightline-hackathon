@@ -95,6 +95,8 @@ async function handleEvent(event: RelayEvent): Promise<void> {
         doing: who?.jobs_in_progress ?? [],
         awaitingConfirmation: who?.awaiting_their_confirmation ?? [],
       },
+      who?.wallet ?? null,
+      history.length === 0,
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;

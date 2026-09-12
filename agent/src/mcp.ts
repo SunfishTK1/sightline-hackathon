@@ -176,6 +176,22 @@ export const market = {
     get<{ offers: PendingOffer[]; counters: PendingCounter[] }>("/v1/negotiation/pending"),
 };
 
+export type Wallet = {
+  public_key: string;
+  cluster: string;
+  funded_at: string | null;
+  balance_sol?: number;
+};
+
+/**
+ * identify_caller already ensures a wallet for everyone the agent talks to;
+ * these exist for anything that wants wallet info without a full identify.
+ */
+export const wallet = {
+  ensure: (phone: string) => post<Wallet>("/v1/wallets/ensure", { phone }),
+  get: (phone: string) => get<Wallet | null>(`/v1/wallets/${encodeURIComponent(phone)}`),
+};
+
 export type WorkItem = {
   id: string;
   title: string;

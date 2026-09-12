@@ -6,6 +6,7 @@ import {
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
   markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
 } from "./marketplace.js";
+import { ensureWallet } from "./wallet.js";
 
 /**
  * One definition per tool, shared by the MCP transport and the REST mirror.
@@ -39,6 +40,14 @@ export const tools: ToolDef[] = [
     handler: async ({ phone, display_name }) => {
       const e164 = normalizePhone(phone);
       const person = await upsertPerson(e164, display_name);
+
+      // Everyone who reaches the agent - by call or by text - gets a devnet
+      // wallet the first time, funded from the treasury. A failed transfer
+      // (treasury dry, RPC hiccup) should never block the rest of the reply.
+      const wallet = await ensureWallet(e164).catch((err) => {
+        console.error(`ensureWallet(${e164}) failed: ${(err as Error).message}`);
+        return null;
+      });
 
       const [orders, openCall, worker, pastCalls, offers, counters, askedOfThem, theyAsked] =
         await Promise.all([
@@ -89,6 +98,9 @@ export const tools: ToolDef[] = [
         display_name: person.display_name,
         known_caller: (orders.rowCount ?? 0) > 0,
         open_call_id: openCall.rows[0]?.id ?? null,
+        wallet: wallet
+          ? { public_key: wallet.public_key, cluster: wallet.cluster, funded: !!wallet.funded_at }
+          : null,
 
         // Tasks they asked for.
         open_requests: live,
