@@ -107,9 +107,16 @@ export function looksLikeOpenPriceBarter(
   const campusInKind = /\b(coffees?|pizzas?|swipes|favou?rs)\b/i.test(text);
   if (!campusInKind) return false;
 
+  // Fetching a coffee is the most ordinary task on this marketplace, and the
+  // only thing separating it from offering coffee AS payment is the verb. The
+  // list has to cover how people actually write it - "drop it at Gates",
+  // "take it to Wean", "run to La Prima" - or a plain USD-priced delivery gets
+  // refused as barter.
   const foodFetch =
     (category === "food" || category === "pickup" || category === "errand") &&
-    /\b(pick\s*up|pickup|get|grab|bring|deliver|order)\b/i.test(text);
+    /\b(pick\s*up|pickup|drop\s*off|dropoff|drop|get|grab|bring|deliver|delivery|order|buy|fetch|take|carry|collect|run)\b/i.test(
+      text,
+    );
   if (foodFetch) return false;
   return true;
 }
