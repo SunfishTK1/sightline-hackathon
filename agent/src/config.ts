@@ -11,6 +11,7 @@ export const config = {
   openaiKey: required("OPENAI_API_KEY"),
   model: process.env.OPENAI_AGENT_MODEL || "gpt-6-astra",
   voiceMcpUrl: required("VOICE_MCP_URL"),
+  voiceMcpToken: process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "",
   /** Rank + clearing price + live board. Must be reachable from this process. */
   marketMakerUrl: (process.env.MARKET_MAKER_URL || "http://localhost:3000").replace(/\/$/, ""),
 

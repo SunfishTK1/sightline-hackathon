@@ -263,6 +263,7 @@ export async function respondToCounter(
   offerId: string | number,
   accept: boolean,
   requesterPhone: string,
+  opts?: { release?: boolean },
 ): Promise<{ status: string; error?: string }> {
   const { rows } = await pool.query(
     `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd,
@@ -277,6 +278,26 @@ export async function respondToCounter(
   if (!offer) return { status: "unchanged", error: "No counter is open on that offer." };
 
   if (!accept) {
+    // Timeout / "try next" must release the worker so the order can rematch.
+    // A normal requester "no" keeps the original price on the table.
+    if (opts?.release) {
+      await pool.query(
+        `UPDATE job_offers SET status = 'declined', responded_at = now() WHERE id = $1`,
+        [offer.id],
+      );
+      await pool.query(
+        `UPDATE orders
+            SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+                updated_at = now()
+          WHERE id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM job_offers
+               WHERE order_id = $1 AND id <> $2 AND status IN ('offered', 'countered', 'accepted')
+            )`,
+        [offer.order_id, offer.id],
+      );
+      return { status: "released" };
+    }
     await pool.query(
       `UPDATE job_offers SET status = 'offered', countered_at = NULL WHERE id = $1`,
       [offer.id],
@@ -522,7 +543,7 @@ export async function confirmTaskDone(
  * Both phones come from the order itself rather than the caller, so whoever
  * calls this cannot name a different requester or redirect the payment.
  */
-export async function receiveAndPay(orderId: string) {
+export async function receiveAndPay(orderId: string, requesterPhone?: string) {
   const { rows } = await pool.query(
     `SELECT o.status, p.phone AS requester_phone, w.phone AS worker_phone
        FROM orders o
@@ -533,6 +554,9 @@ export async function receiveAndPay(orderId: string) {
   );
   const order = rows[0];
   if (!order) return { error: "no_such_task" as const };
+  if (requesterPhone && normalizePhone(requesterPhone) !== order.requester_phone) {
+    return { error: "not_the_requester" as const };
+  }
   if (order.status === "completed") return { error: "already_paid" as const };
   if (!order.worker_phone) return { error: "nobody_has_taken_it" as const };
 
@@ -902,6 +926,49 @@ export async function purgeDemoData(): Promise<{
   } finally {
     client.release();
   }
+}
+
+const NO_MATCH_PARK_AFTER = 3;
+
+/**
+ * The matcher looked and picked nobody. Count the miss; after a few tries,
+ * park the order and tell the requester instead of retrying every 10s.
+ */
+export async function recordNoMatch(orderId: string) {
+  const { rows } = await pool.query(
+    `UPDATE orders
+        SET match_attempts = match_attempts + 1,
+            status = CASE
+              WHEN match_attempts + 1 >= $2 AND status IN ('submitted', 'offered')
+              THEN 'no_takers'
+              ELSE status
+            END,
+            updated_at = now()
+      WHERE id = $1 AND status IN ('submitted', 'offered')
+      RETURNING id, title, person_id, match_attempts, status`,
+    [orderId, NO_MATCH_PARK_AFTER],
+  );
+  const order = rows[0];
+  if (!order) return { counted: false };
+  const parked = order.status === "no_takers";
+  if (parked) {
+    const requester = await pool.query(`SELECT id, phone FROM people WHERE id = $1`, [
+      order.person_id,
+    ]);
+    if (requester.rows[0]) {
+      await pool.query(
+        `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+         VALUES ($1,$2,$3,'no_takers',$4::jsonb)`,
+        [
+          requester.rows[0].id,
+          requester.rows[0].phone,
+          order.id,
+          JSON.stringify({ title: order.title }),
+        ],
+      );
+    }
+  }
+  return { counted: true, parked, attempts: order.match_attempts };
 }
 
 /**

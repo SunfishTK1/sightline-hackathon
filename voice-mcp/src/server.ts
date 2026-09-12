@@ -9,7 +9,7 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
-  cancelOrder, blockOrder, receiveAndPay,
+  cancelOrder, blockOrder, receiveAndPay, recordNoMatch,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
@@ -672,11 +672,24 @@ app.post("/v1/offers/:id/counter", async (req, res) => {
 
 /** The requester answers a counter. */
 app.post("/v1/offers/:id/counter/respond", async (req, res) => {
-  const { phone, accept } = req.body ?? {};
+  const { phone, accept, release } = req.body ?? {};
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
-  const result = await respondToCounter(req.params.id, Boolean(accept), String(phone));
+  const result = await respondToCounter(req.params.id, Boolean(accept), String(phone), {
+    release: Boolean(release),
+  });
   if (result.error) return res.status(409).json({ ok: false, error: result.error });
   res.json({ ok: true, data: result });
+});
+
+/** Matcher found nobody suitable. Count the miss; park after a few tries. */
+app.post("/v1/orders/:id/no-match", async (req, res) => {
+  try {
+    const result = await recordNoMatch(req.params.id);
+    if (!result.counted) return res.status(409).json({ ok: false, error: "not_open" });
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 /** Counters awaiting a requester's decision. */
@@ -825,7 +838,9 @@ app.post("/v1/dev/close-all", async (_req, res) => {
 /** One click from the requester: it arrived, pay them. */
 app.post("/v1/orders/:id/received", async (req, res) => {
   try {
-    const result = await receiveAndPay(req.params.id);
+    const phone = req.body?.phone ? String(req.body.phone) : undefined;
+    if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+    const result = await receiveAndPay(req.params.id, phone);
     if ("error" in result && result.error) {
       return res.status(409).json({ ok: false, error: result.error });
     }

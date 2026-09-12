@@ -9,6 +9,12 @@ import type { Task } from "@/lib/types/task";
 export const dynamic = "force-dynamic";
 
 const MARKET = (process.env.MARKET_API_URL || "").replace(/\/$/, "");
+const MARKET_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+
+function marketHeaders(): Record<string, string> {
+  if (!MARKET_TOKEN) return {};
+  return { Authorization: `Bearer ${MARKET_TOKEN}`, "x-api-key": MARKET_TOKEN };
+}
 
 type OpenOrder = {
   id: string;
@@ -53,6 +59,7 @@ async function liveTasks(): Promise<Task[] | null> {
   if (!MARKET) return null;
   try {
     const res = await fetch(`${MARKET}/v1/orders/open`, {
+      headers: marketHeaders(),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });

@@ -810,7 +810,7 @@ async function expireStaleOffers(): Promise<void> {
         decision: "TIMEOUT",
       });
       if (verdict && verdict.action !== "TRY_NEXT") continue;
-      await market.respondToCounter(counter.id, counter.requester_phone, false);
+      await market.respondToCounter(counter.id, counter.requester_phone, false, true);
       if (counter.order_id) {
         await postLiveEvent({
           orderId: counter.order_id,
@@ -931,7 +931,7 @@ async function autoNegotiate(): Promise<void> {
         round: Number(counter.counter_rounds ?? 0),
       });
       if (verdict?.action === "TRY_NEXT") {
-        await market.respondToCounter(counter.id, counter.requester_phone, false);
+        await market.respondToCounter(counter.id, counter.requester_phone, false, true);
         if (counter.order_id) {
           await postLiveEvent({
             orderId: counter.order_id,

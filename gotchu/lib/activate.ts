@@ -118,6 +118,21 @@ export async function syncWorkerAvailability(
   }
 }
 
+/** Matching-pool flag, or null if they have no worker profile yet. */
+export async function getWorkerAvailability(personId: string): Promise<boolean | null> {
+  if (!postgresConfigured()) return null;
+  try {
+    const { rows } = await getPool().query<{ is_available: boolean }>(
+      `SELECT is_available FROM worker_profiles WHERE person_id = $1`,
+      [personId],
+    );
+    return rows[0] ? Boolean(rows[0].is_available) : null;
+  } catch (err) {
+    console.error("could not read worker availability:", err);
+    return null;
+  }
+}
+
 /** A new number is unproven — take them out of the matching pool. */
 export async function dropWorkerAvailability(personId: string): Promise<void> {
   if (!postgresConfigured()) return;

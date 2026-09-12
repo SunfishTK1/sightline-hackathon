@@ -306,6 +306,7 @@ export async function ackLiveSkip(token: string): Promise<void> {
  * keeps a two-second poll from hammering voice-mcp forever.
  */
 const VOICE_MCP_URL = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
+const VOICE_MCP_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
 
 const TERMINAL_ORDER_STATUS: Record<string, LiveBoardStatus> = {
   accepted: "agreed",
@@ -322,7 +323,13 @@ async function reconcileWithOrder(
 ): Promise<LiveBoardStatus | null> {
   if (!VOICE_MCP_URL) return null;
   try {
+    const headers: Record<string, string> = {};
+    if (VOICE_MCP_TOKEN) {
+      headers.Authorization = `Bearer ${VOICE_MCP_TOKEN}`;
+      headers["x-api-key"] = VOICE_MCP_TOKEN;
+    }
     const res = await fetch(`${VOICE_MCP_URL}/v1/orders/${encodeURIComponent(orderId)}`, {
+      headers,
       cache: "no-store",
       signal: AbortSignal.timeout(4000),
     });

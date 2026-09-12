@@ -9,6 +9,7 @@
 import { WalletPanel } from "@/components/wallet/WalletPanel";
 
 const MARKET = (process.env.MARKET_API_URL || "").replace(/\/$/, "");
+const MARKET_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
 
 type LinkData = {
   phone: string;
@@ -19,7 +20,13 @@ type LinkData = {
 async function load(token: string): Promise<LinkData | null> {
   if (!MARKET) return null;
   try {
+    const headers: Record<string, string> = {};
+    if (MARKET_TOKEN) {
+      headers.Authorization = `Bearer ${MARKET_TOKEN}`;
+      headers["x-api-key"] = MARKET_TOKEN;
+    }
     const res = await fetch(`${MARKET}/v1/wallet-links/${encodeURIComponent(token)}`, {
+      headers,
       cache: "no-store",
     });
     if (!res.ok) return null;

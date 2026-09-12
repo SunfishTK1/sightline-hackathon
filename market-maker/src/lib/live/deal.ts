@@ -8,6 +8,16 @@
 import { loadLiveBoard, recordLiveEvent, type LiveBoardView } from "@/lib/db/live";
 
 const VOICE_MCP = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
+const VOICE_MCP_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+
+function voiceHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (VOICE_MCP_TOKEN) {
+    headers.Authorization = `Bearer ${VOICE_MCP_TOKEN}`;
+    headers["x-api-key"] = VOICE_MCP_TOKEN;
+  }
+  return headers;
+}
 
 export type LiveDeal = {
   canCancel: boolean;
@@ -49,6 +59,7 @@ async function voiceGet<T>(path: string): Promise<T | null> {
   if (!VOICE_MCP) return null;
   try {
     const res = await fetch(`${VOICE_MCP}${path}`, {
+      headers: voiceHeaders(),
       cache: "no-store",
       signal: AbortSignal.timeout(8000),
     });
@@ -65,7 +76,7 @@ async function voicePost<T>(path: string, body?: unknown): Promise<{ ok: boolean
   try {
     const res = await fetch(`${VOICE_MCP}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: voiceHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body ?? {}),
       cache: "no-store",
       signal: AbortSignal.timeout(15_000),
@@ -167,6 +178,7 @@ export async function decideLiveDeal(
       await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/counter/respond`, {
         phone,
         accept: false,
+        release: true,
       });
     }
     if (deal.offerId) {

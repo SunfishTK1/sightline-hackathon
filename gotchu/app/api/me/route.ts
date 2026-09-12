@@ -1,5 +1,10 @@
 /** @owner Will — GET profile, PATCH + preference re-embed */
-import { activateParticipant, dropWorkerAvailability, syncWorkerProfile } from "@/lib/activate";
+import {
+  activateParticipant,
+  dropWorkerAvailability,
+  getWorkerAvailability,
+  syncWorkerProfile,
+} from "@/lib/activate";
 import { embedText, isUsableEmbedding } from "@/lib/embed";
 import { fail, ok } from "@/lib/http";
 import { getIdentity } from "@/lib/identity";
@@ -18,7 +23,12 @@ export async function GET() {
     return ok({ user: null, identity: null });
   }
   const found = await findUserByAuth0Sub(identity.auth0Sub);
-  const user = found ? await refreshEmailVerification(found) : null;
+  const refreshed = found ? await refreshEmailVerification(found) : null;
+  const poolAvailable = refreshed ? await getWorkerAvailability(refreshed.uuid) : null;
+  const user =
+    refreshed && poolAvailable !== null
+      ? { ...refreshed, availability: { ...refreshed.availability, isAvailable: poolAvailable } }
+      : refreshed;
   return ok({
     user: user ? publicUser(user) : null,
     identity: { cmuEmail: identity.cmuEmail, source: identity.source },

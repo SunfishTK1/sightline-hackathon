@@ -7,6 +7,12 @@ import { LiveBoard } from "./live-board";
 export const dynamic = "force-dynamic";
 
 const VOICE_MCP = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
+const VOICE_MCP_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+
+function voiceHeaders(): Record<string, string> {
+  if (!VOICE_MCP_TOKEN) return {};
+  return { Authorization: `Bearer ${VOICE_MCP_TOKEN}`, "x-api-key": VOICE_MCP_TOKEN };
+}
 /** Matches the settlement rate in voice-mcp: 1 railcoin is $1 of task value. */
 const RAILCOINS_PER_SOL = 50_000;
 /** Someone has taken it, so there is a person to pay. */
@@ -25,6 +31,7 @@ async function loadOrder(orderId: string): Promise<OrderDetail | null> {
   if (!VOICE_MCP) return null;
   try {
     const res = await fetch(`${VOICE_MCP}/v1/orders/${encodeURIComponent(orderId)}`, {
+      headers: voiceHeaders(),
       cache: "no-store",
       signal: AbortSignal.timeout(6000),
     });
@@ -47,6 +54,7 @@ async function loadWallet(phone: string | null): Promise<WalletView> {
   if (!VOICE_MCP || !phone) return empty;
   try {
     const res = await fetch(`${VOICE_MCP}/v1/wallets/${encodeURIComponent(phone)}`, {
+      headers: voiceHeaders(),
       cache: "no-store",
       signal: AbortSignal.timeout(6000),
     });
