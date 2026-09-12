@@ -16,8 +16,8 @@ function voiceHeaders(): Record<string, string> {
 }
 /** Matches the settlement rate in voice-mcp: 1 railcoin is $1 of task value. */
 const RAILCOINS_PER_SOL = 50_000;
-/** Someone has taken it, so there is a person to pay. */
-const CLOSEABLE = new Set(["accepted", "done_pending"]);
+/** Work must be marked done before the requester can release payment. */
+const CLOSEABLE = new Set(["done_pending"]);
 
 type OrderDetail = {
   pickup_location: string | null;

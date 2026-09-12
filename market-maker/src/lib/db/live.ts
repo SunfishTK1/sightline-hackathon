@@ -317,13 +317,25 @@ export async function listSkipRequests(): Promise<
     order_id: string;
     offer_id: string | null;
   }>(
-    `SELECT b.token, b.order_id, c.offer_id
-     FROM live_boards b
-     LEFT JOIN live_candidates c
-       ON c.token = b.token
-      AND c.state IN ('considering','waiting','countered')
-     WHERE b.skip_requested = TRUE AND b.status = 'matching'
-     ORDER BY b.updated_at`,
+    `SELECT token, order_id, offer_id
+       FROM (
+         SELECT DISTINCT ON (b.token)
+                b.token, b.order_id, b.updated_at, c.offer_id
+           FROM live_boards b
+           LEFT JOIN live_candidates c
+             ON c.token = b.token
+            AND c.state IN ('considering','waiting','countered')
+          WHERE b.skip_requested = TRUE AND b.status = 'matching'
+          ORDER BY b.token,
+                   CASE c.state
+                     WHEN 'countered' THEN 0
+                     WHEN 'waiting' THEN 1
+                     WHEN 'considering' THEN 2
+                     ELSE 3
+                   END,
+                   c.slot
+       ) picked
+      ORDER BY updated_at`,
   );
   return result.rows.map((row) => ({
     token: row.token,

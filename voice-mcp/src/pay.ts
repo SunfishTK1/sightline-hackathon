@@ -11,7 +11,14 @@
  * account below the rent-exempt minimum. A failure is recorded rather than
  * swallowed - the task is still complete, the payment simply did not settle.
  */
-import { LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import {
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+  sendAndConfirmTransaction,
+} from "@solana/web3.js";
 import { connection, loadWalletKeypair, ensureWallet, treasuryKeypair } from "./wallet.js";
 import { pool } from "./db.js";
 
@@ -31,6 +38,9 @@ export type Settlement =
  * before talking to the chain, otherwise two retries both send SOL.
  */
 const UNRECORDED_PREFIX = "unrecorded:";
+const SETTLEMENT_MEMO_PREFIX = "gotchu:";
+const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+const STALE_CLAIM_MINUTES = 5;
 
 function signatureFromNote(note: string | null | undefined): string | null {
   if (!note || !note.startsWith(UNRECORDED_PREFIX)) return null;
@@ -38,19 +48,73 @@ function signatureFromNote(note: string | null | undefined): string | null {
   return signature || null;
 }
 
+function settlementMemo(orderId: string): string {
+  return `${SETTLEMENT_MEMO_PREFIX}${orderId}`;
+}
+
+/**
+ * A process can die after Solana confirms but before Postgres stores the
+ * signature. Every payment carries its order id as a memo, so a stale claim
+ * can prove whether that transfer already landed before it sends another.
+ */
+async function findSettlementOnChain(input: {
+  orderId: string;
+  payerPublicKey: string;
+  payeePublicKey: string;
+  lamports: number;
+}): Promise<string | null> {
+  const payer = new PublicKey(input.payerPublicKey);
+  const signatures = (
+    await connection.getSignaturesForAddress(payer, { limit: 1_000 }, "confirmed")
+  ).filter((entry) => !entry.err);
+  const memo = settlementMemo(input.orderId);
+
+  for (let offset = 0; offset < signatures.length; offset += 100) {
+    const batch = signatures.slice(offset, offset + 100);
+    const transactions = await connection.getParsedTransactions(
+      batch.map((entry) => entry.signature),
+      { commitment: "confirmed", maxSupportedTransactionVersion: 0 },
+    );
+    for (let index = 0; index < transactions.length; index++) {
+      const instructions = transactions[index]?.transaction.message.instructions ?? [];
+      let hasMemo = false;
+      let hasTransfer = false;
+      for (const instruction of instructions as any[]) {
+        if (instruction.program === "spl-memo" && instruction.parsed === memo) {
+          hasMemo = true;
+        }
+        const info = instruction.parsed?.info;
+        if (
+          instruction.program === "system" &&
+          instruction.parsed?.type === "transfer" &&
+          info?.source === input.payerPublicKey &&
+          info?.destination === input.payeePublicKey &&
+          Number(info?.lamports) === input.lamports
+        ) {
+          hasTransfer = true;
+        }
+      }
+      if (hasMemo && hasTransfer) return batch[index].signature;
+    }
+  }
+  return null;
+}
+
 async function claimPayment(
   orderId: string,
-): Promise<{ kind: "claimed" } | { kind: "already"; signature: string } | { kind: "busy"; reason: string }> {
+): Promise<
+  | { kind: "claimed" }
+  | { kind: "already"; signature: string }
+  | { kind: "stale" }
+  | { kind: "busy"; reason: string }
+> {
   const claimed = await pool.query<{ id: string; note: string | null }>(
     `UPDATE payments
         SET status = 'paying', updated_at = now()
       WHERE order_id = $1
         AND solana_signature IS NULL
         AND status IS DISTINCT FROM 'paid'
-        AND (
-          status IS DISTINCT FROM 'paying'
-          OR updated_at < now() - interval '5 minutes'
-        )
+        AND status IS DISTINCT FROM 'paying'
       RETURNING id, note`,
     [orderId],
   );
@@ -60,9 +124,12 @@ async function claimPayment(
     solana_signature: string | null;
     status: string | null;
     note: string | null;
+    stale: boolean;
   }>(
-    `SELECT solana_signature, status, note FROM payments WHERE order_id = $1`,
-    [orderId],
+    `SELECT solana_signature, status, note,
+            updated_at < now() - ($2 || ' minutes')::interval AS stale
+       FROM payments WHERE order_id = $1`,
+    [orderId, String(STALE_CLAIM_MINUTES)],
   );
   const row = existing.rows[0];
   if (row?.solana_signature) {
@@ -74,6 +141,9 @@ async function claimPayment(
   }
   if (row?.status === "paid") {
     return { kind: "already", signature: row.solana_signature || "paid" };
+  }
+  if (row?.status === "paying" && row.stale) {
+    return { kind: "stale" };
   }
   if (row?.status === "paying") {
     return { kind: "busy", reason: "settlement already in progress" };
@@ -97,6 +167,7 @@ export async function payForTask(input: {
   if (!(railcoins > 0)) {
     return { settled: false, reason: "nothing to pay - the task had no price", railcoins: 0 };
   }
+  const lamports = railcoinsToLamports(railcoins);
 
   const claim = await claimPayment(input.orderId);
   if (claim.kind === "already") {
@@ -114,6 +185,63 @@ export async function payForTask(input: {
       reason: `paid on-chain but not recorded: ${claim.signature}`,
       railcoins,
     };
+  }
+  if (claim.kind === "stale") {
+    let recovered: string | null;
+    try {
+      const [payer, payee] = await Promise.all([
+        ensureWallet(input.payerPhone),
+        ensureWallet(input.payeePhone),
+      ]);
+      recovered = await findSettlementOnChain({
+        orderId: input.orderId,
+        payerPublicKey: payer.public_key,
+        payeePublicKey: payee.public_key,
+        lamports,
+      });
+    } catch (err) {
+      return {
+        settled: false,
+        reason: `could not verify stale settlement: ${(err as Error).message}`,
+        railcoins,
+      };
+    }
+
+    if (recovered) {
+      const recorded: Settlement = { settled: true, signature: recovered, railcoins };
+      try {
+        await persistSettlement(input.orderId, recorded);
+        return recorded;
+      } catch (err) {
+        await pool
+          .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
+            input.orderId,
+            `${UNRECORDED_PREFIX}${recovered}`,
+          ])
+          .catch(() => undefined);
+        return {
+          settled: false,
+          reason: `paid on-chain but not recorded: ${recovered} (${(err as Error).message})`,
+          railcoins,
+        };
+      }
+    }
+
+    // The chain has no matching successful transfer. Only one verifier may
+    // reclaim the stale row and proceed to send.
+    const reclaimed = await pool.query<{ id: string }>(
+      `UPDATE payments
+          SET updated_at = now()
+        WHERE order_id = $1
+          AND status = 'paying'
+          AND solana_signature IS NULL
+          AND updated_at < now() - ($2 || ' minutes')::interval
+        RETURNING id`,
+      [input.orderId, String(STALE_CLAIM_MINUTES)],
+    );
+    if (!reclaimed.rows[0]) {
+      return { settled: false, reason: "settlement already in progress", railcoins };
+    }
   }
   if (claim.kind === "busy") {
     return { settled: false, reason: claim.reason, railcoins };
@@ -150,7 +278,6 @@ export async function payForTask(input: {
       return result;
     }
 
-    const lamports = railcoinsToLamports(railcoins);
     const balance = await connection.getBalance(from.publicKey);
     // Leave room for the fee, and say so plainly rather than letting the
     // network reject it with something unreadable.
@@ -169,6 +296,11 @@ export async function payForTask(input: {
         fromPubkey: from.publicKey,
         toPubkey: new PublicKey(payee.public_key),
         lamports,
+      }),
+      new TransactionInstruction({
+        keys: [],
+        programId: MEMO_PROGRAM_ID,
+        data: Buffer.from(settlementMemo(input.orderId), "utf8"),
       }),
     );
     const signature = await sendAndConfirmTransaction(connection, tx, [from]);
