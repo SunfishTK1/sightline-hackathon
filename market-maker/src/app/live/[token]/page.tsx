@@ -88,6 +88,7 @@ export default async function LivePage({
           railcoins={railcoins}
           requesterBalance={balance}
           canPay={CLOSEABLE.has(order?.status ?? "")}
+          alreadyPaid={order?.status === "completed"}
         />
         <TaskMap points={points} />
       </div>

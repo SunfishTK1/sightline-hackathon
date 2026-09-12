@@ -292,6 +292,52 @@ export async function ackLiveSkip(token: string): Promise<void> {
   );
 }
 
+/**
+ * The board's status is only ever changed by an event someone remembered to
+ * post. Anything that moves the task by another route - the agent restarting
+ * mid-match, a worker accepting over text, the requester paying from this very
+ * page - leaves the board insisting it is still matching for a job that ended.
+ *
+ * So the order is treated as the truth and the board is reconciled to it. Only
+ * while still matching: once terminal there is nothing left to check, which
+ * keeps a two-second poll from hammering voice-mcp forever.
+ */
+const VOICE_MCP_URL = (process.env.VOICE_MCP_URL || "").replace(/\/$/, "");
+
+const TERMINAL_ORDER_STATUS: Record<string, LiveBoardStatus> = {
+  accepted: "agreed",
+  done_pending: "agreed",
+  completed: "agreed",
+  cancelled: "stopped",
+  blocked: "stopped",
+  no_takers: "stopped",
+};
+
+async function reconcileWithOrder(
+  token: string,
+  orderId: string,
+): Promise<LiveBoardStatus | null> {
+  if (!VOICE_MCP_URL) return null;
+  try {
+    const res = await fetch(`${VOICE_MCP_URL}/v1/orders/${encodeURIComponent(orderId)}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { ok?: boolean; data?: { status?: string } };
+    const next = TERMINAL_ORDER_STATUS[json.data?.status ?? ""];
+    if (!next) return null;
+    await query(
+      `UPDATE live_boards SET status = $2, skip_requested = FALSE, updated_at = NOW()
+       WHERE token = $1 AND status = 'matching'`,
+      [token, next],
+    );
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadLiveBoard(token: string): Promise<LiveBoardView | null> {
   const board = await query<{
     token: string;
@@ -307,6 +353,11 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
   );
   const row = board.rows[0];
   if (!row) return null;
+
+  if (row.status === "matching") {
+    const reconciled = await reconcileWithOrder(token, row.order_id);
+    if (reconciled) row.status = reconciled;
+  }
 
   const candidates = await query<{
     slot: number;

@@ -19,15 +19,18 @@ export function TaskMoney({
   railcoins,
   requesterBalance,
   canPay,
+  alreadyPaid,
 }: {
   token: string;
   railcoins: number | null;
   requesterBalance: number | null;
   canPay: boolean;
+  /** Settled before this page was opened, so say so instead of going quiet. */
+  alreadyPaid: boolean;
 }) {
   const [balance, setBalance] = useState(requesterBalance);
   const [paying, setPaying] = useState(false);
-  const [paid, setPaid] = useState(false);
+  const [paid, setPaid] = useState(alreadyPaid);
   const [error, setError] = useState<string | null>(null);
 
   if (railcoins == null && requesterBalance == null) return null;
