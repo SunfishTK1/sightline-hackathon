@@ -227,6 +227,24 @@ app.get("/v1/offers", async (req, res) => {
   res.json({ ok: true, data: rows });
 });
 
+/**
+ * Update the market offer on a live offer. The broker sets this price; the
+ * requester's budget_usd is a different column and is never overwritten.
+ */
+app.post("/v1/offers/:id/price", async (req, res) => {
+  const offered = Number(req.body?.offered_usd);
+  if (!Number.isFinite(offered)) {
+    return res.status(400).json({ ok: false, error: "offered_usd must be a number" });
+  }
+  const { rows } = await pool.query(
+    `UPDATE job_offers SET offered_usd = $2 WHERE id = $1 AND status IN ('offered','countered')
+      RETURNING id, offered_usd, status`,
+    [req.params.id, offered],
+  );
+  if (!rows[0]) return res.status(409).json({ ok: false, error: "offer is not live" });
+  res.json({ ok: true, data: rows[0] });
+});
+
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(

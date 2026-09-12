@@ -98,6 +98,10 @@ export const market = {
   respond: (id: string, accepted: boolean) =>
     post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted }),
 
+  /** The broker's price for a live offer. Never the requester's budget. */
+  setOfferPrice: (id: string, offered_usd: number) =>
+    post<{ id: string; offered_usd: string }>(`/v1/offers/${id}/price`, { offered_usd }),
+
   counter: (id: string, phone: string, price_usd: number, note?: string) =>
     post<{ status: string }>(`/v1/offers/${id}/counter`, { phone, price_usd, note }),
   respondToCounter: (id: string, phone: string, accept: boolean) =>

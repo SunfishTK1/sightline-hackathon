@@ -4,6 +4,7 @@ import {
   type WorkItem,
 } from "./mcp.js";
 import { CAMPUS_CONTEXT } from "./campus.js";
+import { evaluateDeal } from "./broker.js";
 import type { Turn } from "./db.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
@@ -468,9 +469,72 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
     if (!target) return { error: "That job offer is not open for you." };
+
+    // The market-maker decides the number, not this agent and not the worker.
+    const onTable = Number(target.offered_usd ?? target.budget_usd ?? 0);
+    const verdict = await evaluateDeal({
+      order: {
+        title: target.title,
+        details: target.details,
+        budget_usd: target.budget_usd,
+        deadline_at: target.deadline_at,
+        pickup_location: target.pickup_location,
+        dropoff_location: target.dropoff_location,
+      },
+      current_offer_usd: onTable,
+      decision: "COUNTER",
+      price_usd: args.price_usd,
+      note: args.note || undefined,
+    });
+
+    // Broker unreachable: fall back to putting it to the requester.
+    if (!verdict) {
+      return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+    }
+
+    if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
+      // Do not relay the note - it is a different job, or the haggling is over.
+      await market.respond(target.id, false).catch(() => null);
+      return {
+        status: verdict.action.toLowerCase(),
+        say: verdict.messageHint,
+        note: "Offer closed for this person; the task goes to someone else.",
+      };
+    }
+    if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
+      // Record it at the broker's number. It is inside the auto band, so the
+      // requester's own agent settles it within seconds via AUTO_REQUESTER -
+      // the worker's view has no business holding the requester's phone.
+      await market.counter(target.id, phone, verdict.agreedUsd, args.note || undefined);
+      return {
+        status: "agreed_pending_settlement",
+        agreed_usd: verdict.agreedUsd,
+        say: verdict.messageHint,
+      };
+    }
+    if (verdict.action === "COUNTER" && verdict.nextOfferUsd != null) {
+      // Counter back to the worker at the broker's number; the requester is
+      // not asked yet.
+      await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      return { status: "countered_back", offer_usd: verdict.nextOfferUsd, say: verdict.messageHint };
+    }
+    // ASK_REQUESTER, or anything unexpected: put it to the requester.
     return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
   }
   if (name === "respond_to_counter") {
+    // The requester's own yes or no still goes past the broker, so its record
+    // of what cleared stays right.
+    const pending = (await market.openCounters(phone)).find(
+      (c) => String(c.id) === String(args.offer_id),
+    );
+    if (pending) {
+      await evaluateDeal({
+        order: { title: pending.title, budget_usd: pending.budget_usd },
+        current_offer_usd: Number(pending.budget_usd ?? 0),
+        decision: args.accept ? "REQUESTER_YES" : "REQUESTER_NO",
+        price_usd: Number(pending.counter_price_usd ?? 0),
+      }).catch(() => null);
+    }
     // The phone is bound, so they can only answer counters on their own tasks.
     return await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
   }
@@ -488,6 +552,17 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
     if (!target) return { error: "That job offer is not open for you." };
+
+    // Tell the broker either way, so its view of the market stays current.
+    const verdict = await evaluateDeal({
+      order: { title: target.title, budget_usd: target.budget_usd, details: target.details },
+      current_offer_usd: Number(target.offered_usd ?? target.budget_usd ?? 0),
+      decision: args.accept ? "ACCEPT" : "DECLINE",
+    });
+    if (args.accept && verdict && verdict.action === "REJECT_SCOPE") {
+      await market.respond(target.id, false).catch(() => null);
+      return { status: "rejected_scope", say: verdict.messageHint };
+    }
     return await market.respond(target.id, Boolean(args.accept));
   }
   throw new Error(`unknown tool ${name}`);
