@@ -9,6 +9,51 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, very late night — a real ethics-BLOCK enforcement gap, found via the account view
+
+**What this agent added directly:**
+- User feedback on the new account view surfaced a serious bug, not a UI
+  one: a real order ("Can you get someone to do my 210 lab for me? $50")
+  had `ethics_verdict = 'BLOCK'` correctly recorded (right reason cited:
+  CMU Academic Integrity Policy) but `status = 'completed'` - it had been
+  matched, accepted, completed, and paid anyway. Root cause, confirmed by
+  reading the actual code path: `resolveOffer()`'s decline branch reset
+  `orders.status` back to `'submitted'` unconditionally, with no check on
+  `ethics_verdict` - so once *any* offer on a blocked order was declined
+  (or raced `blockOrder`'s own offer-cancellation), the task silently
+  re-entered circulation, and none of the matching-eligible queries
+  (`/v1/orders/open`, `listOpenTasks`, needing-video, needing-image)
+  re-checked `ethics_verdict` either, only `status`.
+- Fixed both ends: the decline path now keeps a BLOCK-verdict order at
+  `'blocked'` instead of reopening it, and every "eligible for matching"
+  query now also excludes `ethics_verdict = 'BLOCK'` as defense in depth.
+  `voice-mcp/src/marketplace.ts`, `voice-mcp/src/server.ts`.
+- Also fixed the account view's price display (`$9.00` -> `9 railcoins`
+  - `budget_usd` already denominates in railcoins 1:1, it was just
+  mislabeled) and the status pill wording (`Blocked` -> `Declined`).
+- **Left untouched, deliberately**: the specific already-completed,
+  already-paid violating order. Reversing a real (devnet) payment or
+  rewriting a historical record is a policy call, not something to do
+  unilaterally - flagged to the user instead.
+- **Note for whoever picks this up next**: Cursor was making live edits
+  to `gotchu/lib/agents/negotiate.ts`, `lib/activate.ts`, `lib/users.ts`,
+  `lib/validate.ts`, the ethics API routes, and others *during* this pass
+  (synced via the shared OneDrive folder, uncommitted). This agent
+  stashed and restored that WIP around each merge without inspecting or
+  committing it - it's real in-progress work, not noise, and none of it
+  has been reviewed here.
+
+**Merged in from teammates during this pass:**
+- Live-board matching + a slot-insert fix so new matches can actually
+  start; live board no longer invents a "someone is deciding" state.
+- Campus travel-time tweaks; a seeding INSERT fix.
+
+**Conflicts resolved this pass:** none - two clean merges, one of them
+converging independently with a similar race-condition guard someone
+else added to the same `resolveOffer` accept path.
+
+---
+
 ## 2026-09-12, later night — the likeness consent gap from the last pass got closed
 
 **Merged in from teammates this pass (no changes from this agent - reviewed and typechecked only):**
