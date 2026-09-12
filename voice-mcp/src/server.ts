@@ -340,11 +340,16 @@ app.post("/v1/offers/:id/price", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
+    // The requester's phone rides along because outreach starts the film when
+    // it holds an offer, and a film without it cannot look up whether they
+    // agreed to appear in it.
     `SELECT j.id, j.phone, j.reason, j.offered_usd, j.travel_note, j.created_at, o.id AS order_id,
             o.title, o.details, o.budget_usd, o.deadline_at,
-            o.pickup_location, o.dropoff_location, o.category
+            o.pickup_location, o.dropoff_location, o.category,
+            p.phone AS requester_phone
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
+       LEFT JOIN people p ON p.id = o.person_id
       WHERE j.outreach_sent_at IS NULL AND j.status = 'offered'
       ORDER BY j.created_at
       LIMIT 10`,

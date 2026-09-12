@@ -560,8 +560,11 @@ async function sendOutreach(): Promise<void> {
           pickup_location: offer.pickup_location ?? null,
           dropoff_location: offer.dropoff_location ?? null,
           budget_usd: offer.budget_usd ?? null,
-          // Only used to attribute the clip; the outreach row does not carry it.
-          requester_phone: "",
+          // Needed, not decorative: this is how the film finds out whether the
+          // requester agreed to appear in it. Passing "" here meant every film
+          // started by an outreach hold - which is most of them - silently
+          // skipped the likeness.
+          requester_phone: offer.requester_phone ?? "",
         }).catch(() => false);
       }
       const missing = [!png && "its picture", !mp4 && "its film"].filter(Boolean).join(" and ");

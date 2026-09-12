@@ -75,6 +75,8 @@ export type Outreach = OpenJob & {
   offered_usd?: string | null;
   created_at?: string;
   travel_note?: string | null;
+  /** Who asked for the task - needed to look up their likeness consent. */
+  requester_phone?: string | null;
 };
 
 /** A worker's proposed price, waiting on the requester. */
