@@ -9,6 +9,37 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, evening — railcoin/wallet_link tool was uncallable by the model
+
+**What this agent added directly:**
+- Root-caused the reported "railcoin stuff isn't working with the agent":
+  `agent/src/agent.ts`'s `runTool()` had a complete handler for a
+  `wallet_link` tool (mints a link to someone's own wallet page), but it
+  was never listed in `TOOL_SCHEMAS` - the OpenAI Responses API only ever
+  calls tools declared there, so the model had no way to invoke it no
+  matter how a user phrased "what's my balance" / "check my wallet".
+  Added the missing schema entry.
+- Also found `WEB_BASE_URL` and `RAILCOINS_PER_SOL` (both required by
+  `voice-mcp/src/walletlink.ts` and `pay.ts`) were never added to
+  `voice-mcp/.env.example` or the local `.env` - without `WEB_BASE_URL`
+  specifically, the tool would return `url: null` even once callable.
+  Verified the full fix live locally: link creation → wallet
+  auto-creation on first visit → funded balance, all round-tripped
+  correctly against a running voice-mcp instance.
+- **Same root-cause pattern as the earlier Auth0 issue**: check whether
+  `RAILCOINS_PER_SOL`, `WEB_BASE_URL`, `WALLET_LINK_TTL_DAYS`,
+  `SOLANA_TREASURY_SECRET_KEY`, and `WALLET_ENCRYPTION_KEY` are actually
+  set on the Railway `voice-mcp` production service, not just locally.
+
+**Merged in from teammates during this pass:**
+- Payment settlement failure reasons surfaced back to the requester
+  ("say what actually happened to the money") - `agent/src/index.ts`,
+  `voice-mcp/src/marketplace.ts`.
+
+**Conflicts resolved this pass:** none - clean merge.
+
+---
+
 ## 2026-09-12, later afternoon — ToS "Not yet" bug fix, likeness-consent audit
 
 **What this agent added directly:**
