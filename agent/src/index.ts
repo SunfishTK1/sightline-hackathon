@@ -220,7 +220,7 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       if (!open) {
         reply = "That job isn't open any more, so I couldn't take it for you.";
       } else {
-        await market.respond(open.id, true).catch(() => null);
+        await market.respond(open.id, true, phone).catch(() => null);
         reply = `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`;
         if (open.order_id) {
           await postLiveEvent({
@@ -234,7 +234,7 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       }
     } else if (data.kind === "disliked") {
       if (open) {
-        await market.respond(open.id, false).catch(() => null);
+        await market.respond(open.id, false, phone).catch(() => null);
         reply = `Passed on "${open.title}" for you.`;
         if (open.order_id) {
           await postLiveEvent({
@@ -611,6 +611,15 @@ async function sendOutreach(): Promise<void> {
       // They never got the text. Marking it sent would hold the exclusive
       // slot for ten minutes; decline so rematch can move on now.
       await market.respond(offer.id, false).catch(() => null);
+      if (offer.order_id) {
+        await postLiveEvent({
+          orderId: offer.order_id,
+          kind: "timeout",
+          message: "Could not reach them. Trying the next person.",
+          offerId: String(offer.id),
+          state: "dropped",
+        });
+      }
       log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
       continue;
     }

@@ -320,7 +320,7 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
            WHERE j.order_id = o.id AND j.phone = w.phone
-             AND j.status IN ('offered', 'countered', 'accepted'))
+             AND j.status IN ('offered', 'countered', 'accepted', 'declined', 'dropped'))
       LIMIT 25`,
     [req.params.orderId],
   );
@@ -394,9 +394,14 @@ app.post("/v1/offers", async (req, res) => {
                WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
                ELSE NULL
              END
+       WHERE job_offers.status NOT IN ('declined', 'dropped')
        RETURNING id, order_id, phone, status, offered_usd, travel_note`,
       [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
     );
+    if (!rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "worker_already_considered" });
+    }
     await client.query(
       `UPDATE orders SET status = 'offered', updated_at = now()
         WHERE id = $1 AND status IN ('submitted', 'offered')`,

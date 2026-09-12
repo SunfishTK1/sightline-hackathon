@@ -749,20 +749,35 @@ tools.push({
     }
 
     const { rows } = await pool.query(
-      `UPDATE orders o
-          SET budget_usd = COALESCE($3, o.budget_usd),
-              deadline_at = COALESCE($4::timestamptz, o.deadline_at),
-              details = COALESCE($5, o.details),
-              -- New terms put a parked task back in front of people, and reset
-              -- the misses that parked it. The agent already promises exactly
-              -- this when it pauses one.
-              status = CASE WHEN o.status = 'no_takers' THEN 'submitted' ELSE o.status END,
-              match_attempts = CASE WHEN o.status = 'no_takers' THEN 0 ELSE o.match_attempts END,
-              updated_at = now()
-        FROM people p
-       WHERE o.id = $1 AND o.person_id = p.id AND p.phone = $2
-         AND o.status IN ('submitted', 'offered', 'no_takers')
-       RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status`,
+      `WITH target AS (
+         SELECT o.id, o.status AS old_status
+           FROM orders o
+           JOIN people p ON p.id = o.person_id
+          WHERE o.id = $1 AND p.phone = $2
+            AND o.status IN ('submitted', 'offered', 'no_takers')
+          FOR UPDATE
+       ),
+       changed AS (
+         UPDATE orders o
+            SET budget_usd = COALESCE($3, o.budget_usd),
+                deadline_at = COALESCE($4::timestamptz, o.deadline_at),
+                details = COALESCE($5, o.details),
+                status = CASE WHEN t.old_status = 'no_takers' THEN 'submitted' ELSE o.status END,
+                match_attempts = CASE WHEN t.old_status = 'no_takers' THEN 0 ELSE o.match_attempts END,
+                updated_at = now()
+           FROM target t
+          WHERE o.id = t.id
+          RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status, t.old_status
+       ),
+       reset_candidates AS (
+         UPDATE job_offers j
+            SET status = 'superseded', responded_at = now()
+           FROM changed c
+          WHERE j.order_id = c.id
+            AND c.old_status = 'no_takers'
+            AND j.status IN ('declined', 'dropped')
+       )
+       SELECT id, title, budget_usd, deadline_at, status FROM changed`,
       [order_id, e164, budget_usd ?? null, deadline_at ?? null, details ?? null],
     );
     if (!rows[0]) {

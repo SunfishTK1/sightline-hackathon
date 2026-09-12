@@ -592,10 +592,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       await market.respond(target.id, false).catch(() => null);
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return {
         status: verdict.action.toLowerCase(),
@@ -712,14 +712,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       await market.respond(target.id, false).catch(() => null);
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return { status: "rejected_scope", say: verdict.messageHint };
     }
-    const result = await market.respond(target.id, Boolean(args.accept));
+    const result = await market.respond(target.id, Boolean(args.accept), phone);
     await postLiveEvent({
       orderId: target.order_id,
       kind: args.accept ? "accepted" : "declined",

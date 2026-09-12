@@ -45,13 +45,14 @@ export async function resolveOffer(
   phone?: string,
 ): Promise<{ status: string; order_id?: string; error?: string }> {
   const guard = phone ? normalizePhone(phone) : null;
+  const nextStatus = accepted ? "accepted" : guard ? "declined" : "dropped";
   const { rows } = await pool.query(
     `UPDATE job_offers
         SET status = $2, responded_at = now()
       WHERE id = $1 AND status = 'offered'
         AND ($3::text IS NULL OR phone = $3)
       RETURNING id, order_id, person_id, phone, offered_usd`,
-    [offerId, accepted ? "accepted" : "declined", guard],
+    [offerId, nextStatus, guard],
   );
   const offer = rows[0];
   if (!offer) return { status: "unchanged", error: "That offer is not open for this person." };
@@ -73,7 +74,7 @@ export async function resolveOffer(
           )`,
       [offer.order_id, offer.id],
     );
-    return { status: "declined", order_id: offer.order_id };
+    return { status: nextStatus, order_id: offer.order_id };
   }
 
   const order = await pool.query(
@@ -291,7 +292,7 @@ export async function respondToCounter(
     // A normal requester "no" keeps the original price on the table.
     if (opts?.release) {
       await pool.query(
-        `UPDATE job_offers SET status = 'declined', responded_at = now() WHERE id = $1`,
+        `UPDATE job_offers SET status = 'dropped', responded_at = now() WHERE id = $1`,
         [offer.id],
       );
       await pool.query(
