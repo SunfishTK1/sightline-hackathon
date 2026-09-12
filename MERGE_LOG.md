@@ -9,6 +9,40 @@ commit — several teammate commits often land between passes.
 
 ---
 
+## 2026-09-12, later afternoon — ToS "Not yet" bug fix, likeness-consent audit
+
+**What this agent added directly:**
+- Fixed a real bug reported by a user testing onboarding: the ToS dialog's
+  "Not yet" button closed the dialog without touching the `acceptedTerms`
+  checkbox at all, so a previously-checked box stayed checked even after
+  explicitly declining. `TermsDialog` now takes an `onDecline` prop that
+  unchecks it. Also fixed the underlying cause of related checkbox
+  flakiness: the dialog's trigger `<button>` was nested inside the
+  checkbox's `<label>`, which produces inconsistent toggle behavior
+  across browsers (nested interactive content inside a label is not a
+  well-defined interaction). The trigger is now a sibling of the label,
+  not nested inside it. See `gotchu/components/onboarding/{OnboardingForm.tsx,TermsDialog.tsx}`.
+- Audited the "optional profile photo for AI-generated images/videos"
+  consent (`canUseLikeness`, added in an earlier teammate commit): it is
+  correctly optional and defaults to off end-to-end (schema, form,
+  storage). However **nothing downstream currently reads this flag at
+  all** - `agent/src/illustrate.ts` and `agent/src/video.ts` never use
+  any person's actual photo today; generated images/videos only ever
+  depict generic, unremarkable students. So there is nothing to violate
+  right now, but if/when someone wires actual photo-based generation in,
+  it must gate on this flag - it does not do so automatically just
+  because the checkbox exists.
+
+**Merged in from teammates during this pass:**
+- Live match board deployed to the real domain; a settlement proof
+  flow (`market-maker/src/app/api/live/event/route.ts`).
+- Campus travel time tweaks (`market-maker/src/lib/market/campus-travel.ts`).
+- A small voice-mcp server addition (3 lines, `voice-mcp/src/server.ts`).
+
+**Conflicts resolved this pass:** none - clean merges.
+
+---
+
 ## 2026-09-12, afternoon — wallet auto-provisioning, ToS + personalization, Auth0 diagnostics
 
 **What this agent added directly:**
