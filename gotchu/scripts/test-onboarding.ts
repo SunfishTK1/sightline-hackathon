@@ -14,6 +14,7 @@ function section(name: string) {
 }
 
 const validConsents = {
+  acceptedTerms: true,
   ageConfirmed: true,
   consentCall: true,
   consentText: true,
@@ -39,6 +40,7 @@ console.log("  phone checks ok");
 section("onboarding schema");
 const good = onboardingSchema.safeParse({
   firstName: "Will",
+  lastName: "Montague",
   phone: "+1 (412) 555-0123",
   cmuEmail: "wmontagu@andrew.cmu.edu",
   ...validConsents,
@@ -51,6 +53,7 @@ if (good.success) {
 
 const gmail = onboardingSchema.safeParse({
   firstName: "Will",
+  lastName: "Montague",
   phone: "+14125550123",
   cmuEmail: "will@gmail.com",
   ...validConsents,
@@ -59,8 +62,10 @@ assert(!gmail.success, "gmail must be rejected");
 
 const noTerms = onboardingSchema.safeParse({
   firstName: "Will",
+  lastName: "Montague",
   phone: "+14125550123",
   cmuEmail: "wmontagu@andrew.cmu.edu",
+  acceptedTerms: true,
   ageConfirmed: false,
   consentCall: true,
   consentText: true,
@@ -96,6 +101,7 @@ async function runApiTests() {
 
   const gmailRes = await post("/api/onboarding", {
     firstName: "Will",
+    lastName: "Montague",
     phone: "+14125550123",
     cmuEmail: "will@gmail.com",
     ...validConsents,
@@ -105,6 +111,7 @@ async function runApiTests() {
 
   const created = await post("/api/onboarding", {
     firstName: "Will",
+    lastName: "Montague",
     phone: "4125550123",
     cmuEmail: "wmontagu@andrew.cmu.edu",
     ...validConsents,
@@ -121,6 +128,7 @@ async function runApiTests() {
     "/api/onboarding",
     {
       firstName: "Will",
+      lastName: "Montague",
       phone: "+14125550123",
       cmuEmail: "wmontagu@andrew.cmu.edu",
       ...validConsents,
