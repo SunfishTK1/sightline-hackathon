@@ -345,7 +345,10 @@ function handoffText(handoff: Handoff): string | null {
       // Every simulated worker asked the same two things: how much do I have
       // now, and is there a step left. Answer both, unprompted.
       const bal = handoff.payload?.balance != null ? ` You're at ${handoff.payload.balance}.` : "";
-      return `Confirmed - "${handoff.payload?.title}" is done, and ${coins} railcoins just landed in your wallet.${bal} Nothing for you to set up. 1 railcoin = $1 of task value, spendable on Gotchu tasks.`;
+      // "1 railcoin = $1" on its own reads as "this is worth a dollar". It is
+      // worth a dollar OF TASK, here, and never converts to money - so say the
+      // limit in the same breath as the value.
+      return `Confirmed - "${handoff.payload?.title}" is done, and ${coins} railcoins just landed in your wallet.${bal} Railcoins are campus credit: 1 = $1 of task value, spendable on Gotchu only, no cash-out.`;
     }
     if (handoff.payload?.settlement_error) {
       return `Confirmed - "${handoff.payload?.title}" is done, but the ${coins ?? ""} railcoins haven't moved yet. I'm chasing it - you're still owed them.`;

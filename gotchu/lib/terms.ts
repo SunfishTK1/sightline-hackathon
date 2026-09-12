@@ -4,7 +4,7 @@
  * Bump TERMS_VERSION whenever the text changes materially - a stored
  * acceptance is only good for the version it was actually shown for.
  */
-export const TERMS_VERSION = "2026-09-12";
+export const TERMS_VERSION = "2026-09-12.2";
 
 export const TERMS_SECTIONS: Array<{ heading: string; body: string[] }> = [
   {
@@ -44,6 +44,7 @@ export const TERMS_SECTIONS: Array<{ heading: string; body: string[] }> = [
     heading: "6. Payments and marketplace conduct",
     body: [
       "Prices agreed between a requester and a worker are between those two users. Gotchu may facilitate payment processing but does not set task prices, guarantee funds, or arbitrate disputes over the quality or completion of a task, beyond the completion-confirmation flow built into the app.",
+      "Tasks are priced in US dollars, but they are paid in railcoins: a closed-loop campus credit, where one railcoin is worth one dollar of task value on Gotchu. Railcoins are not money, not legal tender, and not an investment. They have no cash value, cannot be exchanged for dollars or any other currency, and cannot be withdrawn, sold, or transferred off Gotchu. The only thing you can do with a railcoin is pay for another task here. Everyone is given a small starting balance for free; that grant is not compensation and is not a promise of future value. Railcoin balances are recorded on a test blockchain network whose tokens have no market value, and we may reset, adjust, or discontinue balances at any time, including when a task is found to have been paid in error.",
       "You agree not to use Gotchu for anything illegal, for tasks that violate CMU policy (including academic integrity - Gotchu will not knowingly facilitate having someone else complete graded coursework), or for anything that would require another person to misrepresent their identity or credentials to complete it.",
     ],
   },
