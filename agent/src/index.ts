@@ -26,6 +26,7 @@ import {
   announceHandoffOnLive,
   listLiveSkips,
   postLiveEvent,
+  postLiveChat,
   postLiveMedia,
   startLiveBoard,
 } from "./live.js";
@@ -145,6 +146,22 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     // two model calls and their style doesn't change message to message.
     if (updatedHistory.length % 8 < 2) {
       learnStyle(phone, updatedHistory).catch(() => {});
+    }
+
+    // After someone has taken the job, ordinary texts become the live thread.
+    // Tool calls (yes/no, counters) stay off that thread.
+    if (!usedTools.length) {
+      const doing = who?.jobs_in_progress ?? [];
+      const theirs = (who?.open_requests ?? []).find((order) =>
+        ["accepted", "done_pending"].includes(order.status),
+      );
+      if (doing[0]?.id) {
+        await postLiveChat({ orderId: String(doing[0].id), author: "worker", body: text });
+        await market.relayChat(String(doing[0].id), text, "requester").catch(() => null);
+      } else if (theirs?.id) {
+        await postLiveChat({ orderId: String(theirs.id), author: "requester", body: text });
+        await market.relayChat(String(theirs.id), text, "worker").catch(() => null);
+      }
     }
   }
 }
@@ -299,11 +316,6 @@ async function pollInbound(): Promise<void> {
 
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
-/**
- * How long an offer waits for its picture and its film before going out
- * without them. Sora runs for minutes, so this is the long pole.
- */
-const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || process.env.VIDEO_WAIT_MS || 420_000);
 
 function confirmationLine(handoff: Handoff, url?: string | null): string {
   const price = handoff.payload?.budget_usd;
@@ -363,6 +375,10 @@ function handoffText(handoff: Handoff): string | null {
   }
   if (handoff.kind === "order_confirmation") {
     return confirmationLine(handoff);
+  }
+  if (handoff.kind === "live_chat") {
+    const who = handoff.payload?.from === "worker" ? "They" : "They";
+    return `${who} wrote about "${handoff.payload?.title}": ${handoff.payload?.body} Reply here and I'll put it on the live page.`;
   }
   if (handoff.kind === "worker_accepted") {
     return `Someone just took your request: ${handoff.payload?.title}. I'll let you know when it's done.`;
@@ -566,19 +582,10 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
-    // Hold briefly for the illustration only. Films are a separate paid
-    // request and must never delay ordinary job outreach.
+    // Send now. Holding for the illustration left the live board up with
+    // nobody actually asked, and films are a separate paid request anyway.
     const orderId = String(offer.order_id ?? "");
-    const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
-    // Only the picture is waited for. Films are no longer made for every task -
-    // they are requested and paid for on the live board - so holding an offer
-    // for one would hold most offers forever.
     const png = await imageFor(orderId);
-
-    if (!png && waited < ASSET_WAIT_MS) {
-      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its picture`);
-      continue;
-    }
 
     const attachments: string[] = [];
     if (png) {
@@ -586,7 +593,7 @@ async function sendOutreach(): Promise<void> {
       if (id) attachments.push(id);
     }
     if (!png) {
-      log(`offer ${offer.id} going out without a picture after ${Math.round(waited / 1000)}s`);
+      log(`offer ${offer.id} going out without a picture`);
     }
 
     const message = shorten(text);
