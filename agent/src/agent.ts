@@ -478,6 +478,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       open_job_offers: jobs,
     };
   }
+  if (name === "list_open_tasks") {
+    return { tasks: await market.openTasks().catch(() => []) };
+  }
+  if (name === "take_open_task") {
+    // The phone is bound server-side, so this can only ever claim work for the
+    // person the agent is talking to.
+    return await market.claimTask(String(args.order_id), phone);
+  }
   if (name === "wallet_link") {
     // The phone is bound server-side, so the model cannot mint a link for
     // anyone but the person it is talking to.

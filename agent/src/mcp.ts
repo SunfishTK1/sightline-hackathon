@@ -162,6 +162,16 @@ export const market = {
    * Completed tasks with no clip yet. Delivery waits on the relay learning to
    * carry video; until then these are generated and stored.
    */
+  /** Tasks anyone may pick up, and claiming one. */
+  openTasks: () =>
+    get<Array<{ id: string; title: string; details: string; budget_usd: string | null }>>(
+      "/v1/orders/claimable",
+    ),
+  claimTask: (orderId: string, phone: string) =>
+    post<{ status?: string; error?: string; title?: string }>(
+      `/v1/orders/${orderId}/claim`, { phone },
+    ),
+
   /** Everyone who can be sent something right now. */
   activeWorkers: () =>
     get<Array<{ phone: string; display_name: string | null }>>("/v1/workers/active"),

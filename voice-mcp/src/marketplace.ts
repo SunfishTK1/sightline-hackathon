@@ -79,7 +79,10 @@ export async function resolveOffer(
   const order = await pool.query(
     `UPDATE orders
         SET status = 'accepted', accepted_by = $2, accepted_at = now(), updated_at = now(),
-            budget_usd = COALESCE(NULLIF($3, 0), budget_usd)
+            -- $3::numeric, or Postgres infers integer from the literal 0 and
+            -- an offered price of "200.00" fails to parse - which silently
+            -- broke accepting any offer whose price was not a whole number.
+            budget_usd = COALESCE(NULLIF($3::numeric, 0), budget_usd)
       WHERE id = $1
         AND accepted_by IS NULL
         AND status IN ('submitted', 'offered')
@@ -1149,6 +1152,73 @@ export async function blockOrder(orderId: string, reason: string) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Someone says they will do a task nobody offered them.
+ *
+ * The film broadcast tells every active tasker "text me if you'll take it",
+ * which is a call to action with nothing behind it unless they can actually
+ * take it. This creates the offer and accepts it in one step - the person
+ * volunteered, so there is nothing left to ask them.
+ */
+export async function claimTask(orderId: string, workerPhone: string) {
+  const e164 = normalizePhone(workerPhone);
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.status, o.budget_usd, o.person_id, p.phone AS requester_phone
+       FROM orders o JOIN people p ON p.id = o.person_id
+      WHERE o.id = $1`,
+    [orderId],
+  );
+  const order = rows[0];
+  if (!order) return { error: "no_such_task" as const };
+  if (order.requester_phone === e164) return { error: "thats_your_own_task" as const };
+  if (!["submitted", "offered", "no_takers"].includes(order.status)) {
+    return { error: "not_available" as const, status: order.status };
+  }
+
+  const worker = await upsertPerson(e164);
+  // Someone actively volunteering beats someone sitting on an unanswered ask.
+  // Without this the claim fails on the order's own pending offer and the
+  // volunteer is told no, which is how Daphne was refused a job she offered
+  // to do twice.
+  await pool.query(
+    `UPDATE job_offers SET status = 'cancelled', responded_at = now()
+      WHERE order_id = $1 AND phone <> $2 AND status IN ('offered', 'countered')`,
+    [order.id, e164],
+  );
+  // Reuse their existing offer if one is already open to them; otherwise make
+  // one so there is a row to accept and to settle against later.
+  const { rows: offerRows } = await pool.query(
+    `INSERT INTO job_offers (order_id, person_id, phone, status, reason, offered_usd, outreach_sent_at)
+     VALUES ($1,$2,$3,'offered','They volunteered for it.',$4, now())
+     ON CONFLICT (order_id, phone) DO UPDATE
+       SET status = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+                         THEN 'offered' ELSE job_offers.status END
+     RETURNING id, status`,
+    [order.id, worker.id, e164, order.budget_usd ?? null],
+  );
+  const offer = offerRows[0];
+  if (!offer) return { error: "could_not_offer" as const };
+  if (offer.status === "accepted") {
+    // Their offer says accepted but the task may not have caught up - that
+    // split is exactly what a non-transactional accept leaves behind. Finish
+    // the job rather than reporting success on half of it.
+    if (order.status !== "accepted") {
+      await pool.query(
+        `UPDATE orders
+            SET status = 'accepted', accepted_by = $2, accepted_at = COALESCE(accepted_at, now()),
+                updated_at = now()
+          WHERE id = $1 AND status IN ('submitted', 'offered', 'no_takers')`,
+        [order.id, worker.id],
+      );
+    }
+    return { status: "already_yours" as const, order_id: order.id, title: order.title };
+  }
+
+  const taken = await resolveOffer(offer.id, true, e164);
+  if (taken.error) return { error: "not_available" as const, detail: taken.error };
+  return { status: "accepted" as const, order_id: order.id, title: order.title, offer_id: offer.id };
 }
 
 /** Take one person out of the worker pool entirely. */

@@ -9,7 +9,7 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
-  cancelOrder, blockOrder, receiveAndPay, recordNoMatch,
+  cancelOrder, blockOrder, receiveAndPay, claimTask, recordNoMatch,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
@@ -246,6 +246,26 @@ app.get("/v1/workers/active", async (_req, res) => {
        JOIN people p ON p.id = w.person_id
       WHERE w.is_available AND p.phone_verified
       ORDER BY w.updated_at DESC`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+/**
+ * Tasks a volunteer could still take. Deliberately wider than /v1/orders/open,
+ * which the matcher uses and which hides anything already put to one person:
+ * the film broadcast advertises a task to every active tasker, so somebody
+ * answering it has to be able to find it even while another person is sitting
+ * on an unanswered offer.
+ */
+app.get("/v1/orders/claimable", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.deadline_at, o.budget_usd, o.urgency, o.created_at, p.phone AS requester_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+      WHERE o.status IN ('submitted', 'offered', 'no_takers')
+      ORDER BY o.created_at DESC
+      LIMIT 20`,
   );
   res.json({ ok: true, data: rows });
 });
@@ -969,6 +989,22 @@ app.post("/v1/orders/:id/film", async (req, res) => {
     ok: true,
     data: { queued: true, railcoins: fee, signature: charge.signature, title: order.title },
   });
+});
+
+/** Someone volunteering for a task nobody offered them. */
+app.post("/v1/orders/:id/claim", async (req, res) => {
+  const phone = req.body?.phone;
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    const result = await claimTask(req.params.id, String(phone));
+    if ("error" in result && result.error) {
+      return res.status(409).json({ ok: false, error: result.error });
+    }
+    console.log(`claimed ${req.params.id} by ${phone}`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 /** Call a task off, telling anyone who was holding it. */
