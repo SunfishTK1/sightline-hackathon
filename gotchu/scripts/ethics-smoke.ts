@@ -7,6 +7,10 @@
 import { reviewTask, reviewAmendment, arbitrateMove } from "../lib/agents/ethics";
 import {
   MOCK_ALCOHOL_21,
+  MOCK_COFFEE_BARTER,
+  MOCK_COFFEE_FOOD_RUN,
+  MOCK_MONEY_AND_COFFEES,
+  MOCK_REQUESTER_COFFEES_OPEN_PRICE,
   MOCK_ARBITRATE_COLOR_AND_PRICE,
   MOCK_ARBITRATE_DINING_ID,
   MOCK_ARBITRATE_PRICE_ONLY,
@@ -49,6 +53,38 @@ async function main() {
     "2b reviewTask beer delivery at 21 BLOCK controlled_substances",
     alcohol.verdict === "BLOCK" && alcohol.categories.includes("controlled_substances"),
     alcohol,
+  );
+
+  const barter = await reviewTask(MOCK_COFFEE_BARTER);
+  check(
+    "2c reviewTask 5 coffees barter BLOCK financial_risk",
+    barter.verdict === "BLOCK" && barter.categories.includes("financial_risk"),
+    barter,
+  );
+
+  const requesterBarter = await reviewAmendment(
+    MOCK_FENCE_WHITE,
+    MOCK_REQUESTER_COFFEES_OPEN_PRICE,
+  );
+  check(
+    "2d reviewAmendment requester adds 5 coffees + open price REJECT",
+    requesterBarter.verdict === "REJECT",
+    requesterBarter,
+  );
+
+  const moneyAndCoffee = await reviewTask(MOCK_MONEY_AND_COFFEES);
+  check(
+    "2e reviewTask $40 and 5 coffees BLOCK (no mixed pay)",
+    moneyAndCoffee.verdict === "BLOCK" &&
+      moneyAndCoffee.categories.includes("financial_risk"),
+    moneyAndCoffee,
+  );
+
+  const coffeeRun = await reviewTask(MOCK_COFFEE_FOOD_RUN);
+  check(
+    "2f reviewTask pick up coffees for USD ALLOW or ALLOW_WITH_CONDITIONS",
+    coffeeRun.verdict === "ALLOW" || coffeeRun.verdict === "ALLOW_WITH_CONDITIONS",
+    coffeeRun,
   );
 
   const navy = await reviewAmendment(MOCK_FENCE_WHITE, MOCK_FENCE_NAVY);

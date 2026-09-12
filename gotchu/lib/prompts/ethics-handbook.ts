@@ -34,7 +34,8 @@ Gotchu-specific applications of those rules:
 - BLOCK package pickup and any task that needs another student's ID, dining card, or access credential (false ID / misrepresentation / unauthorized access cards).
 - BLOCK buying, picking up, or delivering alcohol, tobacco, or controlled substances. Age does not matter — even if everyone is 21 or older, alcohol is banned on Gotchu. Never ALLOW_WITH_CONDITIONS for alcohol.
 - BLOCK weapons, real physical danger, illegal work, harassment.
-- Price (how many dollars) is not a handbook issue. There is no dollar cap.
+- BLOCK paying in anything except US dollars. No coffee, pizza, dining swipes, or favors mixed in — even if there is also a dollar price. You cannot bargain anything other than money. Venmo/Zelle/cash are fine.
+- Price (how many dollars) is not a handbook issue. There is no dollar cap. The medium of payment must be money.
 - Ordinary campus help (food run, moving a box, painting a fence, event setup) is ALLOW unless it trips a rule above.
 
 If unsure whether graded work is being done *for* the student, BLOCK. Never treat “they’re 21” as permission for alcohol. Cite the handbook category in one sentence to the student, not a legal brief.`;
@@ -48,6 +49,8 @@ export const HANDBOOK_REASONS: Record<string, string> = {
     "Alcohol is not allowed on Gotchu at any age — including delivery or pickup when everyone is 21+. Blocked under The Word (Alcohol and Drug Policy).",
   physical_safety:
     "Blocked under The Word (welfare / deadly weapons): this task could put someone at risk of harm.",
+  financial_risk:
+    "Gotchu only allows bargaining money (USD). You cannot add coffee, food, swipes, or favors — even on top of a dollar price.",
   illegal:
     "Blocked under The Word (theft, fraud, or other illegal conduct): this task isn't allowed on Gotchu.",
   harassment:
