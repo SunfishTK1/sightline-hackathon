@@ -361,7 +361,7 @@ Output of the gate:
 ```
 
 Gate rubric:
-- **BLOCK** — graded work done *for* them (unauthorized assistance); **package pickup** (needs the other person's ID); **alcohol at any age** (buy / pick up / deliver — 21+ does not make it allowed); tobacco/controlled substances; impersonation / “use my ID”; illegal; meaningful physical danger.
+- **BLOCK** — graded work done *for* them (unauthorized assistance); **package pickup** (needs the other person's ID); **alcohol at any age**; **barter** (coffee, pizza, swipes, favors — USD only); tobacco/controlled substances; impersonation / “use my ID”; illegal; meaningful physical danger.
 - **ALLOW_WITH_CONDITIONS** — private residence; tutoring (*concept explanation* only, not *doing the work*).
 - **ALLOW** — food runs, moving help, errands, event help, same-job work like painting a fence.
 

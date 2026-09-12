@@ -196,6 +196,12 @@ export async function ensureSchema(): Promise<void> {
       created_at  timestamptz NOT NULL DEFAULT now()
     );
 
+    -- The clips live in object storage now; the row keeps the key. The inline
+    -- column stays for ones already stored that way, so it becomes optional.
+    ALTER TABLE order_videos ADD COLUMN IF NOT EXISTS storage_key text;
+    ALTER TABLE order_videos ALTER COLUMN mp4 DROP NOT NULL;
+    ALTER TABLE order_videos ADD COLUMN IF NOT EXISTS bytes int;
+
     CREATE TABLE IF NOT EXISTS payments (
       id                    bigserial PRIMARY KEY,
       order_id              uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,

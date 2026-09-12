@@ -102,7 +102,7 @@ type EthicsCategory =
   | "none"
 ```
 
-**BLOCK:** graded work (papers, quizzes, exams, problem sets done *for* them) — CMU Academic Integrity / unauthorized assistance; **package pickup** (The Word: false ID / misrepresentation / unauthorized access credentials); **alcohol at any age** (buy / pick up / deliver — being 21+ does not allow it); tobacco/controlled substances; impersonation / “use my ID”; illegal; real physical danger.
+**BLOCK:** graded work done *for* them; **package pickup**; **alcohol at any age**; **barter / non-money pay** (5 coffees, pizza, dining swipes — USD only); tobacco/controlled substances; impersonation / “use my ID”; illegal; real physical danger.
 
 Decisions cite a distilled Student Handbook (“The Word”) in `gotchu/lib/prompts/ethics-handbook.ts`, not the full copyrighted handbook.
 

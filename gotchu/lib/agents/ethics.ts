@@ -10,7 +10,7 @@ import type {
   EthicsCategory,
   EthicsVerdict,
 } from "@/lib/types/ethics";
-import { matchDenylist } from "@/lib/prompts/ethics-denylist";
+import { matchDenylist, looksLikeOpenPriceBarter } from "@/lib/prompts/ethics-denylist";
 import { HANDBOOK_REASONS } from "@/lib/prompts/ethics-handbook";
 
 const PRICE_FIELDS = new Set(["maxPriceUsd", "estimatedMinutes"]);
@@ -63,6 +63,9 @@ function handbookBlockReason(
   categories: EthicsCategory[],
   structuredBlob: string,
 ): string {
+  if (categories.includes("financial_risk")) {
+    return HANDBOOK_REASONS.financial_risk;
+  }
   if (categories.includes("controlled_substances")) {
     return HANDBOOK_REASONS.controlled_substances;
   }
@@ -129,10 +132,16 @@ function heuristicReview(structured: StructuredTask): EthicsVerdict {
 export async function reviewTask(
   structured: StructuredTask,
 ): Promise<EthicsVerdict> {
-  const hits = matchDenylist(blob(structured));
+  const text = blob(structured);
+  const hits = matchDenylist(text);
   if (hits.length) {
-    const text = blob(structured);
     return blockVerdict(hits, handbookBlockReason(hits, text));
+  }
+  if (looksLikeOpenPriceBarter(text, structured.maxPriceUsd, structured.category)) {
+    return blockVerdict(
+      ["financial_risk"],
+      HANDBOOK_REASONS.financial_risk,
+    );
   }
   return heuristicReview(structured);
 }
@@ -145,7 +154,33 @@ export async function reviewAmendment(
   const proposedText = blob(proposedStructured);
   const changes = nonPriceDiffs(originalStructured, proposedStructured);
 
-  const newHits = matchDenylist(proposedText).filter(
+  const proposedHits = matchDenylist(proposedText);
+  const barter =
+    proposedHits.includes("financial_risk") ||
+    looksLikeOpenPriceBarter(
+      proposedText,
+      proposedStructured.maxPriceUsd,
+      proposedStructured.category,
+    );
+
+  if (barter || proposedHits.includes("controlled_substances") || proposedHits.includes("credential_misuse") || proposedHits.includes("academic_integrity") || proposedHits.includes("illegal") || proposedHits.includes("physical_safety") || proposedHits.includes("harassment")) {
+    return {
+      verdict: "REJECT",
+      sameTask: false,
+      allowedChanges: [],
+      rejectedChanges: changes.map((c) => ({
+        ...c,
+        why: barter
+          ? "Payment must be money (USD), not coffee or other barter."
+          : "Change introduces a blocked ethics issue.",
+      })),
+      reason: barter
+        ? HANDBOOK_REASONS.financial_risk
+        : "Keep the original job. This edit is not allowed.",
+    };
+  }
+
+  const newHits = proposedHits.filter(
     (c) => !matchDenylist(originalText).includes(c),
   );
   const identityBreak =

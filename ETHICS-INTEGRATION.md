@@ -11,7 +11,7 @@ Do **not** copy the deny-list or rewrite the rubric. Call Daphne’s functions (
 
 ## Policy you must respect
 
-- **Price is the only thing agents exchange.** No dollar cap.
+- Price is the only thing agents exchange. **USD only** — no coffee, pizza, swipes, or favors, even *on top of* a dollar price. No dollar cap.
 - Same job may flex (fence white → navy). The job may not become a different job.
 - **Package pickup is BLOCKED** (needs someone else’s ID). Happy-path demo = food run or paint a fence, **not** UC package pickup.
 - Graded work, **alcohol at any age** (including 21+ delivery), drugs, fake IDs, weapons, illegal/dangerous work → **BLOCK**.

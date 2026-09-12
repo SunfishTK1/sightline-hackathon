@@ -383,22 +383,35 @@ app.get("/v1/orders/:id/offer-holders", async (req, res) => {
 });
 
 app.post("/v1/orders/:id/video", async (req, res) => {
-  const { mp4_base64, prompt, seconds } = req.body ?? {};
-  if (!mp4_base64) return res.status(400).json({ ok: false, error: "mp4_base64 is required" });
-  const bytes = Buffer.from(mp4_base64, "base64").length;
+  const { mp4_base64, storage_key, bytes: reportedBytes, prompt, seconds } = req.body ?? {};
+  if (!mp4_base64 && !storage_key) {
+    return res.status(400).json({ ok: false, error: "storage_key or mp4_base64 is required" });
+  }
+
+  // Preferred: the bytes are already in the bucket and only the key is kept.
+  // The inline form stays for anything not going through storage.
+  const bytes = storage_key
+    ? Number(reportedBytes) || null
+    : Buffer.from(mp4_base64, "base64").length;
+
   await pool.query(
-    `INSERT INTO order_videos (order_id, mp4, prompt, seconds)
-     VALUES ($1, decode($2,'base64'), $3, $4)
+    `INSERT INTO order_videos (order_id, mp4, storage_key, bytes, prompt, seconds)
+     VALUES ($1, CASE WHEN $2::text IS NULL THEN NULL ELSE decode($2,'base64') END, $3, $4, $5, $6)
      ON CONFLICT (order_id) DO UPDATE
-       SET mp4 = EXCLUDED.mp4, prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
-    [req.params.id, mp4_base64, prompt ?? null, seconds ?? null],
+       SET mp4 = EXCLUDED.mp4, storage_key = EXCLUDED.storage_key, bytes = EXCLUDED.bytes,
+           prompt = EXCLUDED.prompt, seconds = EXCLUDED.seconds`,
+    [req.params.id, mp4_base64 ?? null, storage_key ?? null, bytes, prompt ?? null, seconds ?? null],
   );
-  res.json({ ok: true, data: { order_id: req.params.id, bytes } });
+  res.json({ ok: true, data: { order_id: req.params.id, bytes, storage_key: storage_key ?? null } });
 });
 
 app.get("/v1/orders/:id/video", async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT encode(mp4,'base64') AS mp4_base64, seconds, delivered_at, octet_length(mp4) AS bytes
+    // Only inline the bytes for rows that predate object storage; once there is
+    // a key, the caller reads the clip from the bucket instead.
+    `SELECT storage_key, seconds, delivered_at,
+            COALESCE(bytes, octet_length(mp4)) AS bytes,
+            CASE WHEN storage_key IS NULL THEN encode(mp4,'base64') END AS mp4_base64
        FROM order_videos WHERE order_id = $1`,
     [req.params.id],
   );

@@ -6,6 +6,7 @@ import {
   counterOffer, respondToCounter, listOpenCounters,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
   markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
+  blockOrder,
 } from "./marketplace.js";
 import { ensureWallet } from "./wallet.js";
 
@@ -609,7 +610,9 @@ tools.push({
               dropoff_location: current.original_structured.dropoffLocation,
             }
           : current;
-        const amendment = await reviewAmendment(original, { ...current, details });
+        const proposed = { ...current, details };
+
+        const amendment = await reviewAmendment(original, proposed);
         if (amendment?.verdict === "REJECT") {
           return {
             error: "same_task_check_failed",
@@ -618,6 +621,42 @@ tools.push({
               "That edit changes what the job is, not just its terms. Cancel this one and post the new task.",
           };
         }
+
+        // "Still the same task" is not the same question as "still allowed".
+        // An edit can keep the shape of the job - a pickup is still a pickup -
+        // while changing what is actually being fetched, so the amended task
+        // goes back through the gate itself, not just the same-task check.
+        const reviewed = await reviewTask(proposed);
+        if (reviewed?.verdict === "BLOCK") {
+          const reason = reviewed.reason ?? "That change cannot be listed.";
+          await blockOrder(order_id, reason);
+          return {
+            error: "blocked_after_edit",
+            blocked: true,
+            reason,
+            categories: reviewed.categories ?? [],
+            say: "Tell them the change cannot be listed and why. The task is pulled, and anyone holding it has been told. Do not offer a way around it.",
+          };
+        }
+        if (!reviewed && ethicsConfigured()) {
+          // Refuse the edit rather than apply one nobody reviewed.
+          return {
+            error: "review_unavailable",
+            reason: "That change could not be reviewed just now, so it has not been applied. Try again in a moment.",
+          };
+        }
+
+        // Record what the gate said about the version that is now live.
+        await pool.query(
+          `UPDATE orders SET ethics_verdict = $2, ethics_reason = $3, ethics_conditions = $4::jsonb
+            WHERE id = $1`,
+          [
+            order_id,
+            reviewed?.verdict ?? null,
+            reviewed?.reason ?? null,
+            JSON.stringify(reviewed?.conditions ?? []),
+          ],
+        );
       }
     }
 
