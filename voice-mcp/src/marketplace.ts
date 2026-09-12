@@ -483,6 +483,38 @@ export async function confirmTaskDone(
   return { status: "completed", payment: payment.rows[0], settlement };
 }
 
+/**
+ * The requester says it arrived, and pays, in one step.
+ *
+ * The two-step handshake exists so a worker cannot declare themselves paid.
+ * That reason disappears when it is the requester acting: their word that they
+ * received it is the confirmation, and it is their money. So this marks the
+ * job done on the worker's behalf if they have not already, then confirms it.
+ *
+ * Both phones come from the order itself rather than the caller, so whoever
+ * calls this cannot name a different requester or redirect the payment.
+ */
+export async function receiveAndPay(orderId: string) {
+  const { rows } = await pool.query(
+    `SELECT o.status, p.phone AS requester_phone, w.phone AS worker_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+      WHERE o.id = $1`,
+    [orderId],
+  );
+  const order = rows[0];
+  if (!order) return { error: "no_such_task" as const };
+  if (order.status === "completed") return { error: "already_paid" as const };
+  if (!order.worker_phone) return { error: "nobody_has_taken_it" as const };
+
+  if (order.status === "accepted") {
+    const marked = await markTaskDone(orderId, order.worker_phone);
+    if (marked.error) return { error: "could_not_mark_done" as const, detail: marked.error };
+  }
+  return confirmTaskDone(orderId, order.requester_phone, true);
+}
+
 /** Jobs marked done that the requester has not answered yet. */
 export async function listAwaitingConfirmation(requesterPhone: string) {
   const { rows } = await pool.query(

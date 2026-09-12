@@ -9,7 +9,7 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
-  cancelOrder, blockOrder,
+  cancelOrder, blockOrder, receiveAndPay,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
@@ -804,6 +804,20 @@ app.post("/v1/dev/close-all", async (_req, res) => {
     res.status(500).json({ ok: false, error: (err as Error).message });
   } finally {
     client.release();
+  }
+});
+
+/** One click from the requester: it arrived, pay them. */
+app.post("/v1/orders/:id/received", async (req, res) => {
+  try {
+    const result = await receiveAndPay(req.params.id);
+    if ("error" in result && result.error) {
+      return res.status(409).json({ ok: false, error: result.error });
+    }
+    console.log(`received+paid ${req.params.id}`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 
