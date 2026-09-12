@@ -38,6 +38,13 @@ export interface LiveEvent {
   createdAt: string;
 }
 
+export interface LiveMessage {
+  id: string;
+  author: "requester" | "worker" | "gotchu";
+  body: string;
+  createdAt: string;
+}
+
 export type LiveMediaStatus = "pending" | "generating" | "ready" | "failed";
 
 export interface LiveMediaInfo {
@@ -57,6 +64,7 @@ export interface LiveBoardView {
   offerTimeoutMs: number;
   candidates: LiveCandidate[];
   events: LiveEvent[];
+  messages: LiveMessage[];
   headline: string;
   canSkip: boolean;
   media: {
@@ -481,7 +489,17 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
     created_at: Date;
   }>(
     `SELECT id, kind, message, slot, created_at
-     FROM live_events WHERE token = $1 ORDER BY created_at DESC LIMIT 20`,
+     FROM live_events WHERE token = $1 ORDER BY created_at DESC LIMIT 40`,
+    [token],
+  );
+  const chats = await query<{
+    id: string;
+    author: LiveMessage["author"];
+    body: string;
+    created_at: Date;
+  }>(
+    `SELECT id, author, body, created_at
+     FROM live_messages WHERE token = $1 ORDER BY created_at ASC LIMIT 80`,
     [token],
   );
   const media = await loadMediaInfo(token);
@@ -507,6 +525,12 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
       message: event.message,
       slot: event.slot,
       createdAt: event.created_at.toISOString(),
+    })),
+    messages: chats.rows.map((row) => ({
+      id: row.id,
+      author: row.author,
+      body: row.body,
+      createdAt: row.created_at.toISOString(),
     })),
     media,
     headline: "",
@@ -566,6 +590,9 @@ async function enforceOneAsking(token: string): Promise<void> {
 function headlineFor(board: LiveBoardView): string {
   if (board.status === "agreed") return "Someone took the job.";
   if (board.status === "stopped") return "We stopped looking.";
+  const active = board.candidates.find((candidate) =>
+    ["considering", "waiting", "countered"].includes(candidate.state),
+  );
   const latest = board.events.find((event) =>
     [
       "need_time",
@@ -577,14 +604,17 @@ function headlineFor(board: LiveBoardView): string {
       "considering",
       "timeout",
       "skipped",
+      "queued",
     ].includes(event.kind),
   );
-  if (latest?.kind === "need_time") return "They asked for a later time.";
-  if (latest?.kind === "question_asked") return "They asked a question.";
-  const active = board.candidates.find((candidate) =>
-    ["considering", "waiting", "countered"].includes(candidate.state),
-  );
-  if (!active) return "Finding the next person.";
+  // A requester deadline on submit used to land as need_time before anyone
+  // was asked. That copy is only true if someone is actually on the line.
+  if (latest?.kind === "need_time" && active) return "They asked for a later time.";
+  if (latest?.kind === "question_asked" && active) return "They asked a question.";
+  if (!active) {
+    if (latest?.kind === "queued") return "Lining someone up.";
+    return "Looking for someone.";
+  }
   if (active.state === "countered") return "Counter offer sent.";
   if (active.state === "waiting") return "Waiting to hear back.";
   return "Asking someone now.";
@@ -787,4 +817,21 @@ export async function liveBoardJob(token: string): Promise<{
     title: row.title,
     category: row.category,
   };
+}
+
+export async function addLiveMessage(input: {
+  token?: string;
+  orderId?: string;
+  author: LiveMessage["author"];
+  body: string;
+}): Promise<LiveBoardView | null> {
+  const token = input.token ?? (await tokenForOrder(input.orderId));
+  if (!token) return null;
+  const body = input.body.trim().slice(0, 1000);
+  if (!body) return loadLiveBoard(token);
+  await query(
+    `INSERT INTO live_messages (id, token, author, body) VALUES ($1,$2,$3,$4)`,
+    [newId("lm"), token, input.author, body],
+  );
+  return loadLiveBoard(token);
 }

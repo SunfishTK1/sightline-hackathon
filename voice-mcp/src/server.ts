@@ -259,6 +259,8 @@ app.get("/v1/workers/active", async (_req, res) => {
        FROM worker_profiles w
        JOIN people p ON p.id = w.person_id
       WHERE w.is_available AND p.phone_verified
+        AND p.phone NOT LIKE '+1412555%'
+        AND p.phone NOT LIKE '+1555%'
       ORDER BY w.updated_at DESC`,
   );
   res.json({ ok: true, data: rows });
@@ -317,6 +319,8 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
         -- unaffected.
         AND (wp.email IS NULL OR COALESCE((wp.doc->>'emailVerified')::boolean, false))
         AND w.person_id <> o.person_id
+        AND wp.phone NOT LIKE '+1412555%'
+        AND wp.phone NOT LIKE '+1555%'
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
            WHERE j.order_id = o.id AND j.phone = w.phone
@@ -1113,6 +1117,49 @@ app.post("/v1/orders/:id/claim", async (req, res) => {
   }
 });
 
+/**
+ * Pass a live-page chat line to the other person by SMS. The board stays
+ * anonymous until someone has taken the job; after that this is how they
+ * keep talking until it is done.
+ */
+app.post("/v1/orders/:id/relay-chat", async (req, res) => {
+  const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+  const to = req.body?.to === "requester" ? "requester" : "worker";
+  if (!body) return res.status(400).json({ ok: false, error: "body is required" });
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.status, p.id AS requester_id, p.phone AS requester_phone,
+            w.id AS worker_id, w.phone AS worker_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+      WHERE o.id = $1`,
+    [req.params.id],
+  );
+  const order = rows[0];
+  if (!order) return res.status(404).json({ ok: false, error: "no such order" });
+  if (!["accepted", "done_pending"].includes(order.status)) {
+    return res.status(409).json({ ok: false, error: "chat_closed" });
+  }
+  const target =
+    to === "requester"
+      ? { id: order.requester_id, phone: order.requester_phone }
+      : { id: order.worker_id, phone: order.worker_phone };
+  if (!target.id || !target.phone) {
+    return res.status(409).json({ ok: false, error: "nobody_to_text" });
+  }
+  await pool.query(
+    `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+     VALUES ($1,$2,$3,'live_chat',$4::jsonb)`,
+    [
+      target.id,
+      target.phone,
+      order.id,
+      JSON.stringify({ title: order.title, body, from: to === "requester" ? "worker" : "requester" }),
+    ],
+  );
+  res.json({ ok: true, data: { sent: true } });
+});
+
 /** Call a task off, telling anyone who was holding it. */
 app.post("/v1/orders/:id/cancel", async (req, res) => {
   try {
@@ -1208,9 +1255,11 @@ app.get("/v1/orders/:id", async (req, res) => {
             o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
             o.film_requested_at, o.film_paid_signature,
             p.phone AS requester_phone,
+            w.display_name AS worker_name,
             pay.status AS payment_status, pay.solana_signature
        FROM orders o
        LEFT JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
        LEFT JOIN payments pay ON pay.order_id = o.id
       WHERE o.id = $1`,
     [req.params.id],

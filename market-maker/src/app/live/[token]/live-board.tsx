@@ -51,11 +51,29 @@ type Board = {
     message: string;
     createdAt: string;
   }>;
+  messages?: Array<{
+    id: string;
+    author: "requester" | "worker" | "gotchu";
+    body: string;
+    createdAt: string;
+  }>;
   media?: {
     image: MediaInfo;
     video: MediaInfo;
   };
 };
+
+const THEM_KINDS = new Set([
+  "countered",
+  "need_time",
+  "declined",
+  "question_asked",
+  "accepted",
+]);
+
+function eventSpeaker(kind?: string): "Them" | "Gotchu" {
+  return kind && THEM_KINDS.has(kind) ? "Them" : "Gotchu";
+}
 
 function remainingLabel(until: string | null, now: number): string | null {
   if (!until) return null;
@@ -141,11 +159,15 @@ export function LiveBoard({
   pickup,
   dropoff,
   money,
+  workerName,
+  chatOpen,
 }: {
   token: string;
   initial: Board;
   pickup?: string | null;
   dropoff?: string | null;
+  workerName?: string | null;
+  chatOpen?: boolean;
   money?: {
     railcoins: number | null;
     requesterBalance: number | null;
@@ -323,7 +345,19 @@ export function LiveBoard({
         status={taken ? "agreed" : board.status}
         deciding={deciding}
         onDecide={decide}
+        workerName={workerName}
+        chatOpen={Boolean(taken && chatOpen)}
       />
+
+      {taken ? (
+        <LiveChat
+          token={token}
+          workerName={workerName}
+          open={Boolean(chatOpen)}
+          messages={board.messages ?? []}
+          onPosted={setBoard}
+        />
+      ) : null}
 
       {money ? (
         <TaskMoney
@@ -351,22 +385,33 @@ export function LiveBoard({
 
       <section className="space-y-3">
         <div className="flex items-end justify-between">
-          <h2 className="text-lg font-semibold">Live updates</h2>
+          <h2 className="text-lg font-semibold">Correspondence</h2>
           <p className="max-w-[9rem] text-right text-[10px] leading-3 font-medium tracking-[0.12em] text-zinc-400 uppercase">
-            From texts as they happen
+            Counters, waits, and answers
           </p>
         </div>
         <ul className="space-y-3">
-          {board.events.map((event) => (
-            <li key={event.id} className="flex gap-2 text-sm text-zinc-600">
-              <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-              <p>
-                <span className="text-zinc-400">{eventTime(event.createdAt)}</span>
-                {eventTime(event.createdAt) ? " · " : ""}
-                {event.message}
-              </p>
-            </li>
-          ))}
+          {board.events.map((event) => {
+            const them = eventSpeaker(event.kind) === "Them";
+            return (
+              <li key={event.id} className="flex gap-2 text-sm text-zinc-600">
+                <span
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+                    them ? "bg-amber-500" : "bg-emerald-500"
+                  }`}
+                />
+                <p>
+                  <span className="text-zinc-400">{eventTime(event.createdAt)}</span>
+                  {eventTime(event.createdAt) ? " · " : ""}
+                  <span className="font-medium text-zinc-700">
+                    {them ? "Them" : "Gotchu"}
+                  </span>
+                  {" · "}
+                  {event.message}
+                </p>
+              </li>
+            );
+          })}
         </ul>
         <p className="pt-2 text-[10px] text-zinc-400">
           Stations from{" "}
@@ -390,11 +435,15 @@ function DealPanel({
   status,
   deciding,
   onDecide,
+  workerName,
+  chatOpen,
 }: {
   deal?: Deal;
   status: Board["status"];
   deciding: "accept" | "decline" | "cancel" | null;
   onDecide: (action: "accept" | "decline" | "cancel") => void;
+  workerName?: string | null;
+  chatOpen?: boolean;
 }) {
   if (status === "stopped") {
     return (
@@ -405,10 +454,19 @@ function DealPanel({
     );
   }
   if (status === "agreed") {
+    const name = workerName?.trim();
     return (
       <section className="rounded-[20px] border border-[#1f5c3a]/25 bg-[#1f5c3a]/5 px-4 py-3 sm:rounded-[28px] sm:px-5 sm:py-4">
-        <p className="text-sm font-semibold text-[#1f5c3a]">Someone took the job.</p>
-        <p className="mt-1 text-sm text-zinc-600">You&apos;re set — no more matching on this one.</p>
+        <p className="text-sm font-semibold text-[#1f5c3a]">
+          {name ? `Gotchu, ${name} is on it!` : "Someone took the job."}
+        </p>
+        <p className="mt-1 text-sm text-zinc-600">
+          {name && chatOpen
+            ? `You can continue to chat with ${name} through this live link until the task is completed.`
+            : name
+              ? `${name} finished this one.`
+              : "You're set — no more matching on this one."}
+        </p>
       </section>
     );
   }
@@ -579,6 +637,109 @@ function JobClip({
         <div className="h-1 bg-[#efeae1]">
           <div className="h-full bg-[#1f5c3a] transition-all" style={{ width: `${video.progress}%` }} />
         </div>
+      ) : null}
+    </section>
+  );
+}
+
+function LiveChat({
+  token,
+  workerName,
+  open,
+  messages,
+  onPosted,
+}: {
+  token: string;
+  workerName?: string | null;
+  open: boolean;
+  messages: NonNullable<Board["messages"]>;
+  onPosted: (board: Board) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const name = workerName?.trim() || "them";
+
+  async function send() {
+    const body = draft.trim();
+    if (!body || !open) return;
+    setSending(true);
+    try {
+      const response = await fetch(`/api/live/${token}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      if (response.ok) {
+        onPosted(await response.json());
+        setDraft("");
+      }
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <section className="min-w-0 overflow-hidden rounded-[20px] border border-[#e7e2d8] bg-white px-4 py-4 sm:rounded-[28px] sm:px-5 sm:py-5">
+      <h2 className="text-base font-semibold sm:text-lg">
+        {open ? `Chat with ${name}` : `Chat with ${name} is closed`}
+      </h2>
+      <p className="mt-1 text-sm text-zinc-500">
+        {open
+          ? "This thread stays open until the task is done. They get your notes by text."
+          : "This job is finished, so the thread is read-only."}
+      </p>
+      <ul className="mt-4 max-h-64 space-y-2 overflow-y-auto">
+        {messages.length === 0 ? (
+          <li className="text-sm text-zinc-400">No messages yet.</li>
+        ) : (
+          messages.map((message) => {
+            const mine = message.author === "requester";
+            return (
+              <li
+                key={message.id}
+                className={`flex ${mine ? "justify-end" : "justify-start"}`}
+              >
+                <p
+                  className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
+                    mine
+                      ? "bg-[#1f5c3a] text-white"
+                      : "bg-[#f3efe6] text-[#142016]"
+                  }`}
+                >
+                  <span className="block text-[10px] font-semibold tracking-[0.12em] uppercase opacity-70">
+                    {mine ? "You" : message.author === "gotchu" ? "Gotchu" : name}
+                    {eventTime(message.createdAt) ? ` · ${eventTime(message.createdAt)}` : ""}
+                  </span>
+                  {message.body}
+                </p>
+              </li>
+            );
+          })
+        )}
+      </ul>
+      {open ? (
+        <form
+          className="mt-4 flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void send();
+          }}
+        >
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder={`Message ${name}…`}
+            className="min-w-0 flex-1 rounded-full border border-[#d9d3c8] bg-white px-4 py-2.5 text-sm"
+            maxLength={1000}
+          />
+          <button
+            type="submit"
+            disabled={sending || !draft.trim()}
+            className="rounded-full bg-[#1f5c3a] px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </form>
       ) : null}
     </section>
   );

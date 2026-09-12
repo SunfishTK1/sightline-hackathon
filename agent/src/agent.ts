@@ -666,7 +666,8 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     // The phone is bound, so they can only answer counters on their own tasks.
     const result = await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
     const orderId = pending?.order_id;
-    if (orderId) {
+    const expectedStatus = args.accept ? "accepted" : "declined";
+    if (orderId && result.status === expectedStatus) {
       await postLiveEvent({
         orderId,
         kind: args.accept ? "accepted" : "countered",
@@ -690,8 +691,8 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (result?.id && args.deadline_at) {
       await postLiveEvent({
         orderId: String(args.request_id),
-        kind: "need_time",
-        message: "A new time was proposed.",
+        kind: "updated",
+        message: "The deadline was updated.",
       });
     } else if (result?.id && args.budget_usd > 0) {
       await postLiveEvent({
@@ -735,13 +736,16 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       return { status: "rejected_scope", say: verdict.messageHint };
     }
     const result = await market.respond(target.id, Boolean(args.accept), phone);
-    await postLiveEvent({
-      orderId: target.order_id,
-      kind: args.accept ? "accepted" : "declined",
-      message: args.accept ? "Someone took the job." : "They passed. Trying the next person.",
-      offerId: String(target.id),
-      state: args.accept ? "accepted" : "declined",
-    });
+    const expectedStatus = args.accept ? "accepted" : "declined";
+    if (result.status === expectedStatus) {
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: args.accept ? "accepted" : "declined",
+        message: args.accept ? "Someone took the job." : "They passed. Trying the next person.",
+        offerId: String(target.id),
+        state: args.accept ? "accepted" : "declined",
+      });
+    }
     return result;
   }
   throw new Error(`unknown tool ${name}`);
