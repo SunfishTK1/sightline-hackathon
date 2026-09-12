@@ -1,7 +1,8 @@
 import { mapCategory } from "./map-category";
 import type { TaskCategory } from "./types";
 
-type Place = { name: string; lat: number; lng: number; aliases: string[] };
+export type CampusPlace = { name: string; lat: number; lng: number; aliases: string[] };
+type Place = CampusPlace;
 
 /** Named CMU / nearby spots. Distances are haversine, times are campus-pace. */
 const PLACES: Place[] = [
@@ -83,6 +84,33 @@ export function resolvePlace(raw?: string | null): Place | null {
     }
   }
   return best;
+}
+
+export function findPlacesInText(text: string): Place[] {
+  const haystack = normalize(text);
+  const hits: Array<{ place: Place; index: number; len: number }> = [];
+  for (const place of PLACES) {
+    let bestIndex = -1;
+    let bestLen = 0;
+    for (const alias of [normalize(place.name), ...place.aliases]) {
+      if (!alias) continue;
+      const index = haystack.indexOf(alias);
+      if (index >= 0 && alias.length > bestLen) {
+        bestIndex = index;
+        bestLen = alias.length;
+      }
+    }
+    if (bestIndex >= 0) hits.push({ place, index: bestIndex, len: bestLen });
+  }
+  hits.sort((a, b) => a.index - b.index || b.len - a.len);
+  const seen = new Set<string>();
+  const ordered: Place[] = [];
+  for (const hit of hits) {
+    if (seen.has(hit.place.name)) continue;
+    seen.add(hit.place.name);
+    ordered.push(hit.place);
+  }
+  return ordered;
 }
 
 function haversineM(a: Place, b: Place): number {

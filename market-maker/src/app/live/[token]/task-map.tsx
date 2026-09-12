@@ -111,7 +111,7 @@ export function TaskMap({ points }: { points: MapPoint[] }) {
 
   return (
     <section className="mt-10">
-      <h2 className="text-sm font-medium tracking-wide text-zinc-500 uppercase">Where it runs</h2>
+      <h2 className="text-lg font-semibold">Where it runs</h2>
       <p className="mt-1 text-sm text-zinc-600">
         {points.map((p) => p.name).join(" → ")}
       </p>
@@ -120,7 +120,7 @@ export function TaskMap({ points }: { points: MapPoint[] }) {
       ) : (
         <div
           ref={elRef}
-          className="mt-3 h-[320px] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100"
+          className="mt-3 h-[320px] w-full overflow-hidden rounded-[28px] border border-[#e7e2d8] bg-[#eef2ea]"
         />
       )}
     </section>

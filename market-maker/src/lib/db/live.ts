@@ -214,6 +214,21 @@ export async function recordLiveEvent(input: {
     );
     slot = found.rows[0]?.slot;
   }
+  if (slot == null) {
+    const board = await loadLiveBoard(token);
+    if (board) slot = currentSlot(board) ?? undefined;
+  }
+
+  const exclusive = ["considering", "waiting", "countered"].includes(input.state ?? "");
+  if (slot != null && exclusive) {
+    await query(
+      `UPDATE live_candidates
+       SET state = 'dropped', waiting_until = NULL
+       WHERE token = $1 AND slot <> $2
+         AND state IN ('considering', 'waiting', 'countered')`,
+      [token, slot],
+    );
+  }
 
   if (slot != null && input.state) {
     await query(
@@ -242,7 +257,14 @@ export async function recordLiveEvent(input: {
     await query("UPDATE live_boards SET updated_at = NOW() WHERE token = $1", [token]);
   }
 
-  await insertEvent(token, input.kind, input.message, slot ?? null);
+  const last = await query<{ kind: string; message: string }>(
+    `SELECT kind, message FROM live_events
+     WHERE token = $1 ORDER BY created_at DESC LIMIT 1`,
+    [token],
+  );
+  const same =
+    last.rows[0]?.kind === input.kind && last.rows[0]?.message === input.message;
+  if (!same) await insertEvent(token, input.kind, input.message, slot ?? null);
   return loadLiveBoard(token);
 }
 
@@ -438,6 +460,21 @@ function currentSlot(board: LiveBoardView): number | null {
 function headlineFor(board: LiveBoardView): string {
   if (board.status === "agreed") return "Someone took the job.";
   if (board.status === "stopped") return "We stopped looking.";
+  const latest = board.events.find((event) =>
+    [
+      "need_time",
+      "question_asked",
+      "countered",
+      "accepted",
+      "declined",
+      "waiting",
+      "considering",
+      "timeout",
+      "skipped",
+    ].includes(event.kind),
+  );
+  if (latest?.kind === "need_time") return "They asked for a later time.";
+  if (latest?.kind === "question_asked") return "They asked a question.";
   const active = board.candidates.find((candidate) =>
     ["considering", "waiting", "countered"].includes(candidate.state),
   );

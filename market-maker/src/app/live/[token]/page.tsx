@@ -1,10 +1,8 @@
 import { notFound } from "next/navigation";
 import { ensureSchema } from "@/lib/db/schema";
 import { loadLiveBoard } from "@/lib/db/live";
-import { resolvePlace } from "@/lib/market/campus-travel";
+import { boardWithDeal } from "@/lib/live/deal";
 import { LiveBoard } from "./live-board";
-import { TaskMap, type MapPoint } from "./task-map";
-import { TaskMoney } from "./task-money";
 
 export const dynamic = "force-dynamic";
 
@@ -38,19 +36,33 @@ async function loadOrder(orderId: string): Promise<OrderDetail | null> {
   }
 }
 
-async function loadBalance(phone: string | null): Promise<number | null> {
-  if (!VOICE_MCP || !phone) return null;
+type WalletView = {
+  railcoins: number | null;
+  publicKey: string | null;
+  cluster: string | null;
+};
+
+async function loadWallet(phone: string | null): Promise<WalletView> {
+  const empty = { railcoins: null, publicKey: null, cluster: null };
+  if (!VOICE_MCP || !phone) return empty;
   try {
     const res = await fetch(`${VOICE_MCP}/v1/wallets/${encodeURIComponent(phone)}`, {
       cache: "no-store",
       signal: AbortSignal.timeout(6000),
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { ok?: boolean; data?: { balance_sol?: number } | null };
+    if (!res.ok) return empty;
+    const json = (await res.json()) as {
+      ok?: boolean;
+      data?: { balance_sol?: number; public_key?: string; cluster?: string } | null;
+    };
     const sol = json.data?.balance_sol;
-    return typeof sol === "number" ? Math.round(sol * RAILCOINS_PER_SOL) : null;
+    return {
+      railcoins: typeof sol === "number" ? Math.round(sol * RAILCOINS_PER_SOL) : null,
+      publicKey: json.data?.public_key ?? null,
+      cluster: json.data?.cluster ?? null,
+    };
   } catch {
-    return null;
+    return empty;
   }
 }
 
@@ -61,37 +73,31 @@ export default async function LivePage({
 }) {
   await ensureSchema();
   const { token } = await params;
-  const board = await loadLiveBoard(token);
-  if (!board) notFound();
+  const raw = await loadLiveBoard(token);
+  if (!raw) notFound();
+  const board = await boardWithDeal(raw);
 
   // Neither of these may fail the page: the board is the point, the map and
   // the money are context around it.
   const order = await loadOrder(board.orderId);
-  const balance = await loadBalance(order?.requester_phone ?? null);
-
-  const points: MapPoint[] = [];
-  const pickup = resolvePlace(order?.pickup_location);
-  const dropoff = resolvePlace(order?.dropoff_location);
-  if (pickup) points.push({ name: pickup.name, lat: pickup.lat, lng: pickup.lng, role: "pickup" });
-  if (dropoff && dropoff.name !== pickup?.name) {
-    points.push({ name: dropoff.name, lat: dropoff.lat, lng: dropoff.lng, role: "dropoff" });
-  }
+  const wallet = await loadWallet(order?.requester_phone ?? null);
 
   const railcoins = order?.budget_usd ? Math.round(Number(order.budget_usd)) : null;
 
   return (
-    <>
-      <LiveBoard token={token} initial={board} />
-      <div className="mx-auto w-full max-w-5xl px-6 pb-12">
-        <TaskMoney
-          token={token}
-          railcoins={railcoins}
-          requesterBalance={balance}
-          canPay={CLOSEABLE.has(order?.status ?? "")}
-          alreadyPaid={order?.status === "completed"}
-        />
-        <TaskMap points={points} />
-      </div>
-    </>
+    <LiveBoard
+      token={token}
+      initial={board}
+      pickup={order?.pickup_location}
+      dropoff={order?.dropoff_location}
+      money={{
+        railcoins,
+        requesterBalance: wallet.railcoins,
+        publicKey: wallet.publicKey,
+        cluster: wallet.cluster,
+        canPay: CLOSEABLE.has(order?.status ?? ""),
+        alreadyPaid: order?.status === "completed",
+      }}
+    />
   );
 }
