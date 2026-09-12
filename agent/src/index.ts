@@ -489,13 +489,20 @@ async function matchOpenOrders(): Promise<void> {
     const travelNote = pick.travel
       ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
       : undefined;
-    const offer = await market.createOffer(
-      order.id,
-      pick.phone,
-      pick.reason,
-      pick.offerUsd,
-      travelNote,
-    );
+    const offer = await market
+      .createOffer(
+        order.id,
+        pick.phone,
+        pick.reason,
+        pick.offerUsd,
+        travelNote,
+      )
+      .catch((err) => {
+        // Candidate data can go stale between ranking and the locked write.
+        // One raced order must not abort matching every other open request.
+        log(`could not offer "${order.title}" to ${pick.phone}: ${(err as Error).message}`);
+        return null;
+      });
     if (offer) {
       log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
       const offerId = String((offer as { id?: string }).id ?? "");
@@ -756,11 +763,17 @@ async function applyLiveSkips(): Promise<void> {
       const phone = order?.requester_phone;
       const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
       const countered = counters.find((c) => String(c.id) === String(skip.offerId));
+      let released = false;
       if (countered && phone) {
-        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null);
+        released = Boolean(
+          await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null),
+        );
       } else {
-        await market.respond(skip.offerId, false).catch(() => null);
+        released = Boolean(await market.respond(skip.offerId, false).catch(() => null));
       }
+      // Keep skip_requested set when the marketplace release fails so the
+      // next poll retries instead of showing a drop that never happened.
+      if (!released) continue;
       await postLiveEvent({
         orderId: skip.orderId,
         kind: "skipped",

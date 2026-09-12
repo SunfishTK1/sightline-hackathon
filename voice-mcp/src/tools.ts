@@ -678,6 +678,9 @@ tools.push({
   },
   handler: async ({ phone, order_id, budget_usd, deadline_at, details }) => {
     const e164 = normalizePhone(phone);
+    if (budget_usd == null && deadline_at == null && details == null) {
+      return { error: "Give a new price, deadline, or details to update this request." };
+    }
 
     // Price and deadline can move freely. Rewriting what the job *is* has to
     // clear the gate again, or a cleared task becomes a cover for a new one.
@@ -755,6 +758,11 @@ tools.push({
            JOIN people p ON p.id = o.person_id
           WHERE o.id = $1 AND p.phone = $2
             AND o.status IN ('submitted', 'offered', 'no_takers')
+            AND (
+              ($3::numeric IS NOT NULL AND o.budget_usd IS DISTINCT FROM $3::numeric)
+              OR ($4::timestamptz IS NOT NULL AND o.deadline_at IS DISTINCT FROM $4::timestamptz)
+              OR ($5::text IS NOT NULL AND o.details IS DISTINCT FROM $5::text)
+            )
           FOR UPDATE
        ),
        changed AS (
@@ -774,7 +782,6 @@ tools.push({
             SET status = 'superseded', responded_at = now()
            FROM changed c
           WHERE j.order_id = c.id
-            AND c.old_status = 'no_takers'
             AND j.status IN ('declined', 'dropped')
        )
        SELECT id, title, budget_usd, deadline_at, status FROM changed`,
