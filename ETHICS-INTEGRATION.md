@@ -5,7 +5,7 @@
 **Contract:** `ethics-arbitration-spec.md`  
 **On `main` now.** Pull before you wire anything.
 
-Do **not** copy the deny-list or rewrite the rubric. Call Daphne’s functions (or HTTP). If two of you would both call `arbitrateMove` on the same turn, **only the negotiate loop** should call it.
+Live path: `voice-mcp` HTTP `review` / `amendment`; `market-maker` HTTP `review` / `arbitrate`. Gotchu-internal code may import the functions. **Do not** copy the deny-list or rewrite the rubric. If two of you would both call `arbitrateMove` on the same turn, **only the negotiate loop** should call it.
 
 ---
 
@@ -149,15 +149,15 @@ Set `ethicsFlag` on the review doc. Do not add a $50 money cap. Do not treat pac
 
 | Function | Who | When |
 |---|---|---|
-| `reviewTask(structured)` | Thomas (Divya if she creates tasks) | Before `OPEN` |
-| `reviewAmendment(original, proposed)` | Thomas | Compose field edits |
-| `arbitrateMove(input)` | **Divya’s loop only** | Each offer/counter |
+| `reviewTask(structured)` | `voice-mcp` `submit_order`; market-maker quote (and Thomas if he creates tasks in Gotchu) | Before the request can be matched |
+| `reviewAmendment(original, proposed)` | `voice-mcp` `update_order` when **details** change | Same-job check; `REJECT` keeps the original listing |
+| `arbitrateMove(input)` | **market-maker evaluate only** | Each offer/counter |
 | `reviewComment(comment)` | Will | After a review comment |
 
-HTTP (same behavior, for `agent/` / `market-maker`):
+HTTP (same behavior):
 
 - `POST /api/ethics/review`
-- `POST /api/ethics/amendment`
+- `POST /api/ethics/amendment` — `{ original, proposed }` **or** `{ originalStructured, proposedStructured }`
 - `POST /api/ethics/arbitrate`
 
 Bodies and responses use `{ ok: true, data }` / `{ ok: false, error }`.

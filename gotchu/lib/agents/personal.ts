@@ -26,7 +26,7 @@ export type NextMoveArgs = {
 };
 
 export async function nextMove(args: NextMoveArgs): Promise<NegotiationMessage> {
-  // TODO(Thomas): negotiate brain; Daphne calls this inside her loop
+  // TODO(Thomas): negotiate brain; market-maker / agent loop calls this; Daphne referees with arbitrateMove
   void args;
   return {
     round: 1,

@@ -1,6 +1,8 @@
 /**
  * @owner Daphne
- * Ethics + arbitration — reviewTask, reviewAmendment, arbitrateMove, reviewComment
+ * Ethics + arbitration agent — reviewTask, reviewAmendment, arbitrateMove,
+ * reviewComment, parseEthicsStructured. Live HTTP: /api/ethics/*.
+ * Callers (voice-mcp, market-maker) must not copy the deny-list.
  */
 import type { StructuredTask, TaskCategory } from "@/lib/types/task";
 import type {

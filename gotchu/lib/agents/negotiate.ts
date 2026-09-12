@@ -1,6 +1,7 @@
 /**
  * @owner Daphne
- * Negotiation loop — runNegotiation (max 3 rounds / 6 LLM calls / 20s)
+ * Leftover web negotiate stub. The live loop is Divya's (`agent/` / market-maker).
+ * Daphne referees that loop via `arbitrateMove` / `POST /api/ethics/arbitrate`.
  */
 import type { Task } from "@/lib/types/task";
 import type { User } from "@/lib/types/user";
@@ -31,7 +32,7 @@ export async function runNegotiation(
   task: Task,
   worker: User,
 ): Promise<Offer> {
-  // TODO(Daphne): bounded loop calling Thomas's nextMove; start with mockNextMove
+  // TODO(leftover): web stub only; live loop is agent/ (Divya)
   void worker;
   const transcript = MOCK_NEGOTIATION_OFFER.transcript;
   const settled = outcomeFromTranscript(transcript);

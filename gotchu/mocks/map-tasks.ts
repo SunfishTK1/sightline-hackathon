@@ -1,4 +1,4 @@
-/** @owner Daphne — demo OPEN tasks for the campus map until the feed queries Mongo */
+/** @owner Daphne — demo OPEN tasks for the campus map when the marketplace URL is unset */
 import type { Task } from "@/lib/types/task";
 
 function openTask(

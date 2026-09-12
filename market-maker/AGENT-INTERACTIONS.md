@@ -159,7 +159,7 @@ Workers are upserted by phone so later quotes see the same person.
 
 ## Ethics / arbitration contract
 
-Market-maker is the only ethics caller on the live path. The personal agent does **not** call `reviewTask` or `arbitrateMove`. See [`ETHICS-INTEGRATION.md`](../ETHICS-INTEGRATION.md) (Divya).
+Market-maker calls ethics on quote and each evaluate turn. `voice-mcp` (text and voice) also calls `reviewTask` on intake and `reviewAmendment` on details edits. See [`ETHICS-INTEGRATION.md`](../ETHICS-INTEGRATION.md). The personal agent does **not** reimplement the rubric.
 
 [`src/lib/market/ethics-gate.ts`](./src/lib/market/ethics-gate.ts) POSTs to Daphne’s Gotchu routes. Set `ETHICS_BASE_URL` (default `http://127.0.0.1:3001` so it does not collide with this app on `:3000`).
 
