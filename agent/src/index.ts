@@ -858,11 +858,36 @@ async function autoNegotiate(): Promise<void> {
   const now = Date.now();
 
   for (const offer of offers) {
-    if (offer.auto_counter === false || !offer.min_price_usd) continue;
     if (now - new Date(offer.outreach_sent_at).getTime() < config.negotiationGraceMs) continue;
 
-    const min = Number(offer.min_price_usd);
+    const min = offer.min_price_usd != null ? Number(offer.min_price_usd) : null;
     const pays = Number(offer.offered_usd ?? offer.budget_usd ?? 0);
+
+    if (offer.auto_accept && min != null && pays >= min) {
+      try {
+        await market.respond(offer.id, true, offer.phone);
+        if (offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "accepted",
+            message: "Taken automatically at their minimum.",
+            offerId: String(offer.id),
+            state: "accepted",
+          });
+        }
+        await sayTo(
+          offer.phone,
+          `"${offer.title}" came in at $${pays}, at or above your $${min} minimum, so I took it for you.`,
+          `gotchu-autoaccept-${offer.id}`,
+        );
+        log(`auto-accepted offer ${offer.id} at $${pays}`);
+      } catch (err) {
+        log(`auto-accept failed on offer ${offer.id}: ${(err as Error).message}`);
+      }
+      continue;
+    }
+
+    if (offer.auto_counter === false || min == null) continue;
     if (pays >= min) continue; // fine as offered; their call to take it
 
     try {
@@ -1015,10 +1040,10 @@ async function chaseStuckItems(): Promise<void> {
         );
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
-        await market.respondToCounter(item.offer_id, item.phone, false).catch(() => null);
+        await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
         await sayTo(
           item.phone,
-          `No answer on that counter-offer for "${item.about}", so it's expired. The job stays open at your price.`,
+          `No answer on that counter-offer for "${item.about}", so it's expired. I'm asking someone else.`,
           `gotchu-counterexpired-${item.offer_id}`,
           "counter_expired",
           item.offer_id,

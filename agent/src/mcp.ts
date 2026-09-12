@@ -121,8 +121,8 @@ export const market = {
   /** A person can be holding several offers at once. */
   openJobs: (phone: string) =>
     get<OpenJob[]>(`/v1/offers/open?phone=${encodeURIComponent(phone)}`),
-  respond: (id: string, accepted: boolean) =>
-    post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted }),
+  respond: (id: string, accepted: boolean, phone?: string) =>
+    post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted, phone }),
 
   /** The broker's price for a live offer. Never the requester's budget. */
   setOfferPrice: (id: string, offered_usd: number) =>

@@ -181,14 +181,17 @@ export async function decideLiveDeal(
     const order = await voiceGet<OrderRow>(`/v1/orders/${encodeURIComponent(board.orderId)}`);
     const phone = order?.requester_phone;
     if (deal.kind === "counter" && deal.offerId && phone) {
-      await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/counter/respond`, {
+      const result = await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/counter/respond`, {
         phone,
         accept: false,
         release: true,
       });
-    }
-    if (deal.offerId) {
-      await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/respond`, { accepted: false });
+      if (!result.ok) return board;
+    } else if (deal.offerId) {
+      const result = await voicePost(`/v1/offers/${encodeURIComponent(deal.offerId)}/respond`, {
+        accepted: false,
+      });
+      if (!result.ok) return board;
     }
     return recordLiveEvent({
       token,

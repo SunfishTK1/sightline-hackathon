@@ -287,6 +287,16 @@ app.post("/v1/offers", async (req, res) => {
     return res.status(400).json({ ok: false, error: "order_id and phone are required" });
   }
   const e164 = normalizePhone(String(phone));
+  const open = await pool.query(
+    `SELECT id FROM orders
+      WHERE id = $1
+        AND status IN ('submitted', 'offered')
+        AND ethics_verdict IS DISTINCT FROM 'BLOCK'`,
+    [order_id],
+  );
+  if (!open.rows[0]) {
+    return res.status(409).json({ ok: false, error: "order_not_open" });
+  }
   const person = await upsertPerson(e164);
   const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
   const { rows } = await pool.query(

@@ -267,7 +267,7 @@ export async function respondToCounter(
   opts?: { release?: boolean },
 ): Promise<{ status: string; error?: string }> {
   const { rows } = await pool.query(
-    `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd,
+    `SELECT j.id, j.order_id, j.person_id, j.phone, j.counter_price_usd, j.offered_usd,
             o.title, o.budget_usd
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -300,7 +300,10 @@ export async function respondToCounter(
       return { status: "released" };
     }
     await pool.query(
-      `UPDATE job_offers SET status = 'offered', countered_at = NULL WHERE id = $1`,
+      `UPDATE job_offers
+          SET status = 'offered', countered_at = NULL,
+              counter_rounds = 0, counter_price_usd = NULL
+        WHERE id = $1`,
       [offer.id],
     );
     await pool.query(
@@ -313,7 +316,11 @@ export async function respondToCounter(
         JSON.stringify({
           title: offer.title,
           asked_usd: Number(offer.counter_price_usd),
-          still_offered_usd: offer.budget_usd ? Number(offer.budget_usd) : null,
+          still_offered_usd: offer.offered_usd
+            ? Number(offer.offered_usd)
+            : offer.budget_usd
+              ? Number(offer.budget_usd)
+              : null,
         }),
       ],
     );
@@ -1019,7 +1026,7 @@ export async function recordNoMatch(orderId: string) {
  * rather than left waiting on a job that no longer exists.
  *
  * A completed task cannot be cancelled - that money has already moved.
- * A task waiting on confirmation must be confirmed or disputed, not cancelled.
+ * An accepted or done-pending job is already theirs; cancel is too late.
  */
 export async function cancelOrder(orderId: string, reason?: string) {
   const client = await pool.connect();
@@ -1027,7 +1034,7 @@ export async function cancelOrder(orderId: string, reason?: string) {
     await client.query("BEGIN");
     const { rows } = await client.query(
       `UPDATE orders SET status = 'cancelled', updated_at = now()
-        WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'done_pending')
+        WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'done_pending', 'accepted')
         RETURNING id, title, person_id`,
       [orderId],
     );
