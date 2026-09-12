@@ -5,7 +5,12 @@
  *
  * Building coords and Leaflet loading follow Daphne's campus map
  * (`gotchu/lib/campus-buildings.ts`, `gotchu/components/map/CampusMap.tsx`).
- * Tiles are normal OpenStreetMap. The green border is the only wash.
+ * Tiles are normal OpenStreetMap.
+ *
+ * Nothing here is brand green. OpenStreetMap draws parkland green and CMU is
+ * mostly lawn, so a green frame and a green route line were competing with the
+ * map's own colours - the route is the one thing that has to read at a glance,
+ * so it is near-black against the tiles and the frame stays out of the way.
  */
 import { useEffect, useRef, useState } from "react";
 import { findPlacesInText, resolvePlace } from "@/lib/market/campus-travel";
@@ -136,7 +141,7 @@ export function LiveCampusMap({
         const coords = stations.map((s) => [s.lat, s.lng] as [number, number]);
         if (coords.length > 1) {
           L.polyline(coords, {
-            color: "#1f5c3a",
+            color: "#142016",
             weight: 4,
             dashArray: "10 8",
             opacity: 0.9,
@@ -151,9 +156,13 @@ export function LiveCampusMap({
         for (const station of stations) {
           L.circleMarker([station.lat, station.lng], {
             radius: 10,
-            color: "#ecfdf5",
+            // White ring so both ends stay visible over any tile.
+            color: "#ffffff",
             weight: 3,
-            fillColor: station.role === "pickup" ? "#166534" : "#4ade80",
+            // Dark start, red destination - the usual reading of a route, and
+            // two greens were indistinguishable from each other and from the
+            // parkland underneath.
+            fillColor: station.role === "pickup" ? "#142016" : "#b3321e",
             fillOpacity: 1,
           })
             .addTo(map)
@@ -181,7 +190,7 @@ export function LiveCampusMap({
   }, [title, pickup, dropoff]);
 
   return (
-    <section className="overflow-hidden rounded-[22px] border-2 border-[#1f5c3a] bg-white sm:rounded-[28px]">
+    <section className="overflow-hidden rounded-[22px] border border-zinc-200 bg-white sm:rounded-[28px]">
       <div className="flex items-end justify-between gap-3 px-3 pt-2.5 pb-2 text-[#142016] sm:px-4 sm:pt-3">
         <div className="min-w-0">
           <p className="text-[10px] font-semibold tracking-[0.16em] text-zinc-400 uppercase sm:text-[11px]">

@@ -217,7 +217,6 @@ export async function generateLiveMedia(token: string): Promise<void> {
   inflight.add(token);
   try {
     await fillKind(board.token, board.orderId, "image", board.title, board.category);
-    await fillKind(board.token, board.orderId, "video", board.title, board.category);
   } finally {
     inflight.delete(token);
   }

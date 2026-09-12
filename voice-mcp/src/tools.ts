@@ -672,19 +672,26 @@ tools.push({
   shape: {
     phone: z.string(),
     order_id: z.string(),
-    budget_usd: z.number().optional(),
+    budget_usd: z.number().positive().optional(),
     deadline_at: z.string().optional(),
-    details: z.string().optional(),
+    details: z.string().trim().min(1).optional(),
   },
   handler: async ({ phone, order_id, budget_usd, deadline_at, details }) => {
     const e164 = normalizePhone(phone);
+    if (budget_usd == null && deadline_at == null && details == null) {
+      return { error: "Give a new price, deadline, or details to update this request." };
+    }
+    let ethicsVerdict: string | null = null;
+    let ethicsReason: string | null = null;
+    let ethicsConditions: unknown[] = [];
 
     // Price and deadline can move freely. Rewriting what the job *is* has to
     // clear the gate again, or a cleared task becomes a cover for a new one.
     if (details) {
       const { rows: before } = await pool.query(
         `SELECT o.* FROM orders o JOIN people p ON p.id = o.person_id
-          WHERE o.id = $1 AND p.phone = $2`,
+          WHERE o.id = $1 AND p.phone = $2
+            AND o.status IN ('submitted', 'offered', 'no_takers')`,
         [order_id, e164],
       );
       const current = before[0];
@@ -717,7 +724,13 @@ tools.push({
         const reviewed = await reviewTask(proposed);
         if (reviewed?.verdict === "BLOCK") {
           const reason = reviewed.reason ?? "That change cannot be listed.";
-          await blockOrder(order_id, reason);
+          const blocked = await blockOrder(order_id, reason);
+          if ("error" in blocked) {
+            return {
+              error: blocked.error,
+              reason: "That request changed state before the edit could be blocked.",
+            };
+          }
           return {
             error: "blocked_after_edit",
             blocked: true,
@@ -733,37 +746,97 @@ tools.push({
             reason: "That change could not be reviewed just now, so it has not been applied. Try again in a moment.",
           };
         }
-
-        // Record what the gate said about the version that is now live.
-        await pool.query(
-          `UPDATE orders SET ethics_verdict = $2, ethics_reason = $3, ethics_conditions = $4::jsonb
-            WHERE id = $1`,
-          [
-            order_id,
-            reviewed?.verdict ?? null,
-            reviewed?.reason ?? null,
-            JSON.stringify(reviewed?.conditions ?? []),
-          ],
-        );
+        ethicsVerdict = reviewed?.verdict ?? null;
+        ethicsReason = reviewed?.reason ?? null;
+        ethicsConditions = reviewed?.conditions ?? [];
       }
     }
 
     const { rows } = await pool.query(
-      `UPDATE orders o
-          SET budget_usd = COALESCE($3, o.budget_usd),
-              deadline_at = COALESCE($4::timestamptz, o.deadline_at),
-              details = COALESCE($5, o.details),
-              -- New terms put a parked task back in front of people, and reset
-              -- the misses that parked it. The agent already promises exactly
-              -- this when it pauses one.
-              status = CASE WHEN o.status = 'no_takers' THEN 'submitted' ELSE o.status END,
-              match_attempts = CASE WHEN o.status = 'no_takers' THEN 0 ELSE o.match_attempts END,
-              updated_at = now()
-        FROM people p
-       WHERE o.id = $1 AND o.person_id = p.id AND p.phone = $2
-         AND o.status IN ('submitted', 'offered', 'no_takers')
-       RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status`,
-      [order_id, e164, budget_usd ?? null, deadline_at ?? null, details ?? null],
+      `WITH target AS (
+         SELECT o.id, o.status AS old_status
+           FROM orders o
+           JOIN people p ON p.id = o.person_id
+          WHERE o.id = $1 AND p.phone = $2
+            AND o.status IN ('submitted', 'offered', 'no_takers')
+            AND (
+              ($3::numeric IS NOT NULL AND o.budget_usd IS DISTINCT FROM $3::numeric)
+              OR ($4::timestamptz IS NOT NULL AND o.deadline_at IS DISTINCT FROM $4::timestamptz)
+              OR ($5::text IS NOT NULL AND o.details IS DISTINCT FROM $5::text)
+            )
+          FOR UPDATE
+       ),
+       changed AS (
+         UPDATE orders o
+            SET budget_usd = COALESCE($3, o.budget_usd),
+                deadline_at = COALESCE($4::timestamptz, o.deadline_at),
+                details = COALESCE($5, o.details),
+                ethics_verdict = CASE
+                  WHEN $5::text IS NOT NULL THEN $6::text ELSE o.ethics_verdict
+                END,
+                ethics_reason = CASE
+                  WHEN $5::text IS NOT NULL THEN $7::text ELSE o.ethics_reason
+                END,
+                ethics_conditions = CASE
+                  WHEN $5::text IS NOT NULL THEN $8::jsonb ELSE o.ethics_conditions
+                END,
+                status = CASE WHEN t.old_status = 'no_takers' THEN 'submitted' ELSE o.status END,
+                match_attempts = CASE WHEN t.old_status = 'no_takers' THEN 0 ELSE o.match_attempts END,
+                updated_at = now()
+           FROM target t
+          WHERE o.id = t.id
+          RETURNING o.id, o.title, o.budget_usd, o.deadline_at, o.status, t.old_status
+       ),
+       reset_candidates AS (
+         UPDATE job_offers j
+            SET status = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN 'offered'
+                  ELSE 'superseded'
+                END,
+                offered_usd = CASE
+                  WHEN j.status IN ('offered', 'countered')
+                    THEN COALESCE($3::numeric, j.offered_usd)
+                  ELSE j.offered_usd
+                END,
+                outreach_sent_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.outreach_sent_at
+                END,
+                responded_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE now()
+                END,
+                counter_rounds = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN 0
+                  ELSE j.counter_rounds
+                END,
+                counter_price_usd = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.counter_price_usd
+                END,
+                countered_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.countered_at
+                END,
+                counter_note = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.counter_note
+                END
+           FROM changed c
+          WHERE j.order_id = c.id
+            AND j.status IN ('offered', 'countered', 'declined', 'dropped')
+       )
+       SELECT id, title, budget_usd, deadline_at, status FROM changed`,
+      [
+        order_id,
+        e164,
+        budget_usd ?? null,
+        deadline_at ?? null,
+        details ?? null,
+        ethicsVerdict,
+        ethicsReason,
+        JSON.stringify(ethicsConditions),
+      ],
     );
     if (!rows[0]) {
       return { error: "That request is not one of theirs, or is no longer open." };

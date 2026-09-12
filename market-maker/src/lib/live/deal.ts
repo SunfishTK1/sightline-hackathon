@@ -195,13 +195,13 @@ export async function decideLiveDeal(
     }
     return recordLiveEvent({
       token,
-      kind: "declined",
+      kind: "skipped",
       message:
         deal.kind === "counter"
           ? "You turned down that counter. Trying the next person."
           : "You passed on this person. Trying the next person.",
       offerId: deal.offerId,
-      state: "declined",
+      state: "dropped",
     });
   }
 

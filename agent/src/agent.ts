@@ -589,13 +589,16 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
 
     if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
       // Do not relay the note - it is a different job, or the haggling is over.
-      await market.respond(target.id, false).catch(() => null);
+      const released = await market.respond(target.id, false).catch(() => null);
+      if (!released) {
+        return { error: "That offer is no longer open." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return {
         status: verdict.action.toLowerCase(),
@@ -604,8 +607,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       };
     }
     if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
-      await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
-      await market.respond(target.id, true, phone);
+      const priced = await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
+      const accepted = await market.respond(target.id, true, phone);
+      if (accepted.status !== "accepted") {
+        return { error: "That offer could not be accepted." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "accepted",
@@ -622,7 +631,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (verdict.action === "COUNTER" && verdict.nextOfferUsd != null) {
       // Counter back to the worker at the broker's number; the requester is
       // not asked yet.
-      await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      const priced = await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "waiting",
@@ -675,19 +687,19 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       deadline_at: args.deadline_at || undefined,
       details: args.details || undefined,
     });
-    if (args.deadline_at) {
+    if (result?.id && args.deadline_at) {
       await postLiveEvent({
         orderId: String(args.request_id),
         kind: "need_time",
         message: "A new time was proposed.",
       });
-    } else if (args.budget_usd > 0) {
+    } else if (result?.id && args.budget_usd > 0) {
       await postLiveEvent({
         orderId: String(args.request_id),
         kind: "updated",
         message: "The budget was updated.",
       });
-    } else if (args.details) {
+    } else if (result?.id && args.details) {
       await postLiveEvent({
         orderId: String(args.request_id),
         kind: "updated",
@@ -709,17 +721,20 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       decision: args.accept ? "ACCEPT" : "DECLINE",
     });
     if (args.accept && verdict && verdict.action === "REJECT_SCOPE") {
-      await market.respond(target.id, false).catch(() => null);
+      const released = await market.respond(target.id, false).catch(() => null);
+      if (!released) {
+        return { error: "That job offer is no longer open for you." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return { status: "rejected_scope", say: verdict.messageHint };
     }
-    const result = await market.respond(target.id, Boolean(args.accept));
+    const result = await market.respond(target.id, Boolean(args.accept), phone);
     await postLiveEvent({
       orderId: target.order_id,
       kind: args.accept ? "accepted" : "declined",
