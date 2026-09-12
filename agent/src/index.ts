@@ -594,19 +594,19 @@ async function sendOutreach(): Promise<void> {
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
     if (sent.accepted || sent.permanent) {
+      const marked = await market.markOutreachSent(offer.id).catch(() => null);
+      if (!marked) {
+        log(`outreach offer ${offer.id} landed after it was no longer live`);
+        continue;
+      }
       if (sent.accepted) {
-        // The offer has to land in their thread, or a later "I'll take the
-        // fridge one" refers to a message the agent has no record of sending.
+        // Only make the delivered offer actionable in the conversation after
+        // the marketplace has made it actionable through openJobs too.
         const history = await loadTurns(offer.phone);
         await saveTurns(offer.phone, [
           ...history,
           { role: "assistant", content: message, at: new Date().toISOString() },
         ]);
-      }
-      const marked = await market.markOutreachSent(offer.id).catch(() => null);
-      if (!marked) {
-        log(`outreach offer ${offer.id} landed after it was no longer live`);
-        continue;
       }
       if (offer.order_id) {
         await postLiveEvent({
@@ -696,6 +696,7 @@ async function deliverHandoffs(): Promise<void> {
     if (prior?.request_id) {
       const { state, detail } = await getDelivery(prior.request_id);
       if (state === "delivered") {
+        await announceHandoffOnLive(handoff);
         await markHandoffDelivered(handoff.id);
         log(`handoff ${handoff.id} (${handoff.kind}) -> ${handoff.phone}: ${detail}`);
         const history = await loadTurns(handoff.phone);
@@ -723,9 +724,6 @@ async function deliverHandoffs(): Promise<void> {
     }
 
     const attemptNo = (prior?.attempts ?? 0) + 1;
-    if (attemptNo === 1) {
-      await announceHandoffOnLive(handoff);
-    }
     // A retry needs a fresh key: replaying the old one returns the original
     // response and sends nothing.
     const outbound = shortenHandoff(text);
