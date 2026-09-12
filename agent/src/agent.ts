@@ -203,6 +203,14 @@ const TOOL_SCHEMAS = [
     parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
     strict: true,
   },
+  {
+    type: "function",
+    name: "wallet_link",
+    description:
+      "Get a link to this person's own railcoin wallet, so they can see their balance and activity. Use it whenever they ask about their railcoins, their balance, or their wallet - do not guess or recite a number yourself.",
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    strict: true,
+  },
 ];
 
 function describeOpenJobs(openJobs: OpenJob[]): string {
