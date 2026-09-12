@@ -152,7 +152,7 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     // Tool calls (yes/no, counters) stay off that thread.
     if (!usedTools.length) {
       const doing = who?.jobs_in_progress ?? [];
-      const theirs = (who?.open_requests ?? []).find((order) =>
+      const theirs = (who?.open_requests ?? []).find((order: any) =>
         ["accepted", "done_pending"].includes(order.status),
       );
       if (doing[0]?.id) {
