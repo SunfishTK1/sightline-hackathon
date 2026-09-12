@@ -228,14 +228,26 @@ function describeOpenJobs(openJobs: OpenJob[]): string {
 }
 
 function describeMyRequests(myOrders: MyOrder[]): string {
+  // no_takers and done_pending belong here. This list is presented to the
+  // model as complete, with an instruction to deny anything missing from it -
+  // so leaving a paused task out did not merely hide it, it actively told the
+  // agent to tell its own user the request did not exist, and made repricing
+  // impossible because the id was never in front of the model.
   const live = myOrders.filter((o) =>
-    ["submitted", "offered", "accepted"].includes(o.status),
+    ["submitted", "offered", "accepted", "done_pending", "no_takers"].includes(o.status),
   );
   if (!live.length) {
     return "They have no open requests of their own right now. If they refer to a task they think they posted, tell them plainly that you have no record of it rather than playing along.";
   }
   const list = live
-    .map((o) => `[request ${o.id}] ${o.title}${o.budget_usd ? ` at $${o.budget_usd}` : " (no price set)"} - ${o.status}`)
+    .map((o) => {
+      const price = o.budget_usd ? ` at $${o.budget_usd}` : " (no price set)";
+      const state =
+        o.status === "no_takers"
+          ? "paused, nobody took it - changing the price or terms puts it back out"
+          : o.status;
+      return `[request ${o.id}] ${o.title}${price} - ${state}`;
+    })
     .join("; ");
   return (
     `Their own open requests: ${list}. That is the complete list. ` +

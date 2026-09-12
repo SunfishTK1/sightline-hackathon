@@ -24,7 +24,7 @@ export async function listOpenTasks() {
     `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
             o.deadline_at, o.budget_usd, o.urgency, o.created_at
        FROM orders o
-      WHERE o.status IN ('submitted', 'offered')
+      WHERE o.status IN ('submitted', 'offered', 'no_takers')
         AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 20`,
@@ -85,7 +85,9 @@ export async function resolveOffer(
             budget_usd = COALESCE(NULLIF($3::numeric, 0), budget_usd)
       WHERE id = $1
         AND accepted_by IS NULL
-        AND status IN ('submitted', 'offered')
+        -- no_takers is paused, not withdrawn: somebody volunteering for one
+        -- must still be able to take it.
+        AND status IN ('submitted', 'offered', 'no_takers')
       RETURNING id, title, person_id`,
     [offer.order_id, offer.person_id, offer.offered_usd],
   );
@@ -357,7 +359,7 @@ export async function respondToCounter(
             accepted_at = now(), updated_at = now()
       WHERE id = $1
         AND accepted_by IS NULL
-        AND status IN ('submitted', 'offered')
+        AND status IN ('submitted', 'offered', 'no_takers')
       RETURNING id`,
     [offer.order_id, counterPrice, offer.person_id],
   );
