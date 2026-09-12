@@ -758,30 +758,31 @@ async function sayTo(
 
 async function applyLiveSkips(): Promise<void> {
   for (const skip of await listLiveSkips()) {
-    if (skip.offerId) {
-      const order = await market.getOrder(skip.orderId).catch(() => null);
-      const phone = order?.requester_phone;
-      const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
-      const countered = counters.find((c) => String(c.id) === String(skip.offerId));
-      let released = false;
-      if (countered && phone) {
-        released = Boolean(
-          await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null),
-        );
-      } else {
-        released = Boolean(await market.respond(skip.offerId, false).catch(() => null));
-      }
-      // Keep skip_requested set when the marketplace release fails so the
-      // next poll retries instead of showing a drop that never happened.
-      if (!released) continue;
-      await postLiveEvent({
-        orderId: skip.orderId,
-        kind: "skipped",
-        message: "You asked to move on. Trying the next person.",
-        offerId: skip.offerId,
-        state: "dropped",
-      });
+    // A board/candidate race can briefly produce no active offer. Keep the
+    // request set until there is something concrete to release.
+    if (!skip.offerId) continue;
+    const order = await market.getOrder(skip.orderId).catch(() => null);
+    const phone = order?.requester_phone;
+    const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
+    const countered = counters.find((c) => String(c.id) === String(skip.offerId));
+    let released = false;
+    if (countered && phone) {
+      released = Boolean(
+        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null),
+      );
+    } else {
+      released = Boolean(await market.respond(skip.offerId, false).catch(() => null));
     }
+    // Keep skip_requested set when the marketplace release fails so the
+    // next poll retries instead of showing a drop that never happened.
+    if (!released) continue;
+    await postLiveEvent({
+      orderId: skip.orderId,
+      kind: "skipped",
+      message: "You asked to move on. Trying the next person.",
+      offerId: skip.offerId,
+      state: "dropped",
+    });
     await ackLiveSkip(skip.token);
   }
 }

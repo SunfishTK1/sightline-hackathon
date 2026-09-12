@@ -672,7 +672,7 @@ tools.push({
   shape: {
     phone: z.string(),
     order_id: z.string(),
-    budget_usd: z.number().optional(),
+    budget_usd: z.number().positive().optional(),
     deadline_at: z.string().optional(),
     details: z.string().optional(),
   },
@@ -779,10 +779,42 @@ tools.push({
        ),
        reset_candidates AS (
          UPDATE job_offers j
-            SET status = 'superseded', responded_at = now()
+            SET status = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN 'offered'
+                  ELSE 'superseded'
+                END,
+                offered_usd = CASE
+                  WHEN j.status IN ('offered', 'countered')
+                    THEN COALESCE($3::numeric, j.offered_usd)
+                  ELSE j.offered_usd
+                END,
+                outreach_sent_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.outreach_sent_at
+                END,
+                responded_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE now()
+                END,
+                counter_rounds = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN 0
+                  ELSE j.counter_rounds
+                END,
+                counter_price_usd = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.counter_price_usd
+                END,
+                countered_at = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.countered_at
+                END,
+                counter_note = CASE
+                  WHEN j.status IN ('offered', 'countered') THEN NULL
+                  ELSE j.counter_note
+                END
            FROM changed c
           WHERE j.order_id = c.id
-            AND j.status IN ('declined', 'dropped')
+            AND j.status IN ('offered', 'countered', 'declined', 'dropped')
        )
        SELECT id, title, budget_usd, deadline_at, status FROM changed`,
       [order_id, e164, budget_usd ?? null, deadline_at ?? null, details ?? null],

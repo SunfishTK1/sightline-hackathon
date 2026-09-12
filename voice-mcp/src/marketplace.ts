@@ -1210,23 +1210,23 @@ export async function claimTask(orderId: string, workerPhone: string) {
     `INSERT INTO job_offers (order_id, person_id, phone, status, reason, offered_usd, outreach_sent_at)
      VALUES ($1,$2,$3,'offered','They volunteered for it.',$4, now())
      ON CONFLICT (order_id, phone) DO UPDATE
-       SET status = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+       SET status = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                          THEN 'offered' ELSE job_offers.status END,
-           offered_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           offered_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                               THEN EXCLUDED.offered_usd ELSE job_offers.offered_usd END,
-           reason = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           reason = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                          THEN EXCLUDED.reason ELSE job_offers.reason END,
-           outreach_sent_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           outreach_sent_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                    THEN now() ELSE job_offers.outreach_sent_at END,
-           responded_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           responded_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                THEN NULL ELSE job_offers.responded_at END,
-           counter_rounds = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           counter_rounds = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                  THEN 0 ELSE job_offers.counter_rounds END,
-           counter_price_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           counter_price_usd = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                     THEN NULL ELSE job_offers.counter_price_usd END,
-           countered_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           countered_at = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                THEN NULL ELSE job_offers.countered_at END,
-           counter_note = CASE WHEN job_offers.status IN ('declined','cancelled','dropped')
+           counter_note = CASE WHEN job_offers.status IN ('declined','cancelled','dropped','superseded')
                                THEN NULL ELSE job_offers.counter_note END
      RETURNING id, status`,
     [order.id, worker.id, e164, order.budget_usd ?? null],
