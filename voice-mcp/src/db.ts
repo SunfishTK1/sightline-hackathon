@@ -256,10 +256,10 @@ export async function ensureSchema(): Promise<void> {
     -- for the rest of the day.
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS match_attempts int NOT NULL DEFAULT 0;
 
-    -- A link the agent can text someone so they can open their own wallet.
-    -- Opening it is the proof: it went to their number and only they received
-    -- it. Anyone holding the link has the same access, which is why it expires
-    -- and why this is devnet play money.
+    -- A link the agent can text someone so they can see and manage their
+    -- wallet. Opening it is the proof: it was sent to their number and only
+    -- they received it. Anyone holding the link has the same access, which is
+    -- why it expires and why this is devnet play money.
     CREATE TABLE IF NOT EXISTS wallet_links (
       token       text PRIMARY KEY,
       person_id   uuid NOT NULL REFERENCES people(id) ON DELETE CASCADE,

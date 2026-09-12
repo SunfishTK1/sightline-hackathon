@@ -149,6 +149,12 @@ export const market = {
    * Completed tasks with no clip yet. Delivery waits on the relay learning to
    * carry video; until then these are generated and stored.
    */
+  /** A private link letting someone open their own wallet. */
+  walletLink: (phone: string) =>
+    post<{ token: string; url: string | null; expires_in_days: number }>(
+      "/v1/wallet-links", { phone },
+    ),
+
   /** The matcher looked at this task and picked nobody. */
   noMatch: (orderId: string) =>
     post<{ counted: boolean; parked?: boolean; attempts?: number }>(

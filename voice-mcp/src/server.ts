@@ -16,6 +16,7 @@ import { ensureWallet, getWallet } from "./wallet.js";
 import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 import { reviewTask } from "./ethics.js";
+import { createWalletLink, resolveWalletLink, createWalletForLink } from "./walletlink.js";
 
 const PORT = Number(process.env.PORT || 3010);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
@@ -148,6 +149,35 @@ app.post("/v1/wallets/ensure", async (req, res) => {
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
   try {
     res.json({ ok: true, data: await ensureWallet(String(phone)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Mint a link the agent can text so someone can open their own wallet. */
+app.post("/v1/wallet-links", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await createWalletLink(String(phone)) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** What the page shows. An expired or unknown token is simply not found. */
+app.get("/v1/wallet-links/:token", async (req, res) => {
+  const found = await resolveWalletLink(req.params.token);
+  if (!found) return res.status(404).json({ ok: false, error: "link_expired" });
+  res.json({ ok: true, data: found });
+});
+
+/** The page's one action: make me a wallet. */
+app.post("/v1/wallet-links/:token/wallet", async (req, res) => {
+  try {
+    const wallet = await createWalletForLink(req.params.token);
+    if (!wallet) return res.status(404).json({ ok: false, error: "link_expired" });
+    res.json({ ok: true, data: wallet });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
