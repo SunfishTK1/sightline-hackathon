@@ -1,3 +1,4 @@
+import { quoteOrder } from "./broker.js";
 import { config } from "./config.js";
 import { CAMPUS_GEOGRAPHY } from "./campus.js";
 
@@ -23,7 +24,7 @@ export type Candidate = {
   min_price_usd: string | null;
 };
 
-export type Pick = { phone: string; reason: string };
+export type Pick = { phone: string; reason: string; offerUsd?: number };
 
 const INSTRUCTIONS = [
   "You are the marketplace agent for a task service at Carnegie Mellon University.",
@@ -37,9 +38,18 @@ const INSTRUCTIONS = [
   "Reply with JSON only: {\"picks\":[{\"phone\":\"+1...\",\"reason\":\"one short sentence, addressed to nobody, explaining the fit\"}]}",
 ].join(" ");
 
-/** Ask the model who is worth soliciting. Falls back to no picks on failure. */
+/** Ask the market-maker who is worth soliciting. Falls back to the LLM. */
 export async function pickWorkers(order: OpenOrder, candidates: Candidate[]): Promise<Pick[]> {
   if (!candidates.length) return [];
+
+  const quoted = await quoteOrder(order, candidates);
+  if (quoted?.picks.length) {
+    return quoted.picks.slice(0, 2).map((pick) => ({
+      phone: pick.phone,
+      reason: pick.reason,
+      offerUsd: pick.offerUsd,
+    }));
+  }
 
   const summary = {
     task: {

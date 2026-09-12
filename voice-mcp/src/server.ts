@@ -188,18 +188,21 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
 
 /** The marketplace agent decided this person is eligible: put it to them. */
 app.post("/v1/offers", async (req, res) => {
-  const { order_id, phone, reason } = req.body ?? {};
+  const { order_id, phone, reason, offered_usd } = req.body ?? {};
   if (!order_id || !phone) {
     return res.status(400).json({ ok: false, error: "order_id and phone are required" });
   }
   const e164 = normalizePhone(String(phone));
   const person = await upsertPerson(e164);
+  const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
   const { rows } = await pool.query(
-    `INSERT INTO job_offers (order_id, person_id, phone, reason)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (order_id, phone) DO NOTHING
-     RETURNING id, order_id, phone, status`,
-    [order_id, person.id, e164, reason ?? null],
+    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (order_id, phone) DO UPDATE
+       SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
+           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd)
+     RETURNING id, order_id, phone, status, offered_usd`,
+    [order_id, person.id, e164, reason ?? null, offered],
   );
   await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
     order_id,
@@ -211,7 +214,7 @@ app.post("/v1/offers", async (req, res) => {
 app.get("/v1/offers", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT j.id, j.phone, j.status, j.reason, j.outreach_sent_at, j.responded_at,
-            j.created_at, o.title, o.budget_usd
+            j.created_at, j.offered_usd, o.title, o.budget_usd
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
       ORDER BY j.created_at DESC
@@ -224,7 +227,7 @@ app.get("/v1/offers", async (req, res) => {
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT j.id, j.phone, j.reason, o.title, o.details, o.budget_usd, o.deadline_at,
+    `SELECT j.id, j.phone, j.reason, j.offered_usd, o.title, o.details, o.budget_usd, o.deadline_at,
             o.pickup_location, o.dropoff_location, o.category
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -249,7 +252,7 @@ app.post("/v1/offers/:id/sent", async (req, res) => {
 app.get("/v1/offers/open", async (req, res) => {
   const phone = normalizePhone(String(req.query.phone ?? ""));
   const { rows } = await pool.query(
-    `SELECT j.id, j.reason, o.id AS order_id, o.title, o.details, o.budget_usd,
+    `SELECT j.id, j.reason, j.offered_usd, o.id AS order_id, o.title, o.details, o.budget_usd,
             o.deadline_at, o.pickup_location, o.dropoff_location
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id

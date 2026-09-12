@@ -12,3 +12,10 @@ npm run dev
 ```
 
 Internal board: [http://localhost:3000](http://localhost:3000)
+
+Broker API (personal agent is the only SMS sender):
+
+- `POST /api/broker/quote` — rank workers + clearing price
+- `POST /api/broker/evaluate` — accept / counter / ask requester / next
+
+Set `MARKET_MAKER_URL=http://localhost:3000` on the agent. Keep `IMESSAGE_LIVE=false` here.

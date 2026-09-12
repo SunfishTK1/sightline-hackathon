@@ -1,3 +1,5 @@
+import { MAX_NEGOTIATION_ROUNDS } from "./constants";
+import { looksLikeScopeChange } from "./scope-change";
 import type { EvaluateWorkerAction, Task, WorkerResponse } from "./types";
 
 /**
@@ -7,7 +9,15 @@ import type { EvaluateWorkerAction, Task, WorkerResponse } from "./types";
 export function evaluateWorkerResponse(
   task: Task,
   response: WorkerResponse,
+  options?: { roundsUsed?: number; counterNote?: string },
 ): EvaluateWorkerAction {
+  if ((options?.roundsUsed ?? 0) >= MAX_NEGOTIATION_ROUNDS) {
+    return { action: "TRY_NEXT_CANDIDATE" };
+  }
+  if (looksLikeScopeChange(options?.counterNote)) {
+    return { action: "TRY_RELAXATION_OR_NEXT_CANDIDATE" };
+  }
+
   if (response.decision === "DECLINE") {
     return { action: "TRY_NEXT_CANDIDATE" };
   }

@@ -10,7 +10,8 @@
     "seed": "tsx scripts/seed.ts",
     "schema": "tsx scripts/ensure-indexes.ts",
     "indexes": "tsx scripts/ensure-indexes.ts",
-    "check:policy": "tsx scripts/check-policy.ts"
+    "check:policy": "tsx scripts/check-policy.ts",
+    "check:broker": "tsx scripts/check-broker.ts"
   },
   "dependencies": {
     "next": "16.3.5",

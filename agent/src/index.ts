@@ -10,6 +10,7 @@ import {
 } from "./imessage.js";
 import { prepareImage } from "./images.js";
 import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } from "./mcp.js";
+import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
 
@@ -281,8 +282,8 @@ async function matchOpenOrders(): Promise<void> {
       continue;
     }
     for (const pick of picks) {
-      const offer = await market.createOffer(order.id, pick.phone, pick.reason);
-      if (offer) log(`offered "${order.title}" to ${pick.phone}: ${pick.reason}`);
+      const offer = await market.createOffer(order.id, pick.phone, pick.reason, pick.offerUsd);
+      if (offer) log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"}: ${pick.reason}`);
     }
   }
 }
@@ -290,8 +291,9 @@ async function matchOpenOrders(): Promise<void> {
 /** Text each pending offer to the person it was made to. */
 async function sendOutreach(): Promise<void> {
   for (const offer of await market.pendingOutreach()) {
-    const pay = offer.budget_usd && Number(offer.budget_usd) > 0
-      ? `$${offer.budget_usd}`
+    const offerUsd = offer.offered_usd ?? offer.budget_usd;
+    const pay = offerUsd && Number(offerUsd) > 0
+      ? `$${offerUsd}`
       : "price open";
     const due = offer.deadline_at
       ? ` by ${new Date(offer.deadline_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
@@ -442,18 +444,40 @@ async function autoNegotiate(): Promise<void> {
     if (now - new Date(offer.outreach_sent_at).getTime() < config.negotiationGraceMs) continue;
 
     const min = Number(offer.min_price_usd);
-    const pays = offer.budget_usd ? Number(offer.budget_usd) : 0;
+    const pays = Number(offer.offered_usd ?? offer.budget_usd ?? 0);
     if (pays >= min) continue; // fine as offered; their call to take it
 
     try {
-      await market.counter(offer.id, offer.phone, min, `${min} is my minimum for this kind of job`);
+      const verdict = await evaluateDeal({
+        order: {
+          title: offer.title,
+          details: offer.details,
+          category: offer.category,
+          budget_usd: offer.budget_usd,
+          deadline_at: offer.deadline_at,
+          pickup_location: offer.pickup_location,
+          dropoff_location: offer.dropoff_location,
+        },
+        current_offer_usd: pays,
+        decision: "AUTO_WORKER",
+        worker_min_usd: min,
+      });
+      if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
+        continue;
+      }
+      await market.counter(
+        offer.id,
+        offer.phone,
+        verdict.nextOfferUsd,
+        verdict.messageHint,
+      );
       const paid = pays > 0 ? `$${pays}` : "no set price";
       await sayTo(
         offer.phone,
-        `"${offer.title}" came in at ${paid}, under your $${min} minimum, so I countered at $${min} for you. I'll tell you what they say.`,
+        `"${offer.title}" came in at ${paid}, under your $${min} minimum, so I countered at $${verdict.nextOfferUsd} for you. I'll tell you what they say.`,
         `gotchu-autocounter-${offer.id}`,
       );
-      log(`auto-countered offer ${offer.id} for ${offer.phone} at $${min}`);
+      log(`auto-countered offer ${offer.id} for ${offer.phone} at $${verdict.nextOfferUsd}`);
     } catch (err) {
       log(`auto-counter failed on offer ${offer.id}: ${(err as Error).message}`);
     }
@@ -465,9 +489,20 @@ async function autoNegotiate(): Promise<void> {
 
     const asking = Number(counter.counter_price_usd);
     const budget = Number(counter.order_budget_usd);
-    if (asking > budget) continue; // over what they said they'd pay; human decides
 
     try {
+      const verdict = await evaluateDeal({
+        order: {
+          title: counter.title,
+          budget_usd: counter.order_budget_usd,
+        },
+        current_offer_usd: Number(counter.offered_usd ?? counter.order_budget_usd ?? asking),
+        decision: "AUTO_REQUESTER",
+        price_usd: asking,
+      });
+      if (!verdict || verdict.action !== "ACCEPT") {
+        continue;
+      }
       await market.respondToCounter(counter.id, counter.requester_phone, true);
       await sayTo(
         counter.requester_phone,

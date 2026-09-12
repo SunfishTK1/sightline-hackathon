@@ -25,7 +25,10 @@ export async function sendUserMessage(input: {
     createdAt: new Date(),
   };
 
-  const live = input.forceLive || isLiveMessaging();
+  const live =
+    input.purpose === "WORKER_INVITATION"
+      ? isLiveMessaging()
+      : Boolean(input.forceLive || isLiveMessaging());
   if (live) {
     await enrollRecipient(input.phone);
   }

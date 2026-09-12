@@ -228,6 +228,67 @@ export const twilioStatusSchema = z.object({
 export const negotiationEventTypeSchema = z.enum(NEGOTIATION_EVENT_TYPES);
 export const messagePurposeSchema = z.enum(MESSAGE_PURPOSES);
 
+const moneyLike = z.union([z.string(), z.number()]).nullable().optional();
+
+export const brokerOrderSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().min(1),
+  details: z.string().nullable().optional(),
+  category: z.string().nullable().optional(),
+  pickup_location: z.string().nullable().optional(),
+  dropoff_location: z.string().nullable().optional(),
+  deadline_at: z.string().nullable().optional(),
+  budget_usd: moneyLike,
+  urgency: z.string().nullable().optional(),
+  requester_phone: z.string().nullable().optional(),
+  maximum_usd: moneyLike,
+  comps: z.array(z.number()).optional(),
+});
+
+export const brokerCandidateSchema = z.object({
+  phone: z.string().min(1),
+  blurb: z.string().nullable().optional(),
+  categories: z.array(z.string()).optional(),
+  min_price_usd: moneyLike,
+  preferred_price_usd: moneyLike,
+  stats: z
+    .object({
+      ratingCount: z.number().optional(),
+      workerAvgRating: z.number().nullable().optional(),
+      tasksCompletedAsWorker: z.number().optional(),
+      completionRate: z.number().nullable().optional(),
+    })
+    .optional(),
+});
+
+export const brokerQuoteRequestSchema = z.object({
+  order: brokerOrderSchema,
+  candidates: z.array(brokerCandidateSchema),
+});
+
+export const brokerEvaluateRequestSchema = z.object({
+  order: brokerOrderSchema,
+  current_offer_usd: z.union([z.string(), z.number()]),
+  decision: z.enum([
+    "ACCEPT",
+    "DECLINE",
+    "COUNTER",
+    "REQUESTER_YES",
+    "REQUESTER_NO",
+    "AUTO_WORKER",
+    "AUTO_REQUESTER",
+  ]),
+  price_usd: moneyLike,
+  worker_min_usd: moneyLike,
+  note: z.string().nullable().optional(),
+  round: z.number().int().nonnegative().optional(),
+  estimated_minutes: z.number().int().positive().optional(),
+});
+
 export type ParsedTaskInput = z.infer<typeof parsedTaskSchema>;
 export type ParsedWorkerSms = z.infer<typeof parsedWorkerSmsSchema>;
 export type ParsedRequesterChoice = z.infer<typeof parsedRequesterChoiceSchema>;
+export type BrokerOrderInput = z.infer<typeof brokerOrderSchema>;
+export type BrokerCandidateInput = z.infer<typeof brokerCandidateSchema>;
+export type BrokerQuoteRequest = z.infer<typeof brokerQuoteRequestSchema>;
+export type BrokerEvaluateRequest = z.infer<typeof brokerEvaluateRequestSchema>;

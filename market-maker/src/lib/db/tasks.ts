@@ -93,6 +93,25 @@ export async function findTasksByStatus(status: TaskStatus): Promise<Task[]> {
   return result.rows.map((row) => fromJson<Task>(row.doc));
 }
 
+export async function listPaidCompsByCategory(
+  category: string,
+  limit = 20,
+): Promise<number[]> {
+  const result = await query<{ paid: string }>(
+    `SELECT (doc->'pricing'->>'currentOfferUsd')::text AS paid
+     FROM tasks
+     WHERE status = ANY($1::text[])
+       AND doc->'structured'->>'category' = $2
+       AND (doc->'pricing'->>'currentOfferUsd') IS NOT NULL
+     ORDER BY updated_at DESC
+     LIMIT $3`,
+    [["ACCEPTED", "IN_PROGRESS", "COMPLETED"], category, limit],
+  );
+  return result.rows
+    .map((row) => Number(row.paid))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
 export async function listBusyWorkerUuids(
   exceptTaskId: string,
 ): Promise<Set<string>> {
