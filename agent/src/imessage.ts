@@ -87,12 +87,22 @@ export async function uploadAttachment(
   return body.attachmentId ?? null;
 }
 
+/**
+ * "auto", not "iMessage", is the default on purpose.
+ *
+ * Sending iMessage-only means every number without an iMessage account fails
+ * outright - errorCode 22, three retries, nothing delivered. On a campus that
+ * is every Android phone: they would sign up, never receive the welcome, and
+ * never be able to confirm their number, so they could never be offered work.
+ * Letting Messages choose the service sends iMessage where it exists and SMS
+ * where it does not, which is what the live-link text already relied on.
+ */
 export async function sendText(
   to: string,
   text: string,
   idempotencyKey: string,
   attachmentIds?: string[],
-  service: "iMessage" | "SMS" | "auto" = "iMessage",
+  service: "iMessage" | "SMS" | "auto" = "auto",
 ): Promise<SendResult> {
   const payload: Record<string, unknown> = {
     to,

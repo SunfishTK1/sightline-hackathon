@@ -1,9 +1,7 @@
 import { config } from "./config.js";
 import type { Turn } from "./db.js";
 
-const RESPONSES_URL = "https://api.openai.com/v1/responses";
-const EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
-const EMBEDDING_MODEL = "text-embedding-3-small";
+import { ai, responsesUrl, embeddingsUrl, aiJsonHeaders, embeddingsAvailable } from "./ai.js";
 
 /**
  * Fixed points to place someone's inferred style against, rather than
@@ -47,13 +45,11 @@ function cosine(a: number[], b: number[]): number {
 }
 
 async function embed(text: string): Promise<number[]> {
-  const res = await fetch(EMBEDDINGS_URL, {
+  if (!ai.embeddingModel) throw new Error(`${ai.provider} has no embedding model`);
+  const res = await fetch(embeddingsUrl, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openaiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
+    headers: aiJsonHeaders(),
+    body: JSON.stringify({ model: ai.embeddingModel, input: text }),
   });
   if (!res.ok) throw new Error(`embeddings HTTP ${res.status}`);
   const body = (await res.json()) as { data: Array<{ embedding: number[] }> };
@@ -80,12 +76,9 @@ async function summarizeStyle(turns: Turn[]): Promise<string | null> {
   const theirs = turns.filter((t) => t.role === "user").slice(-15);
   if (theirs.length < 3) return null;
 
-  const res = await fetch(RESPONSES_URL, {
+  const res = await fetch(responsesUrl, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openaiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers: aiJsonHeaders(),
     body: JSON.stringify({
       model: config.model,
       instructions:
@@ -109,6 +102,37 @@ async function summarizeStyle(turns: Turn[]): Promise<string | null> {
 }
 
 /**
+ * Pick the archetype by asking the chat model, for providers that publish no
+ * embedding model (xAI). It is a four-way choice between fixed descriptions,
+ * which a chat model does perfectly well - losing the embedding costs the
+ * stored vector, not the feature.
+ */
+async function classifyStyle(summary: string): Promise<StyleTag | null> {
+  const res = await fetch(responsesUrl, {
+    method: "POST",
+    headers: aiJsonHeaders(),
+    body: JSON.stringify({
+      model: config.model,
+      instructions:
+        "Choose which single label best fits the description of how someone writes. " +
+        STYLE_ARCHETYPES.map((a) => `${a.tag}: ${a.description}`).join("\n") +
+        "\nAnswer with one word: the label. Nothing else.",
+      input: summary,
+      max_output_tokens: 2000,
+    }),
+  });
+  if (!res.ok) throw new Error(`style classify HTTP ${res.status}`);
+  const body = (await res.json()) as any;
+  const word = (body.output ?? [])
+    .flatMap((item: any) => item.content ?? [])
+    .filter((c: any) => c.type === "output_text" || c.type === "text")
+    .map((c: any) => c.text)
+    .join(" ")
+    .toLowerCase();
+  return STYLE_ARCHETYPES.find((a) => word.includes(a.tag))?.tag ?? null;
+}
+
+/**
  * Learn from this person's own message history and persist the result.
  * Fire-and-forget from the caller's point of view - never throws, and does
  * nothing if there isn't enough signal yet.
@@ -118,19 +142,31 @@ export async function learnStyle(phone: string, turns: Turn[]): Promise<void> {
     const summary = await summarizeStyle(turns);
     if (!summary) return;
 
-    const [summaryVector, archetypes] = await Promise.all([
-      embed(summary),
-      loadArchetypeEmbeddings(),
-    ]);
-    let best = archetypes[0];
-    let bestScore = -Infinity;
-    for (const a of archetypes) {
-      const score = cosine(summaryVector, a.vector);
-      if (score > bestScore) {
-        bestScore = score;
-        best = a;
+    let tag: string | null;
+    let summaryVector: number[] = [];
+
+    if (embeddingsAvailable()) {
+      const [vector, archetypes] = await Promise.all([
+        embed(summary),
+        loadArchetypeEmbeddings(),
+      ]);
+      summaryVector = vector;
+      let best = archetypes[0];
+      let bestScore = -Infinity;
+      for (const a of archetypes) {
+        const score = cosine(summaryVector, a.vector);
+        if (score > bestScore) {
+          bestScore = score;
+          best = a;
+        }
       }
+      tag = best.tag;
+    } else {
+      tag = await classifyStyle(summary);
     }
+    // No tag means nothing useful was learned; storing a default would teach
+    // the agent a style this person never showed.
+    if (!tag) return;
 
     await fetch(`${config.voiceMcpUrl}/v1/style/save`, {
       method: "POST",
@@ -138,7 +174,9 @@ export async function learnStyle(phone: string, turns: Turn[]): Promise<void> {
       body: JSON.stringify({
         phone,
         summary,
-        style_tag: best.tag,
+        style_tag: tag,
+        // Empty when the provider has no embedding model. The column is jsonb,
+        // and nothing reads the vector back except the comparison above.
         embedding: summaryVector,
       }),
     });

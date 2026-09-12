@@ -1,8 +1,9 @@
+import { responsesUrl, aiJsonHeaders } from "./ai.js";
 import { quoteOrder, type BrokerTravel } from "./broker.js";
 import { config } from "./config.js";
 import { CAMPUS_GEOGRAPHY } from "./campus.js";
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
+// Provider and model come from ai.ts so this works on xAI or OpenAI.
 
 export type OpenOrder = {
   id: string;
@@ -81,12 +82,9 @@ export async function pickWorkers(order: OpenOrder, candidates: Candidate[]): Pr
   };
 
   try {
-    const res = await fetch(OPENAI_URL, {
+    const res = await fetch(responsesUrl, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.openaiKey}`,
-        "Content-Type": "application/json",
-      },
+      headers: aiJsonHeaders(),
       body: JSON.stringify({
         model: config.model,
         instructions: INSTRUCTIONS,

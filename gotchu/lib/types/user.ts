@@ -21,7 +21,7 @@ export interface UserConsents {
   /**
    * Whether their photo may be used to picture them in generated images and
    * clips. Unlike the others this one is optional: a marketplace can insist on
-   * being able to text you, but nobody has to agree to appear in a video.
+   * being able to text you, but nobody has to agree to appear in a picture.
    */
   canUseLikeness: boolean;
   acceptedAt: string;
@@ -36,7 +36,7 @@ export interface User {
   phone: string; // 🔒 E.164
   emailVerified: boolean; // flips true once Auth0 reports the verification-email link was clicked
   emailVerifiedAt?: string;
-  photoDataUrl?: string; // data: URI — future material for AI-generated animated avatars
+  photoDataUrl?: string; // data: URI — the reference a task illustration is drawn from
   preferenceText: string;
   preferenceEmbedding: number[]; // 768 dims (Gemini text-embedding-004)
   consents: UserConsents;

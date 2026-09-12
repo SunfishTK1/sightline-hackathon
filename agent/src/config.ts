@@ -1,3 +1,5 @@
+import { ai } from "./ai.js";
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is not set`);
@@ -8,8 +10,13 @@ export const config = {
   databaseUrl: required("DATABASE_URL"),
   imessageUrl: process.env.IMESSAGE_API_URL || "https://imessage.velroi.com",
   imessageKey: required("IMESSAGE_API_KEY"),
-  openaiKey: required("OPENAI_API_KEY"),
-  model: process.env.OPENAI_AGENT_MODEL || "gpt-6-astra",
+  // Which provider, which key and which models now live in ai.ts - see that
+  // file for the switch. Kept here so existing callers keep reading
+  // config.model, and so nothing requires an OpenAI key any more: a deploy with
+  // only XAI_API_KEY set is a valid deploy.
+  get model(): string {
+    return ai.chatModel;
+  },
   voiceMcpUrl: required("VOICE_MCP_URL"),
   voiceMcpToken: process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "",
   /** Rank + clearing price + live board. Must be reachable from this process. */

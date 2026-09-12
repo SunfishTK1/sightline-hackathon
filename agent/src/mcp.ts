@@ -335,3 +335,12 @@ export async function markHandoffDelivered(id: string): Promise<void> {
     headers: voiceHeaders(),
   });
 }
+
+/** Give up on a handoff, on the record. See /v1/unreached. */
+export async function markHandoffFailed(id: string, reason: string): Promise<void> {
+  await fetch(`${config.voiceMcpUrl}/v1/handoffs/${id}/failed`, {
+    method: "POST",
+    headers: voiceHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ reason }),
+  });
+}

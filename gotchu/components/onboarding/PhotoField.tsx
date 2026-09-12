@@ -3,10 +3,10 @@
  * Profile photo upload. Resized client-side to a small square JPEG and
  * sent as a data: URI — no object storage needed for the hackathon.
  *
- * Why we collect it: today it's just a face on the profile, but it's the
- * raw material for a planned feature — generating an animated version of
- * the person (doing a task, or having one done for them) once a task
- * resolves. Optional; nothing here is shown publicly yet.
+ * Why we collect it: it is the reference the illustrator is conditioned on, so
+ * the picture drawn for a task can actually look like the person in it.
+ * Pictures only — video generation was removed, so the copy below must not
+ * promise an animation we never make. Optional; nothing here is public.
  */
 "use client";
 
@@ -120,9 +120,9 @@ export function PhotoField({
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        Optional. We&apos;ll use this later to generate an animated version
-        of you — either doing a task, or having one done for you. Nothing
-        here is shown publicly.
+        Optional. We use it so the picture drawn for a task can look like
+        you — either doing the task, or having it done for you. Nothing here
+        is shown publicly.
       </p>
       {localError ?? error ? (
         <p className="text-sm text-destructive">{localError ?? error}</p>

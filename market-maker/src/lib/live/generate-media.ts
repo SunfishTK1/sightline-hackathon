@@ -8,13 +8,10 @@ import {
   setLiveMediaProgress,
 } from "@/lib/db/live";
 import { ensureBucket, getObject, storageConfigured } from "@/lib/storage/s3";
+import { aiProvider } from "@/lib/ai/provider";
 
-const IMAGE_URL = "https://api.openai.com/v1/images/generations";
-const VIDEO_URL = "https://api.openai.com/v1/videos";
-const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-sunburst";
-const VIDEO_MODEL = process.env.OPENAI_VIDEO_MODEL || "sora-2";
-const VIDEO_SECONDS = process.env.OPENAI_VIDEO_SECONDS || "4";
-const VIDEO_SIZE = process.env.OPENAI_VIDEO_SIZE || "720x1280";
+// Pictures only. Films were minutes of paid rendering per task and are gone;
+// the provider (OpenAI or xAI) comes from aiProvider().
 
 const CAMPUS_LOOK = [
   "Setting: the Carnegie Mellon University campus in Pittsburgh.",
@@ -26,9 +23,8 @@ const CAMPUS_LOOK = [
 
 const inflight = new Set<string>();
 
-function openaiKey(): string | null {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  return key || null;
+function mediaProvider() {
+  return aiProvider();
 }
 
 function jobFromTitle(title: string, category: string | null): {
@@ -124,17 +120,16 @@ async function pullVoiceMedia(
 }
 
 async function generateImage(prompt: string): Promise<Buffer | null> {
-  const key = openaiKey();
-  if (!key) return null;
-  const models = [IMAGE_MODEL, "gpt-image-1", "dall-e-3"];
-  for (const model of [...new Set(models)]) {
-    const response = await fetch(IMAGE_URL, {
+  const provider = mediaProvider();
+  if (!provider) return null;
+  for (const model of provider.imageModels) {
+    const response = await fetch(provider.imageUrl, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${provider.key}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model, prompt, size: "1024x1024", n: 1 }),
+      body: JSON.stringify({ model, prompt, ...provider.imageParams }),
       signal: AbortSignal.timeout(90_000),
     });
     if (!response.ok) {
@@ -154,60 +149,6 @@ async function generateImage(prompt: string): Promise<Buffer | null> {
   return null;
 }
 
-async function generateVideo(
-  prompt: string,
-  onProgress: (progress: number) => Promise<void>,
-): Promise<Buffer | null> {
-  const key = openaiKey();
-  if (!key) return null;
-  const headers = {
-    Authorization: `Bearer ${key}`,
-    "Content-Type": "application/json",
-  };
-  const started = await fetch(VIDEO_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: VIDEO_MODEL,
-      prompt,
-      seconds: VIDEO_SECONDS,
-      size: VIDEO_SIZE,
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!started.ok) {
-    console.error(`live video failed: HTTP ${started.status}`);
-    return null;
-  }
-  const job = (await started.json()) as { id?: string };
-  if (!job.id) return null;
-
-  for (let i = 0; i < 60; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10_000));
-    const poll = await fetch(`${VIDEO_URL}/${job.id}`, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!poll.ok) continue;
-    const state = (await poll.json()) as {
-      status?: string;
-      progress?: number;
-    };
-    if (typeof state.progress === "number") {
-      await onProgress(Math.max(1, Math.min(99, Math.round(state.progress))));
-    }
-    if (state.status === "completed") {
-      const content = await fetch(`${VIDEO_URL}/${job.id}/content`, {
-        headers: { Authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!content.ok) return null;
-      return Buffer.from(await content.arrayBuffer());
-    }
-    if (state.status === "failed") return null;
-  }
-  return null;
-}
 
 export async function generateLiveMedia(token: string): Promise<void> {
   if (inflight.has(token)) return;
@@ -217,16 +158,20 @@ export async function generateLiveMedia(token: string): Promise<void> {
   inflight.add(token);
   try {
     await fillKind(board.token, board.orderId, "image", board.title, board.category);
-    await fillKind(board.token, board.orderId, "video", board.title, board.category);
   } finally {
     inflight.delete(token);
   }
 }
 
+/**
+ * Draw the one picture this board gets. Was parameterised over image-or-video;
+ * there is only one kind now, so the branching is gone rather than left behind
+ * with a dead arm.
+ */
 async function fillKind(
   token: string,
   orderId: string,
-  kind: "image" | "video",
+  kind: "image",
   title: string,
   category: string | null,
 ): Promise<void> {
@@ -244,42 +189,23 @@ async function fillKind(
     return;
   }
 
-  if (!openaiKey()) {
+  if (!mediaProvider()) {
     await releaseLiveMedia(token, kind);
     return;
   }
 
-  await recordLiveEvent({
-    token,
-    kind: kind === "image" ? "illustration" : "film",
-    message:
-      kind === "image" ? "Drawing how the job looks." : "Filming the job.",
-  });
+  await recordLiveEvent({ token, kind: "illustration", message: "Drawing how the job looks." });
 
-  const prompt = kind === "image" ? imagePrompt(title, category) : videoPrompt(title, category);
-  const bytes =
-    kind === "image"
-      ? await generateImage(prompt)
-      : await generateVideo(prompt, (progress) =>
-          setLiveMediaProgress(token, "video", progress),
-        );
+  const prompt = imagePrompt(title, category);
+  const bytes = await generateImage(prompt);
   if (!bytes) {
     await markLiveMediaFailed(token, kind);
     await recordLiveEvent({
       token,
-      kind: kind === "image" ? "illustration_failed" : "film_failed",
-      message:
-        kind === "image"
-          ? "Could not draw the job picture."
-          : "Could not film the job.",
+      kind: "illustration_failed",
+      message: "Could not draw the job picture.",
     });
     return;
   }
-  await attachLiveMedia({
-    token,
-    kind,
-    bytes,
-    contentType: kind === "image" ? "image/png" : "video/mp4",
-    prompt,
-  });
+  await attachLiveMedia({ token, kind, bytes, contentType: "image/png", prompt });
 }

@@ -388,6 +388,40 @@ export async function chargeToTreasury(
   }
 }
 
+/**
+ * Top a wallet up from the treasury so it can actually spend.
+ *
+ * Solana keeps every account above a rent-exempt minimum - about 0.00089 SOL,
+ * roughly 45 railcoins - and refuses any transfer that would drop it below.
+ * A 50-railcoin starter grant therefore leaves about five railcoins that can
+ * ever be spent, and an ordinary 8-railcoin coffee run fails with "insufficient
+ * funds for rent". The floor has to sit clear of that, not next to it.
+ */
+export async function topUpWallet(
+  phone: string,
+  floorRailcoins = Number(process.env.WALLET_FLOOR_RAILCOINS || 500),
+): Promise<{ topped: boolean; railcoins: number; reason?: string }> {
+  try {
+    const wallet = await ensureWallet(phone);
+    const target = new PublicKey(wallet.public_key);
+    const current = await connection.getBalance(target);
+    const currentRailcoins = Math.floor((current / LAMPORTS_PER_SOL) * RAILCOINS_PER_SOL);
+    if (currentRailcoins >= floorRailcoins) {
+      return { topped: false, railcoins: currentRailcoins, reason: "already above the floor" };
+    }
+
+    const lamports = railcoinsToLamports(floorRailcoins - currentRailcoins);
+    const from = treasuryKeypair();
+    const tx = new Transaction().add(
+      SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: target, lamports }),
+    );
+    await sendAndConfirmTransaction(connection, tx, [from]);
+    return { topped: true, railcoins: floorRailcoins };
+  } catch (err) {
+    return { topped: false, railcoins: 0, reason: (err as Error).message };
+  }
+}
+
 /** Record how the settlement went against the payment row for the task. */
 export async function recordSettlement(orderId: string, result: Settlement): Promise<void> {
   await pool.query(

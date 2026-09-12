@@ -290,6 +290,14 @@ export async function ensureSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS orders_person_idx ON orders (person_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS handoffs_undelivered_idx
       ON agent_handoffs (created_at) WHERE delivered_at IS NULL;
+
+    -- A message the relay would not deliver, after every retry. It used to be
+    -- closed as "delivered", which stopped the retry loop but also erased the
+    -- only evidence: someone signs up, their welcome never lands, and they sit
+    -- unverified forever with nothing anywhere saying they were never reached.
+    -- Recorded separately so the queue still drains and the failure is visible.
+    ALTER TABLE agent_handoffs ADD COLUMN IF NOT EXISTS failed_at timestamptz;
+    ALTER TABLE agent_handoffs ADD COLUMN IF NOT EXISTS failure_reason text;
   `);
 }
 

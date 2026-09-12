@@ -16,7 +16,7 @@ import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
 import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
-import { chargeToTreasury } from "./pay.js";
+import { chargeToTreasury, topUpWallet } from "./pay.js";
 import { reviewTask } from "./ethics.js";
 import { createWalletLink, resolveWalletLink, createWalletForLink } from "./walletlink.js";
 
@@ -225,7 +225,15 @@ app.post("/v1/style/save", async (req, res) => {
  * as a 500, which reads as "the server is broken" rather than "that is not an
  * id". Checked once here so every /v1/offers/:id route inherits it.
  */
+const OFFER_COLLECTIONS = new Set(["outreach", "open"]);
+
 app.use("/v1/offers/:id", (req, res, next) => {
+  // Not every segment here is an id: /v1/offers/outreach and /v1/offers/open
+  // are lists. Rejecting them as malformed ids answered the agent's outreach
+  // poll with 400 every five seconds, so offers were written and nobody was
+  // ever texted - the marketplace looked alive and reached no one. Any new
+  // word-named sub-route has to be added here too.
+  if (OFFER_COLLECTIONS.has(req.params.id)) return next();
   if (!/^\d{1,18}$/.test(req.params.id)) {
     return res.status(400).json({ ok: false, error: "bad_offer_id" });
   }
@@ -311,11 +319,15 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
        JOIN orders o ON o.id = $1
       WHERE w.is_available
         AND wp.phone_verified
-        -- Someone who signed up on the web claimed a specific CMU identity, so
-        -- that claim has to be proven before they can be offered work. Anyone
-        -- who only ever arrived by phone has no email to verify and is
-        -- unaffected.
-        AND (wp.email IS NULL OR COALESCE((wp.doc->>'emailVerified')::boolean, false))
+        -- Deliberately NOT gated on email verification. The web form sets
+        -- emailVerified false on every new signup and sends a link, so gating
+        -- matching on it made a new person invisible to the marketplace until
+        -- they went and found an email - silently, with nothing in the product
+        -- saying so. The phone is the channel this runs on and it is already
+        -- proven: nobody reaches the pool without replying to a text sent to
+        -- their own number. Email verification is still recorded and still
+        -- gates the web availability toggle; it just no longer decides whether
+        -- somebody can earn.
         AND w.person_id <> o.person_id
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
@@ -476,7 +488,14 @@ app.post("/v1/offers/:id/sent", async (req, res) => {
  * several open offers at once, so this is a list.
  */
 app.get("/v1/offers/open", async (req, res) => {
-  const phone = normalizePhone(String(req.query.phone ?? ""));
+  // A missing or unparseable number is a bad request, not a broken server:
+  // normalizePhone throws, and unguarded that came back as an empty 500.
+  let phone: string;
+  try {
+    phone = normalizePhone(String(req.query.phone ?? ""));
+  } catch {
+    return res.status(400).json({ ok: false, error: "phone is required" });
+  }
   const { rows } = await pool.query(
     `SELECT j.id, j.reason, j.offered_usd, o.id AS order_id, o.title, o.details, o.budget_usd,
             o.deadline_at, o.pickup_location, o.dropoff_location
@@ -983,7 +1002,27 @@ app.post("/v1/orders/:id/received", async (req, res) => {
  * generated: a fee taken after the fact is one the person never agreed to, and
  * a film is minutes of expensive rendering.
  */
+/**
+ * Films are off.
+ *
+ * Generating them cost real money per task and the provider the rest of this
+ * runs on has no video endpoint at all, so there is nothing to deliver. The
+ * route stays and refuses *before* the charge rather than being deleted: a
+ * client that still has the old button must get a straight answer, and must
+ * never be billed 5 railcoins for a film that cannot be made.
+ *
+ * Set FILMS_ENABLED=true to turn the old path back on.
+ */
+const FILMS_ENABLED = (process.env.FILMS_ENABLED || "").trim().toLowerCase() === "true";
+
 app.post("/v1/orders/:id/film", async (req, res) => {
+  if (!FILMS_ENABLED) {
+    return res.status(410).json({
+      ok: false,
+      error: "films_disabled",
+      reason: "Films are no longer made, and nothing was charged.",
+    });
+  }
   const fee = Number(process.env.FILM_FEE_RAILCOINS || 5);
   const claimed = await pool.query(
     `UPDATE orders o
@@ -1102,6 +1141,19 @@ app.post("/v1/orders/:id/claim", async (req, res) => {
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }
+});
+
+/** Bring every wallet up to a balance it can actually spend from. */
+app.post("/v1/dev/top-up-wallets", async (req, res) => {
+  const floor = Number(req.body?.floor_railcoins) || undefined;
+  const { rows } = await pool.query(`SELECT phone FROM people ORDER BY created_at DESC LIMIT 100`);
+  const results: Array<{ phone: string; topped: boolean; railcoins: number; reason?: string }> = [];
+  for (const row of rows) {
+    results.push({ phone: row.phone, ...(await topUpWallet(row.phone, floor)) });
+  }
+  const topped = results.filter((r) => r.topped).length;
+  console.log(`topped up ${topped} of ${results.length} wallets`);
+  res.json({ ok: true, data: { topped, checked: results.length, results } });
 });
 
 /** Call a task off, telling anyone who was holding it. */
@@ -1274,7 +1326,7 @@ app.get("/v1/handoffs", async (req, res) => {
     `SELECT h.*, c.summary, c.resolution, c.resolution_status
        FROM agent_handoffs h
        LEFT JOIN calls c ON c.id = h.call_id
-      WHERE h.delivered_at IS NULL
+      WHERE h.delivered_at IS NULL AND h.failed_at IS NULL
       ORDER BY h.created_at
       LIMIT $1`,
     [Math.min(Number(req.query.limit) || 20, 100)],
@@ -1289,6 +1341,37 @@ app.post("/v1/handoffs/:id/delivered", async (req, res) => {
     [req.params.id],
   );
   res.json({ ok: true, marked: rowCount });
+});
+
+/**
+ * The relay refused this message for good, so stop retrying - but say so.
+ * Closing it as delivered is what hid the one failure nobody can recover
+ * from on their own: a new person's welcome text never arriving.
+ */
+app.post("/v1/handoffs/:id/failed", async (req, res) => {
+  const reason = String((req.body ?? {}).reason ?? "").slice(0, 500) || "undeliverable";
+  const { rowCount } = await pool.query(
+    `UPDATE agent_handoffs SET failed_at = now(), failure_reason = $2
+      WHERE id = $1 AND delivered_at IS NULL AND failed_at IS NULL`,
+    [req.params.id, reason],
+  );
+  res.json({ ok: true, marked: rowCount });
+});
+
+/**
+ * People the system could not reach. Read this before an event: anyone here
+ * signed up and heard nothing back, and only a human can chase them.
+ */
+app.get("/v1/unreached", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT h.phone, p.display_name, p.email, h.kind, h.failure_reason, h.failed_at
+       FROM agent_handoffs h
+       LEFT JOIN people p ON p.id = h.person_id
+      WHERE h.failed_at IS NOT NULL
+      ORDER BY h.failed_at DESC
+      LIMIT 100`,
+  );
+  res.json({ ok: true, data: rows });
 });
 
 ensureSchema()

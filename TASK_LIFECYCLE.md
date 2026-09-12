@@ -82,6 +82,25 @@ value; say that wherever a dollar figure appears next to them.
 the requester asks. Generating minutes of video for every task, unasked, is not
 a feature.
 
+**A validator must know which segments are ids.** `/v1/offers/:id` got a guard
+rejecting non-numeric ids, which also rejected `/v1/offers/outreach` - the list
+the agent polls to decide who to text. The result was the worst shape a failure
+can take: offers were created, the board showed them, and not one person was
+ever contacted. Real tasks from real people sat unsent. A guard in front of a
+route family has to exempt the collection routes by name, and adding a
+word-named sub-route means adding it to that list.
+
+**An undeliverable message is recorded, never marked delivered.** Closing a
+failed send as "delivered" stops the retry loop and destroys the only evidence.
+Someone signs up, the welcome never lands, they cannot confirm their number, so
+they can never be offered work - and nothing anywhere says why. Failures get
+`failed_at` and a reason, and `/v1/unreached` lists them so a person can chase
+them.
+
+**Send as "auto", not "iMessage".** iMessage-only fails outright for any number
+without an iMessage account - every Android phone on campus. They would sign
+up, hear nothing, and silently never join the pool.
+
 ## Where the state actually lives
 
 `voice-mcp` owns the database and is the only writer of task state. The agent

@@ -8,12 +8,18 @@ import { pool, normalizePhone, upsertPerson } from "./db.js";
 const CLUSTER = process.env.SOLANA_CLUSTER || "devnet";
 const RPC_URL = process.env.SOLANA_RPC_URL || clusterApiUrl(CLUSTER as any);
 // Users see "railcoins", not SOL: 50,000 railcoins = 1 SOL, so everyone's
-// 50-railcoin starting balance costs the treasury 0.001 SOL. Solana rejects
-// any transfer that leaves a brand-new account below the rent-exempt
-// minimum (~0.00065 SOL currently), so this can't go much lower - it's
-// already ~500x more treasury-efficient than a flat 0.5 SOL per person, and
-// the devnet faucet only refills the treasury 5 SOL every 8 hours.
-const AIRDROP_SOL = Number(process.env.SOLANA_AIRDROP_SOL || 0.001);
+// 500-railcoin starting balance costs the treasury 0.01 SOL.
+//
+// 500, not 50, because of rent. Solana rejects any transfer that would leave
+// an account below the rent-exempt minimum - currently ~0.00089 SOL, which is
+// about 45 railcoins. A 50-railcoin grant therefore looked like 50 and spent
+// like 5: every real settlement failed with "insufficient funds for rent"
+// while the balance on screen said there was plenty. The grant has to clear
+// that floor by enough that someone can actually pay for a few tasks.
+//
+// At 0.01 SOL a head, the treasury's 5 SOL per devnet faucet refill covers
+// ~500 signups, which is far more than a hackathon needs.
+const AIRDROP_SOL = Number(process.env.SOLANA_AIRDROP_SOL || 0.01);
 
 export const connection = new Connection(RPC_URL, "confirmed");
 

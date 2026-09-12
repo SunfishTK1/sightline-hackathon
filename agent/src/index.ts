@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { config } from "./config.js";
+import { describeProvider } from "./ai.js";
 import {
   ensureAgentSchema, getCursor, setCursor, claimEvent, completeEvent, loadTurns,
   saveTurns, pool, getAttempt, recordAttempt, bumpOutreachAttempt,
@@ -7,16 +8,17 @@ import {
 } from "./db.js";
 import { buildNudgeHtml } from "./nudge.js";
 import { generateTaskImage } from "./illustrate.js";
-import { generateTaskVideo, type FilmableOrder } from "./video.js";
 import {
-  ensureBucket, putVideo, putImage, getVideo, getImage, storageConfigured,
+  ensureBucket, putImage, getImage, storageConfigured,
 } from "./storage.js";
 import {
   pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
   type RelayEvent,
 } from "./imessage.js";
 import { prepareImage } from "./images.js";
-import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } from "./mcp.js";
+import {
+  undeliveredHandoffs, markHandoffDelivered, markHandoffFailed, mcp, market, type Handoff,
+} from "./mcp.js";
 import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
@@ -296,10 +298,14 @@ async function pollInbound(): Promise<void> {
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
 /**
- * How long an offer waits for its picture and its film before going out
- * without them. Sora runs for minutes, so this is the long pole.
+ * How long an offer waits for its picture before going out without one.
+ *
+ * This was seven minutes because a film had to render first. Films are gone,
+ * and an illustration takes about twenty seconds - so holding an offer for
+ * minutes now only delays asking someone to do a job, which is the one thing
+ * that actually has to happen quickly.
  */
-const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || process.env.VIDEO_WAIT_MS || 420_000);
+const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || 60_000);
 
 function confirmationLine(handoff: Handoff, url?: string | null): string {
   const price = handoff.payload?.budget_usd;
@@ -679,7 +685,7 @@ async function deliverHandoffs(): Promise<void> {
       if (state === "pending") continue; // still in flight, look again next pass
       log(`handoff ${handoff.id} did not land (${detail}), attempt ${prior.attempts}`);
       if (prior.attempts >= MAX_HANDOFF_ATTEMPTS) {
-        await markHandoffDelivered(handoff.id);
+        await markHandoffFailed(handoff.id, `not delivered after ${prior.attempts} attempts: ${detail}`);
         log(`handoff ${handoff.id} GIVING UP after ${prior.attempts} attempts to ${handoff.phone}: ${detail}`);
         continue;
       }
@@ -688,7 +694,10 @@ async function deliverHandoffs(): Promise<void> {
     // A send that never even got accepted also has to stop. The check above
     // only fires once a requestId exists, so a rejected send needs its own cap.
     if ((prior?.attempts ?? 0) >= MAX_HANDOFF_ATTEMPTS) {
-      await markHandoffDelivered(handoff.id);
+      await markHandoffFailed(
+        handoff.id,
+        `never accepted after ${prior?.attempts} sends: ${prior?.last_error ?? "unknown"}`,
+      );
       log(`handoff ${handoff.id} GIVING UP after ${prior?.attempts} failed sends: ${prior?.last_error}`);
       continue;
     }
@@ -709,7 +718,7 @@ async function deliverHandoffs(): Promise<void> {
     await recordSent(sent.requestId, handoff.phone, handoff.kind, refId, outbound);
 
     if (sent.permanent) {
-      await markHandoffDelivered(handoff.id);
+      await markHandoffFailed(handoff.id, `refused by the relay: ${sent.detail}`);
       log(`handoff ${handoff.id} closed without sending (${sent.detail})`);
       continue;
     }
@@ -725,7 +734,9 @@ async function sayTo(
   key: string,
   kind = "agent_action",
   refId: string | null = null,
-  service: "iMessage" | "SMS" | "auto" = "iMessage",
+  // Let Messages pick the service - see sendText. iMessage-only silently
+  // excluded everyone without an iMessage account.
+  service: "iMessage" | "SMS" | "auto" = "auto",
 ): Promise<boolean> {
   const message = shorten(text);
   const sent = await sendText(phone, message, key, undefined, service);
@@ -1164,58 +1175,6 @@ async function illustrateOrders(): Promise<void> {
   }
 }
 
-/**
- * Orders being filmed right now. Generation takes minutes, and both the film
- * loop and an offer waiting to go out can ask for the same clip, so the set
- * stops a task being filmed twice.
- */
-const filming = new Set<string>();
-
-/**
- * Film one task and put the clip in the bucket. Delivery is not done here:
- * the film goes out attached to the offer itself, so there is exactly one
- * path a clip reaches a person by.
- */
-async function filmOrder(order: FilmableOrder & { id: string; title: string }): Promise<boolean> {
-  if (filming.has(order.id)) return false;
-  filming.add(order.id);
-  try {
-    log(`filming "${order.title}"...`);
-    const made = await generateTaskVideo(order);
-    if (!made) {
-      log(`could not film "${order.title}"`);
-      return false;
-    }
-
-    const key = await putVideo(order.id, made.mp4);
-    await market.storeOrderVideo(
-      order.id,
-      key ? { storage_key: key, bytes: made.mp4.length } : { mp4_base64: made.mp4.toString("base64") },
-      made.prompt,
-      made.seconds,
-    );
-    await postLiveMedia({
-      orderId: order.id,
-      kind: "video",
-      storageKey: key ?? undefined,
-      mp4Base64: key ? undefined : made.mp4.toString("base64"),
-      prompt: made.prompt,
-    });
-    log(`filmed "${order.title}" (${made.mp4.length} bytes, ${made.seconds}s${key ? `, ${key}` : ", inline"})`);
-    return true;
-  } finally {
-    filming.delete(order.id);
-  }
-}
-
-/** Keep clips ready for tasks that do not have one yet. */
-async function filmOpenTasks(): Promise<void> {
-  const pending = await market.ordersNeedingVideo();
-  const order = pending.find((o: { id: string }) => !filming.has(o.id));
-  if (!order) return;
-  await filmOrder(order);
-}
-
 /** The illustration for a task, from the bucket or from an older inline row. */
 async function imageFor(orderId: string): Promise<Buffer | null> {
   const stored = await market.orderImage(orderId).catch(() => null);
@@ -1225,86 +1184,6 @@ async function imageFor(orderId: string): Promise<Buffer | null> {
   return null;
 }
 
-/**
- * Send a finished film to the person who paid for it and to everyone
- * currently taking work. A film is now something a requester asks for and is
- * charged for, so it goes to the whole active pool rather than to whoever
- * happened to hold an offer.
- *
- * One film per pass: a backlog should trickle, not arrive all at once.
- */
-async function deliverFilmsToRequesters(): Promise<void> {
-  const pending = await market.videosPendingDelivery();
-  const film = pending[0];
-  if (!film?.requester_phone || !film.order_id) return;
-
-  const mp4 = await videoFor(String(film.order_id));
-  if (!mp4) return;
-  const attachmentId = await uploadAttachment(mp4, "video/mp4");
-  if (!attachmentId) {
-    log(`could not upload the trailer for "${film.title}"`);
-    return;
-  }
-
-  const requester = String(film.requester_phone);
-  const caption = `We made a trailer for your request: "${film.title}". Sixteen seconds, and it takes itself extremely seriously.`;
-  const sent = await sendText(
-    requester, shorten(caption),
-    `gotchu-trailer-${film.order_id}`, [attachmentId],
-  );
-  await recordSent(sent.requestId, requester, "trailer", String(film.order_id), caption);
-
-  // The point of paying for one is that everyone taking work sees the job.
-  const pitch = `Someone wants this done: "${film.title}". Sixteen seconds on why it matters. Text me if you'll take it.`;
-  let active: Array<{ phone?: string }> = [];
-  try {
-    active = await market.activeWorkers();
-  } catch (err) {
-    log(`could not load the film audience for "${film.title}": ${(err as Error).message}`);
-    return;
-  }
-  let allDelivered = sent.accepted || sent.permanent;
-  for (const worker of active) {
-    if (!worker.phone || worker.phone === requester) continue;
-    const out = await sendText(
-      worker.phone, shorten(pitch),
-      `gotchu-trailer-${film.order_id}-${worker.phone.replace(/\D/g, "")}`, [attachmentId],
-    );
-    await recordSent(out.requestId, worker.phone, "trailer", String(film.order_id), pitch);
-    if (out.accepted) {
-      const history = await loadTurns(worker.phone);
-      await saveTurns(worker.phone, [
-        ...history,
-        { role: "assistant", content: pitch, at: new Date().toISOString() },
-      ]);
-    }
-    if (!out.accepted && !out.permanent) allDelivered = false;
-    log(`trailer broadcast -> ${worker.phone}: ${out.detail}`);
-  }
-
-  // Stable idempotency keys make retries safe. Do not close the queue row
-  // until every intended recipient either accepted or failed permanently.
-  if (allDelivered) {
-    await market.markVideoDelivered(String(film.order_id)).catch(() => null);
-  }
-  if (sent.accepted) {
-    const history = await loadTurns(String(film.requester_phone));
-    await saveTurns(String(film.requester_phone), [
-      ...history,
-      { role: "assistant", content: caption, at: new Date().toISOString() },
-    ]);
-  }
-  log(`trailer "${film.title}" -> ${film.requester_phone}: ${sent.detail}`);
-}
-
-/** The clip for an offer, from the bucket or from an older inline row. */
-async function videoFor(orderId: string): Promise<Buffer | null> {
-  const stored = await market.orderVideo(orderId).catch(() => null);
-  if (!stored) return null;
-  if (stored.storage_key) return getVideo(stored.storage_key);
-  if (stored.mp4_base64) return Buffer.from(stored.mp4_base64, "base64");
-  return null;
-}
 
 async function loop(name: string, fn: () => Promise<void>, seconds: number) {
   for (;;) {
@@ -1444,7 +1323,7 @@ async function main() {
     });
   }).listen(config.port, () => log(`http on :${config.port}`));
 
-  log(`gotchu agent up - model ${config.model}, market-maker ${config.marketMakerUrl}, numbers: ${config.allowedNumbers.join(", ") || "all enrolled"}`);
+  log(`gotchu agent up - ${describeProvider()}, market-maker ${config.marketMakerUrl}, numbers: ${config.allowedNumbers.join(", ") || "all enrolled"}`);
   loop("inbound", pollInbound, config.pollSeconds);
   loop("handoffs", deliverHandoffs, 5);
   loop("match", matchOpenOrders, 10);
@@ -1454,8 +1333,6 @@ async function main() {
   loop("live-skip", applyLiveSkips, 5);
   loop("chase", chaseStuckItems, 60);
   loop("illustrate", illustrateOrders, 30);
-  loop("film", filmOpenTasks, 120);
-  loop("trailer", deliverFilmsToRequesters, 60);
 }
 
 // Last line of defence. A background loop or a stray await must not be able

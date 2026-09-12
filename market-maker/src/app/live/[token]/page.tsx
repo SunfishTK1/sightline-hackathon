@@ -3,7 +3,6 @@ import { ensureSchema } from "@/lib/db/schema";
 import { loadLiveBoard } from "@/lib/db/live";
 import { boardWithDeal } from "@/lib/live/deal";
 import { LiveBoard } from "./live-board";
-import { FilmButton } from "./film-button";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +18,6 @@ const RAILCOINS_PER_SOL = 50_000;
 /** Work must be marked done before the requester can release payment. */
 const CLOSEABLE = new Set(["done_pending"]);
 /** Films are pitches for tasks that are still active. */
-const FILMABLE = new Set(["submitted", "offered", "accepted", "done_pending"]);
 
 type OrderDetail = {
   pickup_location: string | null;
@@ -102,7 +100,6 @@ export default async function LivePage({
   const needsRetry =
     order?.status === "completed" && !alreadyPaid && Boolean(railcoins && railcoins > 0);
 
-  const filmFee = Number(process.env.FILM_FEE_RAILCOINS || 5);
 
   return (
     <>
@@ -121,15 +118,6 @@ export default async function LivePage({
         needsRetry,
       }}
     />
-    {FILMABLE.has(order?.status ?? "") ? (
-      <div className="mx-auto w-full max-w-md px-5 pb-10">
-        <FilmButton
-          token={token}
-          fee={filmFee}
-          alreadyRequested={Boolean(order?.film_paid_signature)}
-        />
-      </div>
-    ) : null}
     </>
   );
 }

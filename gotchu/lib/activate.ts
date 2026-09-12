@@ -9,6 +9,10 @@
  *      `people` with no row in `worker_profiles` is invisible to it.
  *   2. An introduction, so the agent opens the conversation rather than the
  *      person's first text arriving cold.
+ *   3. A funded wallet, so their starting railcoins are actually there. The
+ *      wallet used to be created lazily at the first payment, which meant a
+ *      brand-new account's balance read as nothing at all until they had
+ *      already transacted - the one moment the number matters most.
  *
  * The profile starts unavailable on purpose. Nothing here has proved the phone
  * number is theirs, and a mistyped number would otherwise receive job offers
@@ -19,6 +23,44 @@
  * the person can be brought into the pool later.
  */
 import { getPool, postgresConfigured } from "./pg";
+
+const MARKET = (process.env.MARKET_API_URL || "").replace(/\/$/, "");
+const MARKET_TOKEN = process.env.MCP_AUTH_TOKEN || process.env.VOICE_MCP_AUTH_TOKEN || "";
+
+/**
+ * Ask the marketplace service to create and fund this person's wallet.
+ *
+ * It has to be done over HTTP rather than here: the encryption key and the
+ * treasury's signing key live in that service and nowhere else, which is the
+ * point - the web app can ask for a wallet but can never mint or spend one.
+ *
+ * Best-effort by design. The grant is also made on demand at the first
+ * payment, so a failure here costs the person a number on a page, not money.
+ */
+async function ensureFundedWallet(phone: string): Promise<void> {
+  if (!MARKET) return;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (MARKET_TOKEN) {
+    headers.Authorization = `Bearer ${MARKET_TOKEN}`;
+    headers["x-api-key"] = MARKET_TOKEN;
+  }
+  try {
+    const res = await fetch(`${MARKET}/v1/wallets/ensure`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ phone }),
+      cache: "no-store",
+      // Funding is a devnet transaction the signup should never wait on for
+      // long; the retry path is the next payment.
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) {
+      console.error(`wallet for ${phone} was not created: ${res.status}`);
+    }
+  } catch (err) {
+    console.error(`wallet for ${phone} was not created:`, err);
+  }
+}
 
 export type Activation = {
   personId: string;
@@ -65,6 +107,10 @@ export async function activateParticipant(person: Activation): Promise<void> {
     // Worth seeing in the logs, never worth losing the signup over.
     console.error("could not bring the new signup into the marketplace:", err);
   }
+
+  // Outside the try: a failed profile write should not cost them the wallet,
+  // and a failed wallet should not cost them the profile.
+  await ensureFundedWallet(person.phone);
 }
 
 /** Keep marketplace lookups in sync after a later profile edit. */

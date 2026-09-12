@@ -1,3 +1,4 @@
+import { responsesUrl, aiJsonHeaders } from "./ai.js";
 import { config } from "./config.js";
 import {
   mcp, market, type OpenJob, type MyOrder, type OpenCounter, type JobQuestion,
@@ -8,7 +9,7 @@ import { evaluateDeal } from "./broker.js";
 import { postLiveEvent, startLiveBoard } from "./live.js";
 import type { Turn } from "./db.js";
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
+// Provider and model come from ai.ts so this works on xAI or OpenAI.
 
 /**
  * Tool schemas the model sees. Note what is absent: the caller's phone number.
@@ -420,12 +421,9 @@ async function callModel(
   isNewConversation?: boolean,
   style?: { summary: string; style_tag: string } | null,
 ): Promise<any> {
-  const res = await fetch(OPENAI_URL, {
+  const res = await fetch(responsesUrl, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openaiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers: aiJsonHeaders(),
     body: JSON.stringify({
       model: config.model,
       instructions: systemPrompt(

@@ -1,10 +1,9 @@
 import { config } from "./config.js";
+import { createImage, createImageFromReference } from "./ai.js";
 import { likenessFor } from "./likeness.js";
 
-const IMAGE_URL = "https://api.openai.com/v1/images/generations";
-/** Same model, but conditioned on a reference photo of the person. */
-const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
-const IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-sunburst";
+// Which provider draws these, and the per-provider request shapes, live in
+// ai.ts. This file is only about what to draw.
 
 export type IllustratableOrder = {
   id: string;
@@ -17,12 +16,6 @@ export type IllustratableOrder = {
   requester_phone: string;
 };
 
-/**
- * Who appears in the picture. Left unsaid, the model draws the same young man
- * every time, which does not look like this campus. The person is chosen from
- * the task id, so one task always draws the same way while the set rotates
- * across tasks.
- */
 /**
  * What Carnegie Mellon actually looks like. Without this the model draws a
  * generic red-brick campus with white columns and a clock tower, which is any
@@ -66,59 +59,23 @@ export function buildImagePrompt(order: IllustratableOrder): string {
 export async function generateTaskImage(
   order: IllustratableOrder,
 ): Promise<{ png: Buffer; prompt: string } | null> {
-  // A still holds a likeness far better than a clip does - Sora only
-  // conditions its first frame, so the face drifts - which makes the picture
-  // the place where looking like the actual person is worth doing.
-  const likeness = await likenessFor(order.requester_phone, "image");
+  // The picture is the only place a likeness appears now, and it holds one far
+  // better than a clip ever did. How the reference is attached differs per
+  // provider; that lives in ai.ts.
+  const likeness = await likenessFor(order.requester_phone);
   if (likeness) {
     const prompt = `${buildImagePrompt(order)} The person doing the task is the student in the reference photo: keep their face, hair, and skin tone recognisably the same. Do not copy the reference's background or clothing - place them in the scene described above.`;
-    const form = new FormData();
-    form.append("model", IMAGE_MODEL);
-    form.append("prompt", prompt);
-    form.append("size", "1024x1024");
-    form.append(
-      "image[]",
-      new Blob([new Uint8Array(likeness.png)], { type: "image/png" }),
-      "reference.png",
-    );
-    try {
-      const res = await fetch(IMAGE_EDIT_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${config.openaiKey}` },
-        body: form,
-      });
-      if (res.ok) {
-        const body = (await res.json()) as { data?: Array<{ b64_json?: string }> };
-        const b64 = body.data?.[0]?.b64_json;
-        if (b64) {
-          console.log(`drew "${order.title}" with the requester's likeness`);
-          return { png: Buffer.from(b64, "base64"), prompt };
-        }
-      }
-      // Refusing a real face is expected, not exceptional. Fall through to the
-      // ordinary picture rather than leaving the task without one.
-      console.error(`likeness image refused (HTTP ${res.status}) for "${order.title}"`);
-    } catch (err) {
-      console.error(`likeness image failed for "${order.title}": ${(err as Error).message}`);
+    const png = await createImageFromReference(prompt, likeness.png);
+    if (png) {
+      console.log(`drew "${order.title}" with the requester's likeness`);
+      return { png, prompt };
     }
+    // Refusing a real face is expected, not exceptional. Fall through to the
+    // ordinary picture rather than leaving the task without one.
+    console.error(`no likeness picture for "${order.title}" - drawing it plain`);
   }
 
   const prompt = buildImagePrompt(order);
-  try {
-    const res = await fetch(IMAGE_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.openaiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ model: IMAGE_MODEL, prompt, size: "1024x1024", n: 1 }),
-    });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { data?: Array<{ b64_json?: string }> };
-    const b64 = body.data?.[0]?.b64_json;
-    if (!b64) return null;
-    return { png: Buffer.from(b64, "base64"), prompt };
-  } catch {
-    return null;
-  }
+  const png = await createImage(prompt);
+  return png ? { png, prompt } : null;
 }

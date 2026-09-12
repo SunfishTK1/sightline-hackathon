@@ -31,12 +31,13 @@ function decodeDataUrl(dataUrl: string): { bytes: Buffer; mime: string } | null 
 
 /**
  * Fetch the person's photo, if they have one and agreed to it, and fit it to
- * the exact frame the video model wants. Returns null for every failure: a
- * missing likeness must never stop a film being made.
+ * the square frame the image model wants. Returns null for every failure: a
+ * missing likeness must never stop a picture being drawn.
+ *
+ * The portrait video shape is gone along with films.
  */
 export async function likenessFor(
   phone: string | null | undefined,
-  shape: "video" | "image" = "video",
 ): Promise<Likeness> {
   if (!phone) return null;
   try {
@@ -47,11 +48,9 @@ export async function likenessFor(
     if (!decoded) return null;
 
     // Cover rather than contain: letterbox bars would be baked into the
-    // opening frame of the clip. "attention" keeps the face when cropping.
-    const [w, h] =
-      shape === "image" ? [IMAGE_REFERENCE, IMAGE_REFERENCE] : [REFERENCE_WIDTH, REFERENCE_HEIGHT];
+    // reference. "attention" keeps the face when cropping.
     const png = await sharp(decoded.bytes)
-      .resize(w, h, { fit: "cover", position: "attention" })
+      .resize(IMAGE_REFERENCE, IMAGE_REFERENCE, { fit: "cover", position: "attention" })
       .png()
       .toBuffer();
 
