@@ -422,7 +422,7 @@ app.get("/v1/orders/:id/video", async (req, res) => {
 /** Clips generated but not yet sent - the relay cannot carry video yet. */
 app.get("/v1/videos/pending-delivery", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT v.order_id, v.seconds, octet_length(v.mp4) AS bytes, v.created_at,
+    `SELECT v.order_id, v.seconds, COALESCE(v.bytes, octet_length(v.mp4)) AS bytes, v.created_at,
             o.title, p.phone AS requester_phone, w.phone AS worker_phone
        FROM order_videos v
        JOIN orders o ON o.id = v.order_id

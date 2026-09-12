@@ -233,10 +233,11 @@ async function pollInbound(): Promise<void> {
 
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
-/** How long an offer waits for its picture before going out as text only. */
-const IMAGE_WAIT_MS = 90_000;
-/** How long an offer waits for its film. Sora runs for minutes. */
-const VIDEO_WAIT_MS = Number(process.env.VIDEO_WAIT_MS || 420_000);
+/**
+ * How long an offer waits for its picture and its film before going out
+ * without them. Sora runs for minutes, so this is the long pole.
+ */
+const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || process.env.VIDEO_WAIT_MS || 420_000);
 
 function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "call_summary") {
@@ -374,35 +375,18 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
-    // Send the task's picture with the offer, so they can see the job. The
-    // illustration takes about 20 seconds, so wait briefly for it rather than
-    // texting the offer bare - but never let a failed drawing block the work.
+    // The job, its picture and its film go out as one message: an offer that
+    // arrives first and is chased by its own trailer reads as two unrelated
+    // texts. So nothing is sent until every asset exists - capped, because a
+    // job that never goes out is worse than one that goes out plain.
     const orderId = String(offer.order_id ?? "");
     const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
-    const attachments: string[] = [];
+    const [png, mp4] = await Promise.all([imageFor(orderId), videoFor(orderId)]);
 
-    const png = await imageFor(orderId);
-    if (png) {
-      const id = await uploadAttachment(png, "image/png");
-      if (id) attachments.push(id);
-    } else if (waited < IMAGE_WAIT_MS) {
-      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
-      continue;
-    } else {
-      log(`offer ${offer.id} going out without an illustration after ${Math.round(waited / 1000)}s`);
-    }
-
-    // The film is the pitch, so the offer waits for it rather than arriving
-    // first and being followed by a clip nobody asked about. Sora takes
-    // minutes, so the hold is long - but it is a cap, not a promise: past it
-    // the job goes out with whatever exists.
-    const mp4 = await videoFor(orderId);
-    if (mp4) {
-      const id = await uploadAttachment(mp4, "video/mp4");
-      if (id) attachments.push(id);
-    } else if (waited < VIDEO_WAIT_MS) {
-      // Start it now rather than waiting for the film loop to come round.
-      if (!filming.has(orderId)) {
+    if ((!png || !mp4) && waited < ASSET_WAIT_MS) {
+      // Start the film here rather than waiting for the loop to come round.
+      // The illustration has its own loop already.
+      if (!mp4 && !filming.has(orderId)) {
         void filmOrder({
           id: orderId,
           title: offer.title,
@@ -415,10 +399,23 @@ async function sendOutreach(): Promise<void> {
           requester_phone: "",
         }).catch(() => false);
       }
-      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its film`);
+      const missing = [!png && "its picture", !mp4 && "its film"].filter(Boolean).join(" and ");
+      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for ${missing}`);
       continue;
-    } else {
-      log(`offer ${offer.id} going out without a film after ${Math.round(waited / 1000)}s`);
+    }
+
+    const attachments: string[] = [];
+    if (png) {
+      const id = await uploadAttachment(png, "image/png");
+      if (id) attachments.push(id);
+    }
+    if (mp4) {
+      const id = await uploadAttachment(mp4, "video/mp4");
+      if (id) attachments.push(id);
+    }
+    if (!png || !mp4) {
+      const missing = [!png && "a picture", !mp4 && "a film"].filter(Boolean).join(" or ");
+      log(`offer ${offer.id} going out without ${missing} after ${Math.round(waited / 1000)}s`);
     }
 
     const message = shorten(text);
@@ -873,6 +870,49 @@ async function imageFor(orderId: string): Promise<Buffer | null> {
   return null;
 }
 
+/**
+ * Send each film to the person who asked for the task. The requester never
+ * sees the offer it goes out on, so without this the only people who ever
+ * watch the thing are the ones being pitched the job.
+ *
+ * One per pass on purpose: a backlog should trickle out, not arrive all at
+ * once as six videos in a row.
+ */
+async function deliverFilmsToRequesters(): Promise<void> {
+  const pending = await market.videosPendingDelivery();
+  const film = pending[0];
+  if (!film?.requester_phone || !film.order_id) return;
+
+  const mp4 = await videoFor(String(film.order_id));
+  if (!mp4) return;
+  const attachmentId = await uploadAttachment(mp4, "video/mp4");
+  if (!attachmentId) {
+    log(`could not upload the trailer for "${film.title}"`);
+    return;
+  }
+
+  const caption = `We made a trailer for your request: "${film.title}". Sixteen seconds, and it takes itself extremely seriously.`;
+  const sent = await sendText(
+    String(film.requester_phone), shorten(caption),
+    `gotchu-trailer-${film.order_id}`, [attachmentId],
+  );
+  await recordSent(sent.requestId, String(film.requester_phone), "trailer", String(film.order_id), caption);
+
+  // Mark it done on a permanent failure too, or an unusable number is retried
+  // every minute forever.
+  if (sent.accepted || sent.permanent) {
+    await market.markVideoDelivered(String(film.order_id)).catch(() => null);
+  }
+  if (sent.accepted) {
+    const history = await loadTurns(String(film.requester_phone));
+    await saveTurns(String(film.requester_phone), [
+      ...history,
+      { role: "assistant", content: caption, at: new Date().toISOString() },
+    ]);
+  }
+  log(`trailer "${film.title}" -> ${film.requester_phone}: ${sent.detail}`);
+}
+
 /** The clip for an offer, from the bucket or from an older inline row. */
 async function videoFor(orderId: string): Promise<Buffer | null> {
   const stored = await market.orderVideo(orderId).catch(() => null);
@@ -1018,6 +1058,7 @@ async function main() {
   loop("chase", chaseStuckItems, 60);
   loop("illustrate", illustrateOrders, 30);
   loop("film", filmOpenTasks, 120);
+  loop("trailer", deliverFilmsToRequesters, 60);
 }
 
 main().catch((err) => {
