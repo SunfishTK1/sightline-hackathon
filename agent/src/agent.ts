@@ -541,6 +541,32 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       return result;
     }
 
+    // A worker naming a higher price is a haggle, not a refusal. The broker's
+    // ceiling is only its own auto-approval limit - and since the agent sends
+    // no maximum_usd, that limit collapses to the asking price, so ANY counter
+    // lands here. Closing the offer on it ends the negotiation the product is
+    // built around: put the number to the requester and let them decide, which
+    // is what a counter-offer is for. The round cap in voice-mcp still ends
+    // runaway haggling, and REJECT_SCOPE - a different job - still closes.
+    if (verdict.action === "TRY_NEXT" && Number.isFinite(args.price_usd) && args.price_usd > 0) {
+      const relayed = await market
+        .counter(target.id, phone, args.price_usd, args.note || undefined)
+        .catch(() => null);
+      // Only "countered" actually reached the requester. "unchanged" means the
+      // offer was already closed, and "cancelled_too_many_rounds" means this
+      // very call ended the haggling - announcing either as a counter would
+      // tell someone their price is with the requester when it is nowhere.
+      if (relayed?.status === "countered") {
+        await announceCounter(target.order_id, String(target.id), args.price_usd, timeAsk);
+        return {
+          ...relayed,
+          say: "Put their price to the person who asked, and say you are waiting on them.",
+        };
+      }
+      // Genuinely not open any more: fall through and say so plainly rather
+      // than pretending the counter went somewhere.
+    }
+
     if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
       // Do not relay the note - it is a different job, or the haggling is over.
       await market.respond(target.id, false).catch(() => null);
