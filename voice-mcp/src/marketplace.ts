@@ -429,6 +429,21 @@ export async function confirmTaskDone(
     );
   }
 
+  // The requester never heard anything after confirming, so money left their
+  // wallet silently. Only sent when it actually moved.
+  if (settlement?.settled) {
+    await pool.query(
+      `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+       VALUES ($1,$2,$3,'payment_sent',$4::jsonb)`,
+      [
+        order.person_id,
+        e164,
+        order.id,
+        JSON.stringify({ title: order.title, railcoins: settlement.railcoins }),
+      ],
+    );
+  }
+
   await pool.query(
     `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
      VALUES ($1,$2,$3,'task_completed',$4::jsonb)`,
