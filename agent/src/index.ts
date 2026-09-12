@@ -299,6 +299,9 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "question_answered") {
     return `On "${handoff.payload?.title}" you asked: ${handoff.payload?.question} They said: ${handoff.payload?.answer}`;
   }
+  if (handoff.kind === "no_takers") {
+    return `Nobody has taken "${handoff.payload?.title}" after asking around, so I've paused it rather than keep pestering people. Tell me a different price or looser terms and I'll put it back out.`;
+  }
   if (handoff.kind === "task_cancelled") {
     const why = handoff.payload?.reason ? ` (${handoff.payload.reason})` : "";
     return `"${handoff.payload?.title}" was called off${why}, so you're off the hook for it. Nothing owed either way.`;
@@ -328,7 +331,13 @@ async function matchOpenOrders(): Promise<void> {
 
     const picks = await pickWorkers(order, candidates);
     if (!picks.length) {
-      log(`no suitable worker for "${order.title}" among ${candidates.length} available`);
+      // Count the miss. A task the pool keeps declining gets parked and the
+      // requester told, rather than retried every twenty seconds in silence.
+      const result = await market.noMatch(String(order.id)).catch(() => null);
+      log(
+        `no suitable worker for "${order.title}" among ${candidates.length} available` +
+          (result?.parked ? " - parked, requester told" : ""),
+      );
       continue;
     }
     const pick = picks[0];

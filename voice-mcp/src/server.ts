@@ -9,12 +9,14 @@ import {
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
   askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
   callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
-  cancelOrder,
+  cancelOrder, blockOrder,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
 import { saveStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
+import { reviewTask } from "./ethics.js";
+import { createWalletLink, resolveWalletLink, createWalletForLink } from "./walletlink.js";
 
 const PORT = Number(process.env.PORT || 3010);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
@@ -147,6 +149,35 @@ app.post("/v1/wallets/ensure", async (req, res) => {
   if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
   try {
     res.json({ ok: true, data: await ensureWallet(String(phone)) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Mint a link the agent can text so someone can open their own wallet. */
+app.post("/v1/wallet-links", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await createWalletLink(String(phone)) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** What the page shows. An expired or unknown token is simply not found. */
+app.get("/v1/wallet-links/:token", async (req, res) => {
+  const found = await resolveWalletLink(req.params.token);
+  if (!found) return res.status(404).json({ ok: false, error: "link_expired" });
+  res.json({ ok: true, data: found });
+});
+
+/** The page's one action: make me a wallet. */
+app.post("/v1/wallet-links/:token/wallet", async (req, res) => {
+  try {
+    const wallet = await createWalletForLink(req.params.token);
+    if (!wallet) return res.status(404).json({ ok: false, error: "link_expired" });
+    res.json({ ok: true, data: wallet });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -633,6 +664,90 @@ app.post("/v1/offers/:id/counter/respond", async (req, res) => {
 /** Counters awaiting a requester's decision. */
 app.get("/v1/counters/open", async (req, res) => {
   res.json({ ok: true, data: await listOpenCounters(String(req.query.phone ?? "")) });
+});
+
+/**
+ * Drop clips made under an older format so the film loop remakes them. A task
+ * that still carries a four-second single shot would otherwise keep pitching
+ * itself with it long after the treatment changed.
+ */
+app.post("/v1/dev/refilm", async (req, res) => {
+  const minSeconds = Number(req.body?.min_seconds) || 16;
+  const { rows } = await pool.query(
+    `DELETE FROM order_videos
+      WHERE seconds IS NULL OR seconds < $1
+      RETURNING order_id, seconds`,
+    [minSeconds],
+  );
+  console.log(`cleared ${rows.length} stale clip(s) for refilming`);
+  res.json({ ok: true, data: { cleared: rows.length, orders: rows } });
+});
+
+/**
+ * Re-gate tasks that are already open. The rubric changes as the policy is
+ * worked out, and a task allowed under an older version should not stay open
+ * just because it got in first.
+ */
+app.post("/v1/dev/re-review", async (req, res) => {
+  // Dry run unless asked otherwise. A sweep that blocks live work on a rubric
+  // nobody has eyeballed is how legitimate tasks get cancelled in bulk.
+  const apply = req.body?.apply === true;
+  const { rows } = await pool.query(
+    `SELECT id, title, details, category, pickup_location, dropoff_location,
+            budget_usd, deadline_at
+       FROM orders
+      WHERE status IN ('submitted', 'offered', 'accepted')`,
+  );
+
+  const blocked: Array<{ id: string; title: string; reason: string; told: number }> = [];
+  const kept: string[] = [];
+  const unreviewed: string[] = [];
+
+  for (const order of rows) {
+    const verdict = await reviewTask(order);
+    if (!verdict) {
+      unreviewed.push(order.title);
+      continue;
+    }
+    if (verdict.verdict === "BLOCK") {
+      const reason = verdict.reason ?? "No longer allowed under the current policy.";
+      const result = apply ? await blockOrder(order.id, reason) : null;
+      blocked.push({
+        id: order.id,
+        title: order.title,
+        reason,
+        told: result && "told" in result ? (result.told ?? 0) : 0,
+      });
+      continue;
+    }
+    if (!apply) { kept.push(order.title); continue; }
+    await pool.query(
+      `UPDATE orders SET ethics_verdict = $2, ethics_reason = $3 WHERE id = $1`,
+      [order.id, verdict.verdict, verdict.reason ?? null],
+    );
+    kept.push(order.title);
+  }
+
+  console.log(`re-review: ${blocked.length} blocked, ${kept.length} kept, ${unreviewed.length} unreviewed`);
+  res.json({ ok: true, data: { blocked, kept, unreviewed } });
+});
+
+/**
+ * Put a wrongly blocked task back. The gate can be wrong - a rule that matches
+ * a word rather than a meaning will block real work - and when it is, the task
+ * should not need recreating from scratch.
+ */
+app.post("/v1/orders/:id/unblock", async (req, res) => {
+  const { rows } = await pool.query(
+    `UPDATE orders
+        SET status = 'submitted', ethics_verdict = NULL, ethics_reason = NULL, updated_at = now()
+      WHERE id = $1 AND status = 'blocked'
+      RETURNING id, title`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ ok: false, error: "not_blocked" });
+  console.log(`unblocked ${rows[0].title}: ${req.body?.reason ?? "no reason given"}`);
+  res.json({ ok: true, data: rows[0] });
 });
 
 /** Call a task off, telling anyone who was holding it. */

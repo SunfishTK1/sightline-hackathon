@@ -455,6 +455,11 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       open_job_offers: jobs,
     };
   }
+  if (name === "wallet_link") {
+    // The phone is bound server-side, so the model cannot mint a link for
+    // anyone but the person it is talking to.
+    return await market.walletLink(phone);
+  }
   if (name === "set_availability") {
     return await mcp.setWorkerProfile({
       phone, // bound, never model-supplied
