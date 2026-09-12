@@ -18,12 +18,16 @@ export function TaskMoney({
   token,
   railcoins,
   requesterBalance,
+  publicKey,
+  cluster,
   canPay,
   alreadyPaid,
 }: {
   token: string;
   railcoins: number | null;
   requesterBalance: number | null;
+  publicKey?: string | null;
+  cluster?: string | null;
   canPay: boolean;
   /** Settled before this page was opened, so say so instead of going quiet. */
   alreadyPaid: boolean;
@@ -32,8 +36,6 @@ export function TaskMoney({
   const [paying, setPaying] = useState(false);
   const [paid, setPaid] = useState(alreadyPaid);
   const [error, setError] = useState<string | null>(null);
-
-  if (railcoins == null && requesterBalance == null) return null;
 
   const short = railcoins != null && balance != null && balance < railcoins;
 
@@ -65,11 +67,11 @@ export function TaskMoney({
   }
 
   return (
-    <section className="mt-10">
-      <h2 className="text-sm font-medium tracking-wide text-zinc-500 uppercase">The money</h2>
+    <section>
+      <h2 className="text-lg font-semibold">The money</h2>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {railcoins != null && (
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5">
+          <div className="rounded-[28px] border border-[#e7e2d8] bg-white p-5">
             <p className="text-sm text-zinc-500">This task pays</p>
             <p className="mt-1 font-mono text-3xl font-semibold tabular-nums text-[#1f5c3a]">
               {railcoins.toLocaleString()}
@@ -79,17 +81,25 @@ export function TaskMoney({
             </p>
           </div>
         )}
-        {balance != null && (
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5">
-            <p className="text-sm text-zinc-500">Your balance</p>
-            <p className="mt-1 font-mono text-3xl font-semibold tabular-nums text-zinc-900">
-              {balance.toLocaleString()}
+        <div className="rounded-[28px] border border-[#e7e2d8] bg-white p-5">
+          <p className="text-sm text-zinc-500">Your Solana wallet</p>
+          <p className="mt-1 font-mono text-3xl font-semibold tabular-nums text-zinc-900">
+            {balance != null ? balance.toLocaleString() : "—"}
+          </p>
+          <p className="mt-1 text-sm text-zinc-500">
+            {balance == null
+              ? "railcoins · wallet attaches when this job is live"
+              : short
+                ? "not enough to cover this task"
+                : "enough to cover this task"}
+          </p>
+          {publicKey ? (
+            <p className="mt-3 break-all font-mono text-[11px] leading-4 text-zinc-500">
+              {publicKey}
+              {cluster ? ` · ${cluster}` : ""}
             </p>
-            <p className="mt-1 text-sm text-zinc-500">
-              {short ? "not enough to cover this task" : "enough to cover this task"}
-            </p>
-          </div>
-        )}
+          ) : null}
+        </div>
       </div>
 
       {paid ? (

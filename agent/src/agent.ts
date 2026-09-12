@@ -5,7 +5,7 @@ import {
 } from "./mcp.js";
 import { CAMPUS_CONTEXT } from "./campus.js";
 import { evaluateDeal } from "./broker.js";
-import { startLiveBoard } from "./live.js";
+import { postLiveEvent, startLiveBoard } from "./live.js";
 import type { Turn } from "./db.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
@@ -532,14 +532,25 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       note: args.note || undefined,
     });
 
+    const timeAsk = looksLikeTimeAsk(args.note, args.price_usd, onTable);
+
     // Broker unreachable: fall back to putting it to the requester.
     if (!verdict) {
-      return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+      const result = await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+      await announceCounter(target.order_id, String(target.id), args.price_usd, timeAsk);
+      return result;
     }
 
     if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
       // Do not relay the note - it is a different job, or the haggling is over.
       await market.respond(target.id, false).catch(() => null);
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: "declined",
+        message: "They passed. Trying the next person.",
+        offerId: String(target.id),
+        state: "declined",
+      });
       return {
         status: verdict.action.toLowerCase(),
         say: verdict.messageHint,
@@ -551,6 +562,7 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       // requester's own agent settles it within seconds via AUTO_REQUESTER -
       // the worker's view has no business holding the requester's phone.
       await market.counter(target.id, phone, verdict.agreedUsd, args.note || undefined);
+      await announceCounter(target.order_id, String(target.id), verdict.agreedUsd, timeAsk);
       return {
         status: "agreed_pending_settlement",
         agreed_usd: verdict.agreedUsd,
@@ -561,10 +573,19 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       // Counter back to the worker at the broker's number; the requester is
       // not asked yet.
       await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: "countered",
+        message: `Counter offer: they asked for $${verdict.nextOfferUsd}.`,
+        offerId: String(target.id),
+        state: "countered",
+      });
       return { status: "countered_back", offer_usd: verdict.nextOfferUsd, say: verdict.messageHint };
     }
     // ASK_REQUESTER, or anything unexpected: put it to the requester.
-    return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+    const result = await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+    await announceCounter(target.order_id, String(target.id), args.price_usd, timeAsk);
+    return result;
   }
   if (name === "respond_to_counter") {
     // The requester's own yes or no still goes past the broker, so its record
@@ -581,16 +602,47 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       }).catch(() => null);
     }
     // The phone is bound, so they can only answer counters on their own tasks.
-    return await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
+    const result = await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
+    const orderId = pending?.order_id;
+    if (orderId) {
+      await postLiveEvent({
+        orderId,
+        kind: args.accept ? "accepted" : "declined",
+        message: args.accept ? "Someone took the job." : "The counter was turned down. Still looking.",
+        offerId: String(args.offer_id),
+        state: args.accept ? "accepted" : "declined",
+      });
+    }
+    return result;
   }
   if (name === "update_request") {
-    return await mcp.updateOrder({
+    const result = await mcp.updateOrder({
       phone, // bound, so they can only change their own
       order_id: args.request_id,
       budget_usd: args.budget_usd > 0 ? args.budget_usd : undefined,
       deadline_at: args.deadline_at || undefined,
       details: args.details || undefined,
     });
+    if (args.deadline_at) {
+      await postLiveEvent({
+        orderId: String(args.request_id),
+        kind: "need_time",
+        message: "A new time was proposed.",
+      });
+    } else if (args.budget_usd > 0) {
+      await postLiveEvent({
+        orderId: String(args.request_id),
+        kind: "updated",
+        message: "The budget was updated.",
+      });
+    } else if (args.details) {
+      await postLiveEvent({
+        orderId: String(args.request_id),
+        kind: "updated",
+        message: "The job details were updated.",
+      });
+    }
+    return result;
   }
   if (name === "respond_to_job") {
     // Only offers actually made to this phone are answerable.
@@ -606,11 +658,52 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     });
     if (args.accept && verdict && verdict.action === "REJECT_SCOPE") {
       await market.respond(target.id, false).catch(() => null);
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: "declined",
+        message: "They passed. Trying the next person.",
+        offerId: String(target.id),
+        state: "declined",
+      });
       return { status: "rejected_scope", say: verdict.messageHint };
     }
-    return await market.respond(target.id, Boolean(args.accept));
+    const result = await market.respond(target.id, Boolean(args.accept));
+    await postLiveEvent({
+      orderId: target.order_id,
+      kind: args.accept ? "accepted" : "declined",
+      message: args.accept ? "Someone took the job." : "They passed. Trying the next person.",
+      offerId: String(target.id),
+      state: args.accept ? "accepted" : "declined",
+    });
+    return result;
   }
   throw new Error(`unknown tool ${name}`);
+}
+
+function looksLikeTimeAsk(note?: string, price?: number, current?: number): boolean {
+  const n = (note ?? "").toLowerCase();
+  const timey = /\b(time|later|deadline|tonight|tomorrow|after|hour|minute|when)\b/.test(n);
+  const same = price != null && current != null && Math.abs(price - current) < 0.02;
+  return timey && (same || price == null);
+}
+
+async function announceCounter(
+  orderId: string,
+  offerId: string,
+  price: number,
+  timeAsk: boolean,
+): Promise<void> {
+  await postLiveEvent({
+    orderId,
+    kind: timeAsk ? "need_time" : "countered",
+    message: timeAsk
+      ? "They asked for a later time."
+      : Number.isFinite(price)
+        ? `Counter offer: they asked for $${price}.`
+        : "Counter offer sent.",
+    offerId,
+    state: "countered",
+  });
 }
 
 export async function respond(

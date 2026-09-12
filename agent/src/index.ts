@@ -21,7 +21,14 @@ import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
 import { learnStyle } from "./style.js";
-import { ackLiveSkip, listLiveSkips, postLiveEvent, postLiveMedia, startLiveBoard } from "./live.js";
+import {
+  ackLiveSkip,
+  announceHandoffOnLive,
+  listLiveSkips,
+  postLiveEvent,
+  postLiveMedia,
+  startLiveBoard,
+} from "./live.js";
 
 const log = (msg: string) => console.log(`${new Date().toISOString()} ${msg}`);
 const liveConfirmTries = new Map<string, number>();
@@ -171,16 +178,37 @@ async function handleReaction(event: RelayEvent): Promise<void> {
 
   // Requester side: a tapback on a counter-offer notification settles it.
   if (prior?.kind === "counter_received" && prior.ref_id) {
+    const pending = (await market.openCounters(phone).catch(() => [])).find(
+      (c) => String(c.id) === String(prior.ref_id),
+    );
     if (data.kind === "loved" || data.kind === "liked") {
       const result = await market.respondToCounter(prior.ref_id, phone, true).catch(() => null);
       reply = result
         ? "Agreed to that price for you - it's theirs now."
         : "That counter isn't open any more, so I couldn't agree to it.";
+      if (result && pending?.order_id) {
+        await postLiveEvent({
+          orderId: pending.order_id,
+          kind: "accepted",
+          message: "Someone took the job.",
+          offerId: String(prior.ref_id),
+          state: "accepted",
+        });
+      }
     } else if (data.kind === "disliked") {
       const result = await market.respondToCounter(prior.ref_id, phone, false).catch(() => null);
       reply = result
         ? "Turned down that price. The job stays open at what you offered."
         : "That counter isn't open any more.";
+      if (result && pending?.order_id) {
+        await postLiveEvent({
+          orderId: pending.order_id,
+          kind: "declined",
+          message: "The counter was turned down. Still looking.",
+          offerId: String(prior.ref_id),
+          state: "declined",
+        });
+      }
     }
   }
 
@@ -194,11 +222,29 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       } else {
         await market.respond(open.id, true).catch(() => null);
         reply = `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`;
+        if (open.order_id) {
+          await postLiveEvent({
+            orderId: open.order_id,
+            kind: "accepted",
+            message: "Someone took the job.",
+            offerId: String(open.id),
+            state: "accepted",
+          });
+        }
       }
     } else if (data.kind === "disliked") {
       if (open) {
         await market.respond(open.id, false).catch(() => null);
         reply = `Passed on "${open.title}" for you.`;
+        if (open.order_id) {
+          await postLiveEvent({
+            orderId: open.order_id,
+            kind: "declined",
+            message: "They passed. Trying the next person.",
+            offerId: String(open.id),
+            state: "declined",
+          });
+        }
       }
     } else if (data.kind === "questioned") {
       reply = open
@@ -652,6 +698,9 @@ async function deliverHandoffs(): Promise<void> {
     }
 
     const attemptNo = (prior?.attempts ?? 0) + 1;
+    if (attemptNo === 1) {
+      await announceHandoffOnLive(handoff);
+    }
     // A retry needs a fresh key: replaying the old one returns the original
     // response and sends nothing.
     const outbound = shortenHandoff(text);
