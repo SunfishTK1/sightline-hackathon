@@ -600,8 +600,19 @@ async function sendOutreach(): Promise<void> {
     const sent = await sendText(offer.phone, message, key, attachments);
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
-    if (sent.accepted || sent.permanent) {
-      await market.markOutreachSent(offer.id);
+    if (sent.accepted) {
+      const marked = await market.markOutreachSent(offer.id).catch(() => null);
+      if (!marked) {
+        log(`outreach offer ${offer.id} landed after it was no longer live`);
+        continue;
+      }
+      // Only make the delivered offer actionable in the conversation after
+      // the marketplace has made it actionable through openJobs too.
+      const history = await loadTurns(offer.phone);
+      await saveTurns(offer.phone, [
+        ...history,
+        { role: "assistant", content: message, at: new Date().toISOString() },
+      ]);
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -613,32 +624,30 @@ async function sendOutreach(): Promise<void> {
           state: "waiting",
         });
       }
-      if (sent.accepted) {
-        // The offer has to land in their thread, or a later "I'll take the
-        // fridge one" refers to a message the agent has no record of sending.
-        const history = await loadTurns(offer.phone);
-        await saveTurns(offer.phone, [
-          ...history,
-          { role: "assistant", content: message, at: new Date().toISOString() },
-        ]);
-      }
       log(`outreach offer ${offer.id} -> ${offer.phone}: ${sent.detail}`);
       continue;
     }
-    if (attempt >= MAX_OUTREACH_ATTEMPTS) {
-      // They never got the text. Marking it sent would hold the exclusive
-      // slot for ten minutes; decline so rematch can move on now.
-      await market.respond(offer.id, false).catch(() => null);
-      if (offer.order_id) {
+    if (sent.permanent || attempt >= MAX_OUTREACH_ATTEMPTS) {
+      // They never got the text. A permanent failure cannot become actionable;
+      // release it immediately instead of starting an exclusive waiting clock.
+      const released = await market.respond(offer.id, false).catch(() => null);
+      if (released && offer.order_id) {
+        // recordNoMatch refuses to count while another live offer or counter
+        // exists, which is expected during a volunteer overlap.
+        await market.noMatch(String(offer.order_id)).catch(() => null);
         await postLiveEvent({
           orderId: offer.order_id,
           kind: "timeout",
-          message: "Could not reach them. Trying the next person.",
+          message: "Could not deliver the offer. Trying the next person.",
           offerId: String(offer.id),
           state: "dropped",
         });
       }
-      log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
+      log(
+        released
+          ? `outreach offer ${offer.id} RELEASED after ${attempt} failed attempt(s) to ${offer.phone}: ${sent.detail}`
+          : `outreach offer ${offer.id} changed before give-up could release it`,
+      );
       continue;
     }
     log(`outreach offer ${offer.id} attempt ${attempt} failed: ${sent.detail}`);
@@ -694,6 +703,7 @@ async function deliverHandoffs(): Promise<void> {
     if (prior?.request_id) {
       const { state, detail } = await getDelivery(prior.request_id);
       if (state === "delivered") {
+        await announceHandoffOnLive(handoff);
         await markHandoffDelivered(handoff.id);
         log(`handoff ${handoff.id} (${handoff.kind}) -> ${handoff.phone}: ${detail}`);
         const history = await loadTurns(handoff.phone);
@@ -721,9 +731,6 @@ async function deliverHandoffs(): Promise<void> {
     }
 
     const attemptNo = (prior?.attempts ?? 0) + 1;
-    if (attemptNo === 1) {
-      await announceHandoffOnLive(handoff);
-    }
     // A retry needs a fresh key: replaying the old one returns the original
     // response and sends nothing.
     const outbound = shortenHandoff(text);
@@ -947,12 +954,25 @@ async function autoNegotiate(): Promise<void> {
       if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
         continue;
       }
-      await market.counter(
+      const result = await market.counter(
         offer.id,
         offer.phone,
         verdict.nextOfferUsd,
         verdict.messageHint,
       );
+      if (result.status !== "countered") {
+        if (result.status === "cancelled_too_many_rounds" && offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "skipped",
+            message: "Negotiation ended. Trying the next person.",
+            offerId: String(offer.id),
+            state: "dropped",
+          });
+        }
+        log(`auto-counter stopped on offer ${offer.id}: ${result.status}`);
+        continue;
+      }
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -1054,7 +1074,11 @@ async function chaseStuckItems(): Promise<void> {
     // Past the final notice, do the thing the card said would happen.
     if (strike > FINAL_NOTICE_STRIKE) {
       if (item.reason === "offer_unanswered" && item.offer_id) {
-        await market.respond(item.offer_id, false).catch(() => null);
+        const released = await market.respond(item.offer_id, false).catch(() => null);
+        if (!released) {
+          log(`offer ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         await sayTo(
           item.phone,
           `No reply on "${item.about}", so I've released it - it's going to someone else.`,
@@ -1073,7 +1097,13 @@ async function chaseStuckItems(): Promise<void> {
         }
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
-        await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
+        const released = await market
+          .respondToCounter(item.offer_id, item.phone, false, true)
+          .catch(() => null);
+        if (!released) {
+          log(`counter ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         await sayTo(
           item.phone,
           `No answer on that counter-offer for "${item.about}", so it's expired. I'm asking someone else.`,

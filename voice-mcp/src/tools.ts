@@ -724,7 +724,13 @@ tools.push({
         const reviewed = await reviewTask(proposed);
         if (reviewed?.verdict === "BLOCK") {
           const reason = reviewed.reason ?? "That change cannot be listed.";
-          await blockOrder(order_id, reason);
+          const blocked = await blockOrder(order_id, reason);
+          if ("error" in blocked) {
+            return {
+              error: blocked.error,
+              reason: "That request changed state before the edit could be blocked.",
+            };
+          }
           return {
             error: "blocked_after_edit",
             blocked: true,
