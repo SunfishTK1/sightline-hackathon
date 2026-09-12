@@ -128,7 +128,7 @@ export async function startLiveBoard(input: {
   for (let slot = 0; slot < slots; slot += 1) {
     await query(
       `INSERT INTO live_candidates (id, token, slot, color, state, waiting_until)
-       VALUES ($1,$2,$3,'queued',NULL)`,
+       VALUES ($1,$2,$3,$4,'queued',NULL)`,
       [newId("lc"), token, slot, CANDIDATE_COLORS[slot % CANDIDATE_COLORS.length]],
     );
   }
