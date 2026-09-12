@@ -580,7 +580,10 @@ app.get("/v1/work", async (req, res) => {
 /** What is owed, and whether it can actually be paid yet. */
 app.get("/v1/payments", async (req, res) => {
   const { rows } = await pool.query(
+    // The on-chain signature is the whole proof a payment happened; leaving it
+    // out made a settled payment look unsettled.
     `SELECT pay.id, pay.amount_usd, pay.platform_fee_usd, pay.status, pay.stripe_mode,
+            pay.railcoins, pay.solana_signature,
             pay.note, pay.created_at, o.title,
             payer.phone AS payer_phone, payee.phone AS payee_phone
        FROM payments pay

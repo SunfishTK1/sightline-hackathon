@@ -16,10 +16,13 @@ export async function POST(request: Request) {
       waitingUntil?: string;
       addSlot?: boolean;
     };
-    if ((!body.orderId && !body.token) || !body.kind || !body.message) {
+    const { kind, message } = body;
+    if ((!body.orderId && !body.token) || !kind || !message) {
       throw new HttpError(400, "orderId or token, kind, and message are required");
     }
-    const view = await recordLiveEvent(body);
+    // Passed explicitly: the guard above narrows the locals, but not the
+    // fields of `body` when the whole object is handed on.
+    const view = await recordLiveEvent({ ...body, kind, message });
     if (!view) throw new HttpError(404, "No live board for that order");
     return view;
   });

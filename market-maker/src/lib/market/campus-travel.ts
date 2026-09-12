@@ -111,7 +111,9 @@ export function estimateTravel(
   const to = (toRaw ?? "").trim();
   const fromPlace = resolvePlace(from);
   const toPlace = resolvePlace(to);
-  const sameText = from && to && normalize(from) === normalize(to);
+  // Boolean(), or the && chain yields string | boolean and `known` stops
+  // being a boolean.
+  const sameText = Boolean(from && to && normalize(from) === normalize(to));
   const samePlace = fromPlace && toPlace && fromPlace.name === toPlace.name;
 
   let distanceM = 0;
