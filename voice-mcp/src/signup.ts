@@ -82,10 +82,14 @@ export async function registerSignup(input: SignupInput) {
     );
     const target = targetResult.rows[0];
     const previous = await client.query(
-      `SELECT id FROM people WHERE auth0_sub = $1 AND id <> $2 FOR UPDATE`,
+      `SELECT id, phone, display_name, email, signed_up_at, doc
+         FROM people
+        WHERE auth0_sub = $1 AND id <> $2
+        FOR UPDATE`,
       [input.auth0_sub, target.id],
     );
-    const previousId = previous.rows[0]?.id as string | undefined;
+    const previousPerson = previous.rows[0];
+    const previousId = previousPerson?.id as string | undefined;
     const profileSource = await client.query(
       `SELECT is_available, blurb, categories, min_price_usd,
               auto_counter, auto_accept, stripe_account_id, payouts_ready
@@ -95,29 +99,92 @@ export async function registerSignup(input: SignupInput) {
     );
 
     if (previousId) {
-      // Free the unique Auth0 binding before moving it, and retire the old
-      // phone's worker profile so automated work cannot keep going there.
+      // Move every account-owned relationship before retiring the old phone
+      // identity. The new number is still unverified, but history and wallet
+      // keys remain attached to the same Auth0 account.
+      await client.query(
+        `WITH moved_calls AS (
+           UPDATE calls
+              SET person_id = $2,
+                  caller_phone = CASE WHEN caller_phone = $3 THEN $4 ELSE caller_phone END
+            WHERE person_id = $1 OR caller_phone = $3
+            RETURNING id
+         ),
+         moved_orders AS (
+           UPDATE orders
+              SET person_id = CASE WHEN person_id = $1 THEN $2 ELSE person_id END,
+                  accepted_by = CASE WHEN accepted_by = $1 THEN $2 ELSE accepted_by END
+            WHERE person_id = $1 OR accepted_by = $1
+            RETURNING id
+         ),
+         moved_handoffs AS (
+           UPDATE agent_handoffs
+              SET person_id = CASE WHEN person_id = $1 THEN $2 ELSE person_id END,
+                  phone = CASE WHEN phone = $3 THEN $4 ELSE phone END
+            WHERE person_id = $1 OR phone = $3
+            RETURNING id
+         ),
+         moved_offers AS (
+           UPDATE job_offers
+              SET person_id = CASE WHEN person_id = $1 THEN $2 ELSE person_id END,
+                  phone = CASE WHEN phone = $3 THEN $4 ELSE phone END
+            WHERE person_id = $1 OR phone = $3
+            RETURNING id
+         ),
+         moved_payments AS (
+           UPDATE payments
+              SET payer_id = CASE WHEN payer_id = $1 THEN $2 ELSE payer_id END,
+                  payee_id = CASE WHEN payee_id = $1 THEN $2 ELSE payee_id END
+            WHERE payer_id = $1 OR payee_id = $1
+            RETURNING id
+         ),
+         moved_wallet AS (
+           UPDATE wallets SET person_id = $2 WHERE person_id = $1 RETURNING person_id
+         ),
+         moved_style AS (
+           UPDATE person_style SET person_id = $2 WHERE person_id = $1 RETURNING person_id
+         ),
+         moved_links AS (
+           UPDATE wallet_links SET person_id = $2, phone = $4
+            WHERE person_id = $1
+            RETURNING token
+         ),
+         moved_questions AS (
+           UPDATE job_questions SET asker_phone = $4 WHERE asker_phone = $3 RETURNING id
+         )
+         SELECT 1`,
+        [previousId, target.id, previousPerson.phone, e164],
+      );
       await client.query(`DELETE FROM worker_profiles WHERE person_id = $1`, [previousId]);
-      await client.query(`UPDATE people SET auth0_sub = NULL WHERE id = $1`, [previousId]);
+      await client.query(`DELETE FROM people WHERE id = $1`, [previousId]);
     }
 
     const savedResult = await client.query(
       `UPDATE people
           SET auth0_sub = $2,
               email = COALESCE($3, email),
-              signed_up_at = COALESCE(signed_up_at, now()),
+              display_name = COALESCE(display_name, $5),
+              signed_up_at = COALESCE(signed_up_at, $7::timestamptz, now()),
               doc = jsonb_set(
                 jsonb_set(
-                  COALESCE(doc, '{}'::jsonb),
+                  COALESCE($6::jsonb, '{}'::jsonb) || COALESCE(doc, '{}'::jsonb),
                   '{emailVerified}',
-                  COALESCE(doc->'emailVerified', 'false'::jsonb)
+                  COALESCE(doc->'emailVerified', ($6::jsonb)->'emailVerified', 'false'::jsonb)
                 ),
                 '{wantsWork}',
                 to_jsonb($4::boolean)
               )
         WHERE id = $1
         RETURNING id, phone, display_name, email, phone_verified`,
-      [target.id, input.auth0_sub, input.email || null, input.wants_work !== false],
+      [
+        target.id,
+        input.auth0_sub,
+        input.email || previousPerson?.email || null,
+        input.wants_work !== false,
+        previousPerson?.display_name ?? null,
+        previousPerson?.doc ? JSON.stringify(previousPerson.doc) : null,
+        previousPerson?.signed_up_at ?? null,
+      ],
     );
     saved = savedResult.rows[0];
 
@@ -189,75 +256,109 @@ export async function registerSignup(input: SignupInput) {
  * works in both directions.
  */
 export async function verifySignup(auth0_sub: string, code: string) {
-  const found = await pool.query(
-    `SELECT id, phone, display_name FROM people WHERE auth0_sub = $1`,
-    [auth0_sub],
-  );
-  const person = found.rows[0];
-  if (!person) return { error: "no_account" as const };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const found = await client.query(
+      `SELECT id, phone, display_name, phone_verified
+         FROM people
+        WHERE auth0_sub = $1
+        FOR UPDATE`,
+      [auth0_sub],
+    );
+    const person = found.rows[0];
+    if (!person) {
+      await client.query("ROLLBACK");
+      return { error: "no_account" as const };
+    }
+    if (person.phone_verified) {
+      await client.query("COMMIT");
+      return { verified: true as const, phone: person.phone };
+    }
 
-  const pending = await pool.query(
-    `SELECT code, attempts, expires_at FROM phone_verifications WHERE phone = $1`,
-    [person.phone],
-  );
-  const row = pending.rows[0];
-  if (!row) return { error: "no_code" as const };
-  if (new Date(row.expires_at).getTime() < Date.now()) return { error: "expired" as const };
-  if (row.attempts >= MAX_ATTEMPTS) return { error: "too_many_attempts" as const };
-
-  if (String(code).trim() !== row.code) {
-    await pool.query(
-      `UPDATE phone_verifications SET attempts = attempts + 1 WHERE phone = $1`,
+    const pending = await client.query(
+      `SELECT code, attempts, expires_at
+         FROM phone_verifications
+        WHERE phone = $1
+        FOR UPDATE`,
       [person.phone],
     );
-    return { error: "wrong_code" as const, attempts_left: MAX_ATTEMPTS - (row.attempts + 1) };
+    const row = pending.rows[0];
+    if (!row) {
+      await client.query("ROLLBACK");
+      return { error: "no_code" as const };
+    }
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      await client.query("ROLLBACK");
+      return { error: "expired" as const };
+    }
+    if (row.attempts >= MAX_ATTEMPTS) {
+      await client.query("ROLLBACK");
+      return { error: "too_many_attempts" as const };
+    }
+
+    if (String(code).trim() !== row.code) {
+      await client.query(
+        `UPDATE phone_verifications SET attempts = attempts + 1 WHERE phone = $1`,
+        [person.phone],
+      );
+      await client.query("COMMIT");
+      return { error: "wrong_code" as const, attempts_left: MAX_ATTEMPTS - (row.attempts + 1) };
+    }
+
+    await client.query(
+      `UPDATE phone_verifications SET verified_at = now() WHERE phone = $1`,
+      [person.phone],
+    );
+    await client.query(
+      `UPDATE people
+          SET phone_verified = true,
+              doc = jsonb_set(
+                COALESCE(doc, '{}'::jsonb),
+                '{availability}',
+                COALESCE(doc->'availability', '{}'::jsonb)
+                  || jsonb_build_object(
+                    'isAvailable',
+                    COALESCE((doc->>'wantsWork')::boolean, true)
+                  )
+              )
+        WHERE id = $1`,
+      [person.id],
+    );
+    await client.query(
+      `UPDATE worker_profiles w
+          SET is_available = COALESCE((p.doc->>'wantsWork')::boolean, true),
+              updated_at = now()
+         FROM people p
+        WHERE p.id = w.person_id AND p.id = $1`,
+      [person.id],
+    );
+
+    // Only the transaction that first proves the phone can enqueue onboarding.
+    await client.query(
+      `INSERT INTO agent_handoffs (person_id, phone, kind, payload)
+       SELECT $1,$2,'welcome',$3::jsonb
+        WHERE NOT EXISTS (
+          SELECT 1 FROM agent_handoffs WHERE person_id = $1 AND kind = 'welcome'
+        )`,
+      [
+        person.id,
+        person.phone,
+        JSON.stringify({
+          source: "web_signup",
+          display_name: person.display_name,
+          note: "They just finished signing up on the site and verified this number.",
+        }),
+      ],
+    );
+    await client.query("COMMIT");
+    return { verified: true as const, phone: person.phone };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
-
-  await pool.query(
-    `UPDATE phone_verifications SET verified_at = now() WHERE phone = $1`,
-    [person.phone],
-  );
-  await pool.query(
-    `UPDATE people
-        SET phone_verified = true,
-            doc = jsonb_set(
-              COALESCE(doc, '{}'::jsonb),
-              '{availability}',
-              COALESCE(doc->'availability', '{}'::jsonb)
-                || jsonb_build_object(
-                  'isAvailable',
-                  COALESCE((doc->>'wantsWork')::boolean, true)
-                )
-            )
-      WHERE id = $1`,
-    [person.id],
-  );
-  await pool.query(
-    `UPDATE worker_profiles w
-        SET is_available = COALESCE((p.doc->>'wantsWork')::boolean, true),
-            updated_at = now()
-       FROM people p
-      WHERE p.id = w.person_id AND p.id = $1`,
-    [person.id],
-  );
-
-  // Hand the new account to the agent so it opens the conversation itself,
-  // rather than the person's first text arriving with no context.
-  await pool.query(
-    `INSERT INTO agent_handoffs (person_id, phone, kind, payload)
-     VALUES ($1,$2,'welcome',$3::jsonb)`,
-    [
-      person.id,
-      person.phone,
-      JSON.stringify({
-        source: "web_signup",
-        display_name: person.display_name,
-        note: "They just finished signing up on the site and verified this number.",
-      }),
-    ],
-  );
-
-  return { verified: true as const, phone: person.phone };
 }
 
 /** What the site shows a signed-in person about their own account. */

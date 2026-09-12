@@ -53,6 +53,18 @@ function settlementMemo(orderId: string): string {
   return `${SETTLEMENT_MEMO_PREFIX}${orderId}`;
 }
 
+async function parkUnrecordedSignature(orderId: string, signature: string): Promise<void> {
+  await pool.query(
+    `UPDATE payments
+        SET note = $2, updated_at = now()
+      WHERE order_id = $1
+        AND status IS DISTINCT FROM 'paid'
+        AND solana_signature IS NULL
+        AND COALESCE(note, '') NOT LIKE 'unrecorded:%'`,
+    [orderId, `${UNRECORDED_PREFIX}${signature}`],
+  );
+}
+
 /**
  * A process can die after Solana confirms but before Postgres stores the
  * signature. Every payment carries its order id as a memo, so a stale claim
@@ -227,12 +239,7 @@ export async function payForTask(input: {
         await persistSettlement(input.orderId, recorded);
         return recorded;
       } catch (err) {
-        await pool
-          .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
-            input.orderId,
-            `${UNRECORDED_PREFIX}${recovered}`,
-          ])
-          .catch(() => undefined);
+        await parkUnrecordedSignature(input.orderId, recovered).catch(() => undefined);
         return {
           settled: false,
           reason: `paid on-chain but not recorded: ${recovered} (${(err as Error).message})`,
@@ -308,12 +315,7 @@ export async function payForTask(input: {
       await persistSettlement(input.orderId, result);
       return result;
     } catch (err) {
-      await pool
-        .query(`UPDATE payments SET note = $2, updated_at = now() WHERE order_id = $1`, [
-          input.orderId,
-          `${UNRECORDED_PREFIX}${signature}`,
-        ])
-        .catch(() => undefined);
+      await parkUnrecordedSignature(input.orderId, signature).catch(() => undefined);
       return {
         settled: false,
         reason: `paid on-chain but not recorded: ${signature} (${(err as Error).message})`,
