@@ -3,13 +3,17 @@ import { config } from "./config.js";
 import {
   ensureAgentSchema, getCursor, setCursor, claimEvent, completeEvent, loadTurns,
   saveTurns, pool, getAttempt, recordAttempt, bumpOutreachAttempt,
-  recordSent, findSent, type Turn,
+  recordSent, findSent, bumpNudge, minutesSinceNudge, type Turn,
 } from "./db.js";
+import { buildNudgeHtml } from "./nudge.js";
+import { generateTaskImage } from "./illustrate.js";
 import {
-  pollEvents, sendText, shorten, fetchAttachment, getDelivery, type RelayEvent,
+  pollEvents, sendText, shorten, fetchAttachment, getDelivery, uploadAttachment,
+  type RelayEvent,
 } from "./imessage.js";
 import { prepareImage } from "./images.js";
 import { undeliveredHandoffs, markHandoffDelivered, mcp, market, type Handoff } from "./mcp.js";
+import { evaluateDeal } from "./broker.js";
 import { pickWorkers } from "./matcher.js";
 import { respond } from "./agent.js";
 
@@ -86,6 +90,10 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     const result = await respond(
       phone, text, history, images, skipped, openJobs,
       who?.display_name, who?.recent_orders ?? [], openCounters, replyContext, questions,
+      {
+        doing: who?.jobs_in_progress ?? [],
+        awaitingConfirmation: who?.awaiting_their_confirmation ?? [],
+      },
     );
     reply = shorten(result.reply);
     usedTools = result.usedTools;
@@ -219,6 +227,8 @@ async function pollInbound(): Promise<void> {
 
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
+/** How long an offer waits for its picture before going out as text only. */
+const IMAGE_WAIT_MS = 90_000;
 
 function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "call_summary") {
@@ -236,10 +246,33 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "counter_received") {
     const was = handoff.payload?.original_usd ? ` instead of $${handoff.payload.original_usd}` : "";
     const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
-    return `Someone will do "${handoff.payload?.title}" for $${handoff.payload?.asking_usd}${was}.${note} Reply YES to agree or NO to pass.`;
+    const last = handoff.payload?.final_round
+      ? " This is the last round - one more counter and the offer is off."
+      : "";
+    return `Someone will do "${handoff.payload?.title}" for $${handoff.payload?.asking_usd}${was}.${note} Reply YES to agree or NO to pass.${last}`;
+  }
+  if (handoff.kind === "counter_warning") {
+    return `That's ${handoff.payload?.rounds} rounds of haggling on "${handoff.payload?.title}". One more counter from either side and the offer is cancelled.`;
+  }
+  if (handoff.kind === "negotiation_cancelled") {
+    return `Called off the back-and-forth on "${handoff.payload?.title}" after ${handoff.payload?.rounds} rounds. The offer is cancelled for both sides.`;
   }
   if (handoff.kind === "counter_accepted") {
     return `Your price was accepted: "${handoff.payload?.title}" at $${handoff.payload?.agreed_usd}. It's yours.`;
+  }
+  if (handoff.kind === "task_done_pending") {
+    const amount = handoff.payload?.amount_usd ? ` The $${handoff.payload.amount_usd} is released when you do.` : "";
+    return `"${handoff.payload?.title}" is marked done. Reply YES to confirm, or tell me what's still outstanding.${amount}`;
+  }
+  if (handoff.kind === "task_completed") {
+    const setup = handoff.payload?.payouts_ready === false
+      ? " You'll need to set up payouts before it can actually be paid out."
+      : "";
+    return `Confirmed - "${handoff.payload?.title}" is done and $${handoff.payload?.amount_usd} is recorded as owed to you.${setup}`;
+  }
+  if (handoff.kind === "task_disputed") {
+    const note = handoff.payload?.note ? ` They said: "${handoff.payload.note}"` : "";
+    return `They didn't confirm "${handoff.payload?.title}" as finished.${note} It's back on your list.`;
   }
   if (handoff.kind === "question_asked") {
     return `About "${handoff.payload?.title}" - someone considering it asks: ${handoff.payload?.question} Reply with the answer and I'll pass it straight back.`;
@@ -271,9 +304,36 @@ async function matchOpenOrders(): Promise<void> {
       log(`no suitable worker for "${order.title}" among ${candidates.length} available`);
       continue;
     }
-    for (const pick of picks) {
-      const offer = await market.createOffer(order.id, pick.phone, pick.reason);
-      if (offer) log(`offered "${order.title}" to ${pick.phone}: ${pick.reason}`);
+    const pick = picks[0];
+    if (!pick) continue;
+    const travelNote = pick.travel
+      ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
+      : undefined;
+    const offer = await market.createOffer(
+      order.id,
+      pick.phone,
+      pick.reason,
+      pick.offerUsd,
+      travelNote,
+    );
+    if (offer) {
+      log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
+      if (order.requester_phone && pick.offerUsd != null) {
+        const hop = pick.travel
+          ? ` ${pick.travel.distanceMi} mi: walk ${pick.travel.walkMin} min, bus ${pick.travel.busMin} min, drive ${pick.travel.driveMin} min.`
+          : "";
+        const timeWarn =
+          pick.travel?.feasibility === "INFEASIBLE"
+            ? " That deadline looks short for the hop — want a later time?"
+            : pick.travel?.feasibility === "TIGHT"
+              ? " It's tight on time."
+              : "";
+        await sayTo(
+          order.requester_phone,
+          `I'll ask someone for "${order.title}" at $${pick.offerUsd} — typical for this job.${hop}${timeWarn} Reply if you want a different cap or more time.`,
+          `gotchu-prime-${order.id}-${pick.offerUsd}`,
+        );
+      }
     }
   }
 }
@@ -281,8 +341,9 @@ async function matchOpenOrders(): Promise<void> {
 /** Text each pending offer to the person it was made to. */
 async function sendOutreach(): Promise<void> {
   for (const offer of await market.pendingOutreach()) {
-    const pay = offer.budget_usd && Number(offer.budget_usd) > 0
-      ? `$${offer.budget_usd}`
+    const offerUsd = offer.offered_usd ?? offer.budget_usd;
+    const pay = offerUsd && Number(offerUsd) > 0
+      ? `$${offerUsd}`
       : "price open";
     const due = offer.deadline_at
       ? ` by ${new Date(offer.deadline_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
@@ -290,14 +351,32 @@ async function sendOutreach(): Promise<void> {
     const call = config.voiceCallNumber
       ? `, or call ${config.voiceCallNumber} to talk it through`
       : "";
-    const text = `Job for you: ${offer.title} (${pay})${due}. Reply YES to take it or NO to pass${call}.`;
+    const hop = offer.travel_note ? ` ${offer.travel_note}` : "";
+    const text = `Job for you: ${offer.title} (${pay} — typical for this job)${due}.${hop} Can you make that? Reply YES, NO, or say you need more time${call}.`;
 
     const attempt = await bumpOutreachAttempt(offer.id);
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
+    // Send the task's picture with the offer, so they can see the job. The
+    // illustration takes about 20 seconds, so wait briefly for it rather than
+    // texting the offer bare - but never let a failed drawing block the work.
+    let attachments: string[] | undefined;
+    const stored = await market.orderImage(String(offer.order_id ?? "")).catch(() => null);
+    if (stored?.png_base64) {
+      const id = await uploadAttachment(Buffer.from(stored.png_base64, "base64"), "image/png");
+      if (id) attachments = [id];
+    } else {
+      const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
+      if (waited < IMAGE_WAIT_MS) {
+        log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its illustration`);
+        continue;
+      }
+      log(`offer ${offer.id} going out without an illustration after ${Math.round(waited / 1000)}s`);
+    }
+
     const message = shorten(text);
-    const sent = await sendText(offer.phone, message, key);
+    const sent = await sendText(offer.phone, message, key, attachments);
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
     if (sent.accepted || sent.permanent) {
@@ -416,6 +495,57 @@ async function sayTo(
   return sent.accepted;
 }
 
+const EXCLUSIVE_OFFER_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** One exclusive worker at a time: silence for 10 minutes means try the next pick. */
+async function expireStaleOffers(): Promise<void> {
+  const { offers, counters } = await market.pendingNegotiation();
+  const now = Date.now();
+
+  for (const offer of offers) {
+    if (!offer.outreach_sent_at) continue;
+    if (now - new Date(offer.outreach_sent_at).getTime() < EXCLUSIVE_OFFER_TIMEOUT_MS) continue;
+    try {
+      const verdict = await evaluateDeal({
+        order: { title: offer.title, budget_usd: offer.budget_usd, category: offer.category },
+        current_offer_usd: Number(offer.offered_usd ?? offer.budget_usd ?? 0),
+        decision: "TIMEOUT",
+      });
+      if (verdict && verdict.action !== "TRY_NEXT") continue;
+      await market.respond(offer.id, false);
+      await sayTo(
+        offer.phone,
+        `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
+        `gotchu-timeout-${offer.id}`,
+      );
+      log(`timed out offer ${offer.id} for ${offer.phone}`);
+    } catch (err) {
+      log(`timeout failed on offer ${offer.id}: ${(err as Error).message}`);
+    }
+  }
+
+  for (const counter of counters) {
+    if (now - new Date(counter.countered_at).getTime() < EXCLUSIVE_OFFER_TIMEOUT_MS) continue;
+    try {
+      const verdict = await evaluateDeal({
+        order: { title: counter.title, budget_usd: counter.order_budget_usd },
+        current_offer_usd: Number(counter.offered_usd ?? counter.order_budget_usd ?? 0),
+        decision: "TIMEOUT",
+      });
+      if (verdict && verdict.action !== "TRY_NEXT") continue;
+      await market.respondToCounter(counter.id, counter.requester_phone, false);
+      await sayTo(
+        counter.requester_phone,
+        `No decision on "${counter.title}" in time, so I'm asking someone else.`,
+        `gotchu-timeout-counter-${counter.id}`,
+      );
+      log(`timed out counter ${counter.id} for ${counter.requester_phone}`);
+    } catch (err) {
+      log(`timeout failed on counter ${counter.id}: ${(err as Error).message}`);
+    }
+  }
+}
+
 /**
  * Each side's agent acting for its principal, inside the bounds they set.
  *
@@ -433,18 +563,46 @@ async function autoNegotiate(): Promise<void> {
     if (now - new Date(offer.outreach_sent_at).getTime() < config.negotiationGraceMs) continue;
 
     const min = Number(offer.min_price_usd);
-    const pays = offer.budget_usd ? Number(offer.budget_usd) : 0;
+    const pays = Number(offer.offered_usd ?? offer.budget_usd ?? 0);
     if (pays >= min) continue; // fine as offered; their call to take it
 
     try {
-      await market.counter(offer.id, offer.phone, min, `${min} is my minimum for this kind of job`);
+      const verdict = await evaluateDeal({
+        order: {
+          title: offer.title,
+          details: offer.details,
+          category: offer.category,
+          budget_usd: offer.budget_usd,
+          deadline_at: offer.deadline_at,
+          pickup_location: offer.pickup_location,
+          dropoff_location: offer.dropoff_location,
+        },
+        current_offer_usd: pays,
+        decision: "AUTO_WORKER",
+        worker_min_usd: min,
+        round: Number(offer.counter_rounds ?? 0),
+      });
+      if (verdict?.action === "TRY_NEXT") {
+        await market.respond(offer.id, false);
+        log(`broker said try next on offer ${offer.id}`);
+        continue;
+      }
+      if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
+        continue;
+      }
+      await market.counter(
+        offer.id,
+        offer.phone,
+        verdict.nextOfferUsd,
+        verdict.messageHint,
+      );
       const paid = pays > 0 ? `$${pays}` : "no set price";
       await sayTo(
         offer.phone,
-        `"${offer.title}" came in at ${paid}, under your $${min} minimum, so I countered at $${min} for you. I'll tell you what they say.`,
+        `"${offer.title}" came in at ${paid}, under your $${min} minimum, so I countered at $${verdict.nextOfferUsd} for you. I'll tell you what they say.`,
         `gotchu-autocounter-${offer.id}`,
       );
-      log(`auto-countered offer ${offer.id} for ${offer.phone} at $${min}`);
+      log(`auto-countered offer ${offer.id} for ${offer.phone} at $${verdict.nextOfferUsd}`);
     } catch (err) {
       log(`auto-counter failed on offer ${offer.id}: ${(err as Error).message}`);
     }
@@ -456,9 +614,26 @@ async function autoNegotiate(): Promise<void> {
 
     const asking = Number(counter.counter_price_usd);
     const budget = Number(counter.order_budget_usd);
-    if (asking > budget) continue; // over what they said they'd pay; human decides
 
     try {
+      const verdict = await evaluateDeal({
+        order: {
+          title: counter.title,
+          budget_usd: counter.order_budget_usd,
+        },
+        current_offer_usd: Number(counter.offered_usd ?? counter.order_budget_usd ?? asking),
+        decision: "AUTO_REQUESTER",
+        price_usd: asking,
+        round: Number(counter.counter_rounds ?? 0),
+      });
+      if (verdict?.action === "TRY_NEXT") {
+        await market.respondToCounter(counter.id, counter.requester_phone, false);
+        log(`broker said try next on counter ${counter.id}`);
+        continue;
+      }
+      if (!verdict || verdict.action !== "ACCEPT") {
+        continue;
+      }
       await market.respondToCounter(counter.id, counter.requester_phone, true);
       await sayTo(
         counter.requester_phone,
@@ -469,6 +644,127 @@ async function autoNegotiate(): Promise<void> {
     } catch (err) {
       log(`auto-accept failed on counter ${counter.id}: ${(err as Error).message}`);
     }
+  }
+}
+
+const NUDGE_AFTER_MINUTES = 10;
+const NUDGE_REPEAT_MINUTES = 10;
+const FINAL_NOTICE_STRIKE = 3;
+
+/**
+ * Chase anything that has sat unanswered, with a card loud enough to notice.
+ * The ladder climbs: two notices, a final one, and then the stated consequence
+ * actually happens - the offer is released and goes back to the pool. A warning
+ * the system will not carry out is just a lie with a red X on it.
+ */
+async function chaseStuckItems(): Promise<void> {
+  const stuck = await market.escalations(NUDGE_AFTER_MINUTES);
+
+  for (const item of stuck) {
+    const key = `${item.reason}:${item.phone}:${item.offer_id ?? item.question_id ?? item.about}`;
+    const since = await minutesSinceNudge(key);
+    if (since !== null && since < NUDGE_REPEAT_MINUTES) continue;
+
+    const strike = await bumpNudge(key, item.phone);
+
+    // Past the final notice, do the thing the card said would happen.
+    if (strike > FINAL_NOTICE_STRIKE) {
+      if (item.reason === "offer_unanswered" && item.offer_id) {
+        await market.respond(item.offer_id, false).catch(() => null);
+        await sayTo(
+          item.phone,
+          `No reply on "${item.about}", so I've released it - it's going to someone else.`,
+          `gotchu-released-${item.offer_id}`,
+          "offer_released",
+          item.offer_id,
+        );
+        log(`released offer ${item.offer_id} after ${strike - 1} notices`);
+      } else if (item.reason === "counter_undecided" && item.offer_id) {
+        await market.respondToCounter(item.offer_id, item.phone, false).catch(() => null);
+        await sayTo(
+          item.phone,
+          `No answer on that counter-offer for "${item.about}", so it's expired. The job stays open at your price.`,
+          `gotchu-counterexpired-${item.offer_id}`,
+          "counter_expired",
+          item.offer_id,
+        );
+        log(`expired counter ${item.offer_id} after ${strike - 1} notices`);
+      }
+      continue;
+    }
+
+    const html = buildNudgeHtml({
+      name: item.name,
+      reason: item.reason,
+      about: item.about,
+      callingAbout: item.calling_about,
+      minutesWaiting: item.minutes_waiting,
+      strike,
+      finalNotice: strike >= FINAL_NOTICE_STRIKE,
+    });
+
+    const attachmentId = await uploadAttachment(html, "text/html");
+    const headline = strike >= FINAL_NOTICE_STRIKE ? "Final notice" : "Still waiting on you";
+    const text = `${headline}: ${item.calling_about}. Reply and I'll take it from there.`;
+
+    const sent = await sendText(
+      item.phone,
+      shorten(text),
+      `gotchu-nudge-${key.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 90)}-${strike}`,
+      attachmentId ? [attachmentId] : undefined,
+    );
+    await recordSent(sent.requestId, item.phone, "nudge", item.offer_id ?? item.question_id ?? null, text);
+
+    if (sent.accepted) {
+      const history = await loadTurns(item.phone);
+      await saveTurns(item.phone, [
+        ...history,
+        { role: "assistant", content: text, at: new Date().toISOString() },
+      ]);
+    }
+    log(
+      `nudge ${strike}${strike >= FINAL_NOTICE_STRIKE ? " (final)" : ""} -> ${item.phone} ` +
+        `[${item.reason}, ${item.minutes_waiting}m] ${attachmentId ? "with card" : "text only"}: ${sent.detail}`,
+    );
+  }
+}
+
+/**
+ * Draw each new task and send it to whoever asked for it. Generation takes
+ * about 20 seconds, which is why this runs on its own loop instead of blocking
+ * a reply: the text lands immediately, the picture follows.
+ */
+async function illustrateOrders(): Promise<void> {
+  const pending = await market.ordersNeedingImage();
+
+  for (const order of pending.slice(0, 2)) {
+    const made = await generateTaskImage(order);
+    if (!made) {
+      log(`could not illustrate "${order.title}"`);
+      continue;
+    }
+    await market.storeOrderImage(order.id, made.png.toString("base64"), made.prompt);
+    log(`illustrated "${order.title}" (${made.png.length} bytes)`);
+
+    // Show the requester what the agent understood, in a picture.
+    const attachmentId = await uploadAttachment(made.png, "image/png");
+    if (!attachmentId) continue;
+    const caption = `Here's how I pictured it: ${order.title}. Tell me if that's not the job.`;
+    const sent = await sendText(
+      order.requester_phone,
+      shorten(caption),
+      `gotchu-illustration-${order.id}`,
+      [attachmentId],
+    );
+    await recordSent(sent.requestId, order.requester_phone, "illustration", order.id, caption);
+    if (sent.accepted) {
+      const history = await loadTurns(order.requester_phone);
+      await saveTurns(order.requester_phone, [
+        ...history,
+        { role: "assistant", content: caption, at: new Date().toISOString() },
+      ]);
+    }
+    log(`illustration -> ${order.requester_phone}: ${sent.detail}`);
   }
 }
 
@@ -539,6 +835,19 @@ async function main() {
         const body = JSON.parse(raw || "{}");
         const text = String(body.text ?? "").trim();
         const phones: string[] = Array.isArray(body.phones) ? body.phones : [];
+
+        // Optionally attach a task's illustration, so a follow-up lands in the
+        // same thread with the picture rather than as a bare resend.
+        let attachmentIds: string[] | undefined;
+        if (body.order_id) {
+          const stored = await market.orderImage(String(body.order_id)).catch(() => null);
+          if (stored?.png_base64) {
+            const id = await uploadAttachment(
+              Buffer.from(stored.png_base64, "base64"), "image/png",
+            );
+            if (id) attachmentIds = [id];
+          }
+        }
         if (!text || !phones.length) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "phones and text are required" }));
@@ -555,7 +864,7 @@ async function main() {
           }
           const message = shorten(text);
           const key = `gotchu-say-${Date.now()}-${phone.replace(/\D/g, "")}`;
-          const sent = await sendText(phone, message, key);
+          const sent = await sendText(phone, message, key, attachmentIds);
           if (sent.accepted) {
             const history = await loadTurns(phone);
             await saveTurns(phone, [
@@ -584,6 +893,9 @@ async function main() {
   loop("match", matchOpenOrders, 10);
   loop("outreach", sendOutreach, 5);
   loop("negotiate", autoNegotiate, 8);
+  loop("expire", expireStaleOffers, 30);
+  loop("chase", chaseStuckItems, 60);
+  loop("illustrate", illustrateOrders, 30);
 }
 
 main().catch((err) => {

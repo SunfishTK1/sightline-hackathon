@@ -67,20 +67,45 @@ export type SendResult = {
   detail: string;
 };
 
+/** Upload a file and get an attachment id back. Valid for about 24 hours. */
+export async function uploadAttachment(
+  bytes: Buffer | string,
+  contentType: string,
+): Promise<string | null> {
+  const buf = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
+  const res = await fetch(`${config.imessageUrl}/v1/attachments`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.imessageKey}`,
+      "Content-Type": contentType,
+    },
+    // fetch wants a BodyInit; a Buffer is a Uint8Array but not typed as one.
+    body: new Uint8Array(buf),
+  });
+  if (!res.ok) return null;
+  const body = (await res.json()) as { attachmentId?: string };
+  return body.attachmentId ?? null;
+}
+
 export async function sendText(
   to: string,
   text: string,
   idempotencyKey: string,
+  attachmentIds?: string[],
 ): Promise<SendResult> {
+  const payload: Record<string, unknown> = {
+    to,
+    text,
+    service: "iMessage",
+    consent: true,
+  };
+  // Bare ids; a list of objects is rejected.
+  if (attachmentIds?.length) payload.attachments = attachmentIds;
+
   const res = await fetch(`${config.imessageUrl}/v1/messages`, {
     method: "POST",
     headers: { ...headers(), "Idempotency-Key": idempotencyKey.slice(0, 120) },
-    body: JSON.stringify({
-      to,
-      text,
-      service: "iMessage",
-      consent: true,
-    }),
+    body: JSON.stringify(payload),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 202) {

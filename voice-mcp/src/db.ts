@@ -117,6 +117,10 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_price_usd numeric(10,2);
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_note text;
     ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS countered_at timestamptz;
+    -- Haggling has to end: counted so a negotiation cannot run forever.
+    ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS counter_rounds int NOT NULL DEFAULT 0;
+    ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS offered_usd numeric(10,2);
+    ALTER TABLE job_offers ADD COLUMN IF NOT EXISTS travel_note text;
 
     -- A worker's agent asking the requester something about the job, rather
     -- than the job stalling on a detail nobody clarified.
@@ -132,6 +136,41 @@ export async function ensureSchema(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS job_questions_unanswered_idx
       ON job_questions (order_id) WHERE answered_at IS NULL;
+
+    -- Completion: the worker says done, the requester confirms. Two steps,
+    -- because neither side's word alone should release money.
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS done_marked_at timestamptz;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+
+    -- Payouts need a Stripe Connect account per worker. Until one exists and
+    -- is verified, nobody can be paid - live or test.
+    ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS stripe_account_id text;
+    ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS payouts_ready boolean NOT NULL DEFAULT false;
+
+    -- One generated illustration per task, kept so it can be reused in every
+    -- offer rather than regenerated per recipient.
+    CREATE TABLE IF NOT EXISTS order_images (
+      order_id    uuid PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+      png         bytea NOT NULL,
+      prompt      text,
+      created_at  timestamptz NOT NULL DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id                    bigserial PRIMARY KEY,
+      order_id              uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      payer_id              uuid REFERENCES people(id) ON DELETE SET NULL,
+      payee_id              uuid REFERENCES people(id) ON DELETE SET NULL,
+      amount_usd            numeric(10,2) NOT NULL,
+      platform_fee_usd      numeric(10,2) NOT NULL DEFAULT 0,
+      status                text NOT NULL DEFAULT 'pending',
+      stripe_mode           text,
+      stripe_payment_intent text,
+      note                  text,
+      created_at            timestamptz NOT NULL DEFAULT now(),
+      updated_at            timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS payments_order_idx ON payments (order_id);
 
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_by uuid REFERENCES people(id);
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at timestamptz;

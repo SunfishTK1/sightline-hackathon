@@ -66,6 +66,15 @@ export async function ensureAgentSchema(): Promise<void> {
       at          timestamptz NOT NULL DEFAULT now()
     );
 
+    -- How many times we have chased one stuck thing, so the escalation
+    -- ladder climbs instead of repeating itself forever.
+    CREATE TABLE IF NOT EXISTS nudges (
+      key        text PRIMARY KEY,
+      phone      text NOT NULL,
+      strikes    int NOT NULL DEFAULT 0,
+      last_at    timestamptz NOT NULL DEFAULT now()
+    );
+
     CREATE TABLE IF NOT EXISTS outreach_attempts (
       offer_id     text PRIMARY KEY,
       attempts     int NOT NULL DEFAULT 0,
@@ -85,6 +94,29 @@ export async function bumpOutreachAttempt(offerId: string): Promise<number> {
     [offerId],
   );
   return Number(rows[0].attempts);
+}
+
+/** Records a chase and returns which strike this is. */
+export async function bumpNudge(key: string, phone: string): Promise<number> {
+  const { rows } = await pool.query(
+    `INSERT INTO nudges (key, phone, strikes, last_at)
+     VALUES ($1, $2, 1, now())
+     ON CONFLICT (key) DO UPDATE
+       SET strikes = nudges.strikes + 1, last_at = now()
+     RETURNING strikes`,
+    [key, phone],
+  );
+  return Number(rows[0].strikes);
+}
+
+/** Minutes since this thing was last chased, or null if never. */
+export async function minutesSinceNudge(key: string): Promise<number | null> {
+  const { rows } = await pool.query(
+    `SELECT EXTRACT(EPOCH FROM (now() - last_at))/60 AS mins, strikes
+       FROM nudges WHERE key = $1`,
+    [key],
+  );
+  return rows[0] ? Number(rows[0].mins) : null;
 }
 
 export type SentMessage = {

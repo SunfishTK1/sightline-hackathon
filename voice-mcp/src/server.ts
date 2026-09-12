@@ -6,7 +6,8 @@ import { ensureSchema, pool, normalizePhone, upsertPerson } from "./db.js";
 import {
   resolveOffer, seedDemoData, purgeDemoData, removeWorker,
   counterOffer, respondToCounter, listOpenCounters, pendingNegotiation,
-  askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions,
+  askAboutJob, answerJobQuestion, listOpenQuestions, listMyQuestions, reassignOrder,
+  callWorthy, markTaskDone, confirmTaskDone, listAwaitingConfirmation, listJobsInProgress,
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 
@@ -14,7 +15,9 @@ const PORT = Number(process.env.PORT || 3000);
 const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN; // unset = open (demo only)
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+// Generated illustrations arrive base64-encoded and run past a megabyte, so
+// the limit has to clear the relay's own 16MB attachment ceiling.
+app.use(express.json({ limit: "25mb" }));
 
 // Every request is logged: without this there is no way to tell whether a
 // voice agent ever reached us, or what it asked for.
@@ -188,18 +191,22 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
 
 /** The marketplace agent decided this person is eligible: put it to them. */
 app.post("/v1/offers", async (req, res) => {
-  const { order_id, phone, reason } = req.body ?? {};
+  const { order_id, phone, reason, offered_usd, travel_note } = req.body ?? {};
   if (!order_id || !phone) {
     return res.status(400).json({ ok: false, error: "order_id and phone are required" });
   }
   const e164 = normalizePhone(String(phone));
   const person = await upsertPerson(e164);
+  const offered = offered_usd != null && Number(offered_usd) > 0 ? Number(offered_usd) : null;
   const { rows } = await pool.query(
-    `INSERT INTO job_offers (order_id, person_id, phone, reason)
-     VALUES ($1,$2,$3,$4)
-     ON CONFLICT (order_id, phone) DO NOTHING
-     RETURNING id, order_id, phone, status`,
-    [order_id, person.id, e164, reason ?? null],
+    `INSERT INTO job_offers (order_id, person_id, phone, reason, offered_usd, travel_note)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (order_id, phone) DO UPDATE
+       SET reason = COALESCE(EXCLUDED.reason, job_offers.reason),
+           offered_usd = COALESCE(EXCLUDED.offered_usd, job_offers.offered_usd),
+           travel_note = COALESCE(EXCLUDED.travel_note, job_offers.travel_note)
+     RETURNING id, order_id, phone, status, offered_usd, travel_note`,
+    [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
   );
   await pool.query(`UPDATE orders SET status = 'offered', updated_at = now() WHERE id = $1`, [
     order_id,
@@ -211,7 +218,7 @@ app.post("/v1/offers", async (req, res) => {
 app.get("/v1/offers", async (req, res) => {
   const { rows } = await pool.query(
     `SELECT j.id, j.phone, j.status, j.reason, j.outreach_sent_at, j.responded_at,
-            j.created_at, o.title, o.budget_usd
+            j.created_at, j.offered_usd, o.title, o.budget_usd
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
       ORDER BY j.created_at DESC
@@ -221,10 +228,29 @@ app.get("/v1/offers", async (req, res) => {
   res.json({ ok: true, data: rows });
 });
 
+/**
+ * Update the market offer on a live offer. The broker sets this price; the
+ * requester's budget_usd is a different column and is never overwritten.
+ */
+app.post("/v1/offers/:id/price", async (req, res) => {
+  const offered = Number(req.body?.offered_usd);
+  if (!Number.isFinite(offered)) {
+    return res.status(400).json({ ok: false, error: "offered_usd must be a number" });
+  }
+  const { rows } = await pool.query(
+    `UPDATE job_offers SET offered_usd = $2 WHERE id = $1 AND status IN ('offered','countered')
+      RETURNING id, offered_usd, status`,
+    [req.params.id, offered],
+  );
+  if (!rows[0]) return res.status(409).json({ ok: false, error: "offer is not live" });
+  res.json({ ok: true, data: rows[0] });
+});
+
 /** Offers that still need the outreach text sent. */
 app.get("/v1/offers/outreach", async (_req, res) => {
   const { rows } = await pool.query(
-    `SELECT j.id, j.phone, j.reason, o.title, o.details, o.budget_usd, o.deadline_at,
+    `SELECT j.id, j.phone, j.reason, j.offered_usd, j.travel_note, j.created_at, o.id AS order_id,
+            o.title, o.details, o.budget_usd, o.deadline_at,
             o.pickup_location, o.dropoff_location, o.category
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -249,7 +275,7 @@ app.post("/v1/offers/:id/sent", async (req, res) => {
 app.get("/v1/offers/open", async (req, res) => {
   const phone = normalizePhone(String(req.query.phone ?? ""));
   const { rows } = await pool.query(
-    `SELECT j.id, j.reason, o.id AS order_id, o.title, o.details, o.budget_usd,
+    `SELECT j.id, j.reason, j.offered_usd, o.id AS order_id, o.title, o.details, o.budget_usd,
             o.deadline_at, o.pickup_location, o.dropoff_location
        FROM job_offers j
        JOIN orders o ON o.id = j.order_id
@@ -299,6 +325,91 @@ app.post("/v1/dev/seed", async (_req, res) => {
   }
 });
 
+/** Tasks that still have no illustration. */
+app.get("/v1/orders/needing-image", async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.details, o.category, o.pickup_location, o.dropoff_location,
+            o.budget_usd, o.deadline_at, p.phone AS requester_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN order_images i ON i.order_id = o.id
+      WHERE i.order_id IS NULL
+        AND o.status IN ('submitted','offered','accepted')
+      ORDER BY o.created_at DESC
+      LIMIT 5`,
+  );
+  res.json({ ok: true, data: rows });
+});
+
+app.post("/v1/orders/:id/image", async (req, res) => {
+  const { png_base64, prompt } = req.body ?? {};
+  if (!png_base64) return res.status(400).json({ ok: false, error: "png_base64 is required" });
+  await pool.query(
+    `INSERT INTO order_images (order_id, png, prompt)
+     VALUES ($1, decode($2,'base64'), $3)
+     ON CONFLICT (order_id) DO UPDATE SET png = EXCLUDED.png, prompt = EXCLUDED.prompt`,
+    [req.params.id, png_base64, prompt ?? null],
+  );
+  res.json({ ok: true, data: { order_id: req.params.id, bytes: Buffer.from(png_base64, "base64").length } });
+});
+
+app.get("/v1/orders/:id/image", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT encode(png,'base64') AS png_base64 FROM order_images WHERE order_id = $1`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ ok: false, error: "no image for that order" });
+  res.json({ ok: true, data: rows[0] });
+});
+
+/** The person doing a job says it is finished. */
+app.post("/v1/orders/:id/done", async (req, res) => {
+  const { phone } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const result = await markTaskDone(req.params.id, String(phone));
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+/** The requester confirms it - this is what records payment as due. */
+app.post("/v1/orders/:id/confirm", async (req, res) => {
+  const { phone, confirmed, note } = req.body ?? {};
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  const result = await confirmTaskDone(
+    req.params.id, String(phone), confirmed !== false, note,
+  );
+  if (result.error) return res.status(409).json({ ok: false, error: result.error });
+  res.json({ ok: true, data: result });
+});
+
+app.get("/v1/work", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  res.json({
+    ok: true,
+    data: {
+      doing: await listJobsInProgress(phone),
+      awaiting_their_confirmation: await listAwaitingConfirmation(phone),
+    },
+  });
+});
+
+/** What is owed, and whether it can actually be paid yet. */
+app.get("/v1/payments", async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT pay.id, pay.amount_usd, pay.platform_fee_usd, pay.status, pay.stripe_mode,
+            pay.note, pay.created_at, o.title,
+            payer.phone AS payer_phone, payee.phone AS payee_phone
+       FROM payments pay
+       JOIN orders o ON o.id = pay.order_id
+       LEFT JOIN people payer ON payer.id = pay.payer_id
+       LEFT JOIN people payee ON payee.id = pay.payee_id
+      ORDER BY pay.created_at DESC
+      LIMIT $1`,
+    [Math.min(Number(req.query.limit) || 20, 100)],
+  );
+  res.json({ ok: true, data: rows });
+});
+
 /** A worker's agent asks the requester something about the job. */
 app.post("/v1/offers/:id/question", async (req, res) => {
   const { phone, question } = req.body ?? {};
@@ -332,6 +443,15 @@ app.get("/v1/questions/open", async (req, res) => {
   });
 });
 
+/**
+ * Who is worth phoning, and why. Poll this from the voice platform: each entry
+ * is a number to dial plus what the call is about.
+ */
+app.get("/v1/escalations", async (req, res) => {
+  const stale = Number(req.query.stale_minutes) || 20;
+  res.json({ ok: true, data: await callWorthy(stale) });
+});
+
 /** What each side's agent could act on right now. */
 app.get("/v1/negotiation/pending", async (_req, res) => {
   res.json({ ok: true, data: await pendingNegotiation() });
@@ -360,6 +480,20 @@ app.post("/v1/offers/:id/counter/respond", async (req, res) => {
 /** Counters awaiting a requester's decision. */
 app.get("/v1/counters/open", async (req, res) => {
   res.json({ ok: true, data: await listOpenCounters(String(req.query.phone ?? "")) });
+});
+
+/** Point an order at the person who actually requested it. */
+app.post("/v1/orders/:id/reassign", async (req, res) => {
+  const phone = req.body?.phone;
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    const result = await reassignOrder(req.params.id, String(phone));
+    if (result.error) return res.status(404).json({ ok: false, error: result.error });
+    console.log(`reassigned order ${req.params.id} to ${result.requester}`);
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 /** Recent orders, with where they came from. */

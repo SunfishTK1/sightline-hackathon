@@ -11,6 +11,8 @@ export const config = {
   openaiKey: required("OPENAI_API_KEY"),
   model: process.env.OPENAI_AGENT_MODEL || "gpt-6-astra",
   voiceMcpUrl: required("VOICE_MCP_URL"),
+  /** Rank + clearing price. Agent still sends the SMS. */
+  marketMakerUrl: (process.env.MARKET_MAKER_URL || "http://localhost:3000").replace(/\/$/, ""),
 
   /** Only these numbers get answered. Empty means answer every enrolled sender. */
   allowedNumbers: (process.env.ALLOWED_NUMBERS || "")

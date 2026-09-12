@@ -1,0 +1,22 @@
+{
+  "name": "user_preference_embedding_index",
+  "type": "vectorSearch",
+  "definition": {
+    "fields": [
+      {
+        "type": "vector",
+        "path": "preferenceEmbedding",
+        "numDimensions": 1536,
+        "similarity": "cosine"
+      },
+      {
+        "type": "filter",
+        "path": "workerProfile.enabled"
+      },
+      {
+        "type": "filter",
+        "path": "availability.isAvailable"
+      }
+    ]
+  }
+}

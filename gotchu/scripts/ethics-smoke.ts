@@ -1,0 +1,97 @@
+/**
+ * @owner Daphne
+ * Run the 8 canned ethics/arbitration cases. No API keys required.
+ *
+ *   npm run ethics-smoke
+ */
+import { reviewTask, reviewAmendment, arbitrateMove } from "../lib/agents/ethics";
+import {
+  MOCK_ARBITRATE_COLOR_AND_PRICE,
+  MOCK_ARBITRATE_DINING_ID,
+  MOCK_ARBITRATE_PRICE_ONLY,
+  MOCK_ARBITRATE_WALK_DOG,
+  MOCK_FENCE_NAVY,
+  MOCK_FENCE_PLUS_ESSAY,
+  MOCK_FENCE_WHITE,
+  MOCK_LAB_HOMEWORK,
+  MOCK_PACKAGE_PICKUP,
+} from "../mocks/ethics";
+
+let failed = 0;
+
+function check(name: string, ok: boolean, detail?: unknown) {
+  if (ok) {
+    console.log(`PASS  ${name}`);
+    return;
+  }
+  failed += 1;
+  console.error(`FAIL  ${name}`, detail ?? "");
+}
+
+async function main() {
+  const pickup = await reviewTask(MOCK_PACKAGE_PICKUP);
+  check(
+    "1 reviewTask package pickup BLOCK credential_misuse",
+    pickup.verdict === "BLOCK" && pickup.categories.includes("credential_misuse"),
+    pickup,
+  );
+
+  const lab = await reviewTask(MOCK_LAB_HOMEWORK);
+  check(
+    "2 reviewTask 15-213 lab BLOCK academic_integrity",
+    lab.verdict === "BLOCK" && lab.categories.includes("academic_integrity"),
+    lab,
+  );
+
+  const navy = await reviewAmendment(MOCK_FENCE_WHITE, MOCK_FENCE_NAVY);
+  check(
+    "3 reviewAmendment white → navy ALLOW sameTask",
+    navy.verdict === "ALLOW" && navy.sameTask === true,
+    navy,
+  );
+
+  const essay = await reviewAmendment(MOCK_FENCE_WHITE, MOCK_FENCE_PLUS_ESSAY);
+  check(
+    "4 reviewAmendment fence + essay REJECT not same task",
+    essay.verdict === "REJECT" && essay.sameTask === false,
+    essay,
+  );
+
+  const priceOnly = await arbitrateMove(MOCK_ARBITRATE_PRICE_ONLY);
+  check("5 arbitrateMove $12 no amendments ALLOW", priceOnly.verdict === "ALLOW", priceOnly);
+
+  const dog = await arbitrateMove(MOCK_ARBITRATE_WALK_DOG);
+  check(
+    "6 arbitrateMove walk-the-dog STRIP or REJECT, job unchanged",
+    (dog.verdict === "STRIP_AMENDMENTS" || dog.verdict === "REJECT_MOVE") &&
+      dog.structured.title === MOCK_FENCE_WHITE.title,
+    dog,
+  );
+
+  const dining = await arbitrateMove(MOCK_ARBITRATE_DINING_ID);
+  check(
+    "7 arbitrateMove dining ID BLOCK_TASK credential_misuse",
+    dining.verdict === "BLOCK_TASK",
+    dining,
+  );
+
+  const colorPrice = await arbitrateMove(MOCK_ARBITRATE_COLOR_AND_PRICE);
+  check(
+    "8 arbitrateMove navy + $35 ALLOW",
+    colorPrice.verdict === "ALLOW" &&
+      colorPrice.priceUsd === 35 &&
+      /navy/i.test(colorPrice.structured.title),
+    colorPrice,
+  );
+
+  if (failed) {
+    console.error(`\n${failed} failed`);
+    process.exit(1);
+  }
+  console.log("\nAll 8 ethics cases passed.");
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

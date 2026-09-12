@@ -9,9 +9,13 @@
     "lint": "eslint",
     "seed": "tsx scripts/seed.ts",
     "create-indexes": "tsx scripts/create-indexes.ts",
+<<<<<<< HEAD
     "create-schema": "tsx scripts/create-schema.ts",
     "migrate:people": "tsx scripts/migrate-people-onboarding.ts",
     "test:onboarding": "tsx scripts/test-onboarding.ts"
+=======
+    "ethics-smoke": "tsx scripts/ethics-smoke.ts"
+>>>>>>> 3850767fe9bb65cd854a10484153dbd6ee7327ff
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",

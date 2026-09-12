@@ -61,13 +61,21 @@ export type OpenJob = {
   title: string;
   details: string;
   budget_usd: string | null;
+  offered_usd?: string | null;
   deadline_at: string | null;
   pickup_location: string | null;
   dropoff_location: string | null;
   reason: string | null;
+  travel_note?: string | null;
 };
 
-export type Outreach = OpenJob & { phone: string; category: string | null };
+export type Outreach = OpenJob & {
+  phone: string;
+  category: string | null;
+  offered_usd?: string | null;
+  created_at?: string;
+  travel_note?: string | null;
+};
 
 /** A worker's proposed price, waiting on the requester. */
 export type OpenCounter = {
@@ -83,8 +91,20 @@ export type OpenCounter = {
 export const market = {
   openOrders: () => get<any[]>("/v1/orders/open"),
   candidates: (orderId: string) => get<any[]>(`/v1/orders/${orderId}/candidates`),
-  createOffer: (order_id: string, phone: string, reason: string) =>
-    post<{ id: string } | null>("/v1/offers", { order_id, phone, reason }),
+  createOffer: (
+    order_id: string,
+    phone: string,
+    reason: string,
+    offered_usd?: number,
+    travel_note?: string,
+  ) =>
+    post<{ id: string } | null>("/v1/offers", {
+      order_id,
+      phone,
+      reason,
+      offered_usd,
+      travel_note,
+    }),
   pendingOutreach: () => get<Outreach[]>("/v1/offers/outreach"),
   markOutreachSent: (id: string) => post(`/v1/offers/${id}/sent`),
   /** A person can be holding several offers at once. */
@@ -92,6 +112,10 @@ export const market = {
     get<OpenJob[]>(`/v1/offers/open?phone=${encodeURIComponent(phone)}`),
   respond: (id: string, accepted: boolean) =>
     post<{ status: string }>(`/v1/offers/${id}/respond`, { accepted }),
+
+  /** The broker's price for a live offer. Never the requester's budget. */
+  setOfferPrice: (id: string, offered_usd: number) =>
+    post<{ id: string; offered_usd: string }>(`/v1/offers/${id}/price`, { offered_usd }),
 
   counter: (id: string, phone: string, price_usd: number, note?: string) =>
     post<{ status: string }>(`/v1/offers/${id}/counter`, { phone, price_usd, note }),
@@ -111,9 +135,49 @@ export const market = {
       `/v1/questions/open?phone=${encodeURIComponent(phone)}`,
     ),
 
+  /** Completion: the worker says done, the requester confirms. */
+  markDone: (orderId: string, phone: string) =>
+    post<{ status: string }>(`/v1/orders/${orderId}/done`, { phone }),
+  confirmDone: (orderId: string, phone: string, confirmed: boolean, note?: string) =>
+    post<{ status: string }>(`/v1/orders/${orderId}/confirm`, { phone, confirmed, note }),
+  work: (phone: string) =>
+    get<{ doing: WorkItem[]; awaiting_their_confirmation: WorkItem[] }>(
+      `/v1/work?phone=${encodeURIComponent(phone)}`,
+    ),
+
+  /** Tasks with no illustration yet, and the store for them. */
+  ordersNeedingImage: () => get<any[]>("/v1/orders/needing-image"),
+  storeOrderImage: (orderId: string, pngBase64: string, prompt: string) =>
+    post(`/v1/orders/${orderId}/image`, { png_base64: pngBase64, prompt }),
+  orderImage: (orderId: string) =>
+    get<{ png_base64: string }>(`/v1/orders/${orderId}/image`).catch(() => null),
+
+  /** Things stuck long enough to be worth chasing. */
+  escalations: (staleMinutes: number) =>
+    get<Escalation[]>(`/v1/escalations?stale_minutes=${staleMinutes}`),
+
   /** What each side's agent could act on for its principal. */
   pendingNegotiation: () =>
     get<{ offers: PendingOffer[]; counters: PendingCounter[] }>("/v1/negotiation/pending"),
+};
+
+export type WorkItem = {
+  id: string;
+  title: string;
+  status?: string;
+  budget_usd: string | null;
+  worker_phone?: string;
+};
+
+export type Escalation = {
+  phone: string;
+  name: string | null;
+  offer_id?: string;
+  question_id?: string;
+  reason: "offer_unanswered" | "counter_undecided" | "question_unanswered";
+  minutes_waiting: number;
+  about: string;
+  calling_about: string;
 };
 
 export type JobQuestion = {
@@ -131,9 +195,16 @@ export type PendingOffer = {
   outreach_sent_at: string;
   title: string;
   budget_usd: string | null;
+  offered_usd?: string | null;
+  category?: string | null;
+  details?: string | null;
+  deadline_at?: string | null;
+  pickup_location?: string | null;
+  dropoff_location?: string | null;
   min_price_usd: string | null;
   auto_counter: boolean | null;
   auto_accept: boolean | null;
+  counter_rounds?: number | null;
 };
 
 export type PendingCounter = {
@@ -143,6 +214,8 @@ export type PendingCounter = {
   countered_at: string;
   title: string;
   order_budget_usd: string | null;
+  offered_usd?: string | null;
+  counter_rounds?: number | null;
   requester_phone: string;
 };
 

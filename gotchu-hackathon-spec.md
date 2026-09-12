@@ -2,9 +2,11 @@
 
 **"Need something?" → "Gotchu."**
 
-A text-first task marketplace for verified CMU students. You type what you need in plain English; your personal AI agent structures it, an ethics agent gates it, a market-making agent finds candidates and negotiates with *their* agents, and humans only come back in to approve the deal.
+A text-first task marketplace for verified CMU students. You type what you need in plain English; your personal AI agent structures it, an **ethics and arbitration agent** (The Word / Academic Integrity) gates it and referees the deal, a market-making agent finds candidates and negotiates with *their* agents, and humans only come back in to approve the deal.
 
-**Team:** Will (onboarding) · Thomas (personal AI agent) · Divya (market-making: matching engine) · Daphne (market-making: negotiation + task pool + ethics agent)
+**Team:** Will (onboarding + auth + completion) · Thomas (personal AI agent) · Divya (market-making: matching + live negotiate loop in `agent/`) · Daphne (ethics + arbitration; web feed / approval UI)
+
+**Ethics addendum:** `ethics-arbitration-spec.md`. Price is the only thing agents exchange. Same-job tweaks are allowed. Package pickup is **BLOCKED** (needs someone else's ID). No dollar cap. Daphne owns the agent; others call her functions.
 
 ---
 
@@ -12,9 +14,7 @@ A text-first task marketplace for verified CMU students. You type what you need 
 
 Four people, 24 hours, one codebase. The failure mode is not "the agents weren't smart enough" — it's that at hour 18 nobody's pieces fit together. So:
 
-**Hours 0–2 are for contracts, not features.** Everyone agrees on the Postgres tables, the state machine, and the API routes. Then everyone builds behind a mock and integrates against real data at T+8.
-
-**DB lock (team decision):** PostgreSQL on the existing Railway project, with **pgvector** for preference matching. We are **not** using MongoDB Atlas — do not create an Atlas cluster, do not add `mongodb` as a dependency, do not write `lib/mongo.ts`.
+**Hours 0–2 are for contracts, not features.** Everyone agrees on the Mongo documents, the state machine, and the API routes. Then everyone builds behind a mock and integrates against real data at T+8.
 
 Ship rule: every workstream must have a hardcoded fallback. If the LLM call fails at demo time, the route returns a canned-but-valid object. Judges never see a stack trace.
 
@@ -27,12 +27,12 @@ Ship rule: every workstream must have a hardcoded fallback. If the LLM call fail
 | App | Next.js 15 (App Router) + TypeScript | One repo, API routes and UI together, one Vercel deploy |
 | UI | Tailwind + shadcn/ui | Fast, and we control the look (see §9) |
 | Auth | Auth0 | CMU email gating happens in an Action, not our code |
-| DB | **PostgreSQL + pgvector** (Railway) | Already have the project; no Mongo |
+| DB | MongoDB Atlas + **Atlas Vector Search** | This is the sponsor play (see §2) |
 | Agents | Claude API with tool use / structured JSON output | Three agents, one shared client |
 | Embeddings | **Gemini `text-embedding-004`** (768 dims) | Same job as OpenAI's, and it qualifies us for the Gemini prize (§2) |
 | Voice | **ElevenLabs** on the negotiation replay | Cheap, and it improves the best screen we have (§2) |
 | Payments | Solana devnet, feature-flagged off | Prize target, but last in (§8) |
-| Deploy | Vercel (app) + Railway Postgres | App and DB stay separate |
+| Deploy | Vercel + Atlas free tier | No infra work |
 
 Repo: `gotchu/` — single Next.js app. No microservices. No separate Python backend. Everything is a route handler.
 
@@ -42,7 +42,7 @@ Repo: `gotchu/` — single Next.js app. No microservices. No separate Python bac
 
 HackCMU runs six MLH sponsor prizes: **Gemini API, ElevenLabs, Solana, Vultr, Auth0, MongoDB Atlas.** Each is awarded per team member, and they stack with the main HackCMU judging — so they're close to free upside, *as long as chasing them doesn't degrade the core product.* That's the trade to keep in mind: a team that bolts on six APIs and wins none of the main prizes has lost.
 
-Gotchu already touches Auth0 without adding a line of code. We're targeting **Auth0, Gemini, ElevenLabs, with Solana as a fourth**, and **skipping MongoDB Atlas and Vultr**. The team locked Postgres on Railway; chasing Atlas just to tick a box is how we waste the night.
+Gotchu already touches two of them without adding a line of code. We're targeting **four, with Solana as a fifth**, and deliberately skipping one.
 
 ### The ranking, by value per hour of work
 
@@ -53,20 +53,25 @@ Frame it this way in the writeup and the pitch: the personal agent holds delegat
 
 → **Will**: read the Auth0 for AI Agents docs during your T+2→T+6 block, not as an afterthought. If there's a token-vault or async-authorization primitive that maps onto our approval step in under an hour, use it. If not, the framing alone is still strong.
 
-**2. MongoDB Atlas — skip. We are on Postgres.**
-Do not sign up for Atlas. Do not install `mongodb`. Matching is **pgvector** over `users.preference_embedding` (768-dim Gemini vectors, cosine distance). Divya presents that query, not an aggregation pipeline.
+**2. MongoDB Atlas — we qualify the moment we connect.**
+Correcting an earlier draft of this doc: the MLH bar here is literally "build a hack using MongoDB Atlas." There's no hidden requirement to use exotic features. We qualify at T+2.
 
-→ **Divya** gets the Railway `DATABASE_URL` from Will at T+0. Enable the `vector` extension in hour 1 (`CREATE EXTENSION IF NOT EXISTS vector`).
+Vector search still matters, but for a different reason — it's the tiebreaker when eight other teams also "used MongoDB." Our three talking points:
+1. **Atlas Vector Search** — preference text embedded at onboarding; `$vectorSearch` over worker vectors *is* the matching engine, not a bolt-on.
+2. **Aggregation pipeline as the ranking layer** — vector score, rating, and experience combined in one round trip.
+3. **Change Streams** — live task pool. Only if it's free (§12 cut list).
+
+→ **Divya** presents this. Get the `$50 student credit` or free tier at T+0.
 
 **3. Gemini — a one-file change.**
-Swap `lib/embed.ts` from OpenAI to Gemini's `text-embedding-004`. Same interface, same call site, and it legitimately qualifies us. **Note the dimension: 768** — the Postgres column is `vector(768)`. Wrong width and inserts fail.
+Swap `lib/embed.ts` from OpenAI to Gemini's `text-embedding-004`. Same interface, same call site, and it legitimately qualifies us. **Note the dimension change: 768, not 1536** — update the Atlas vector index definition in §3 to match, or the index silently rejects your vectors.
 
-If we want a second, more visible Gemini surface: run the ethics agent on Gemini and the personal/negotiation agents on Claude. That's defensible on the merits (a cheap fast classifier vs. a reasoning-heavy negotiator) and gives a better answer than "we swapped one API call" when a judge asks why.
+If we want a second, more visible Gemini surface: run the ethics/arbitration agent on Gemini and the personal/negotiation agents on Claude. That's defensible on the merits (a cheap fast classifier vs. a reasoning-heavy negotiator) and gives a better answer than "we swapped one API call" when a judge asks why.
 
-→ **Will** owns `embed.ts`. **Daphne** owns `ethics.ts`.
+→ **Will** owns `embed.ts`. **Daphne** owns ethics (`lib/agents/ethics.ts`, handbook distill, deny-list).
 
 **4. ElevenLabs — the rare integration that makes the project better.**
-TTS on the negotiation replay: two distinct voices reading the agents' one-line rationales as the transcript plays. It's ~45 minutes on a screen Daphne is already building, and it turns our best demo moment into something people remember. Pre-generate the audio when the negotiation resolves, cache the URLs on the offer row, play on reveal.
+TTS on the negotiation replay: two distinct voices reading the agents' one-line rationales as the transcript plays. It's ~45 minutes on a screen Daphne is already building, and it turns our best demo moment into something people remember. Pre-generate the audio when the negotiation resolves, cache the URLs on the offer doc, play on reveal.
 
 Optional second surface if there's slack: voice intake on the compose screen — hold to speak, transcribe, feed the same `parseTask`. Text-first is still the product; voice is an accessibility affordance, not a pivot.
 
@@ -82,120 +87,147 @@ We're on Vercel. Contorting deployment for a sixth prize is how teams lose the g
 
 ### What this means for the submission form
 
-MLH prizes are claimed per-challenge on the submission, and teams lose them by forgetting to tick the box. At T+22, when Will fills the form: tick **Auth0, Gemini, ElevenLabs**, plus **Solana** if it shipped. **Do not tick MongoDB.** Write one sentence per prize explaining the integration — judges skim, and "we used it" loses to "we used it *for this*."
+MLH prizes are claimed per-challenge on the submission, and teams lose them by forgetting to tick the box. At T+22, when Will fills the form: tick **Auth0, MongoDB, Gemini, ElevenLabs**, plus **Solana** if it shipped. Write one sentence per prize explaining the integration — judges skim, and "we used it" loses to "we used it *for this*."
 
 ---
 
 ## 3. Data model
 
-Five tables. Nested blobs (`structured`, `ethics`, `transcript`, `stats`, `payment`) live in `jsonb` so the TypeScript shapes in `lib/types/` stay the same. **Never rename or remove** columns marked 🔒 — other people's code reads them.
-
-`uuid` / `task_id` are our public IDs. There is no Mongo `_id`. Do not expose `auth0_sub` or `phone` to the client.
+Five collections. Mongo is schemaless, so add fields freely — but **never rename or remove** the ones marked 🔒, because other people's code reads them.
 
 ### `users`
 
-```sql
-CREATE TABLE users (
-  uuid                  TEXT PRIMARY KEY,          -- 🔒 usr_…
-  auth0_sub             TEXT UNIQUE NOT NULL,      -- 🔒
-  first_name            TEXT NOT NULL,             -- 🔒
-  last_name             TEXT NOT NULL,             -- 🔒
-  cmu_email             TEXT UNIQUE NOT NULL,      -- 🔒
-  phone                 TEXT NOT NULL,             -- 🔒 E.164
-  preference_text       TEXT NOT NULL,
-  preference_embedding  vector(768),               -- Gemini text-embedding-004
-  is_available          BOOLEAN NOT NULL DEFAULT false,
-  available_until       TIMESTAMPTZ,
-  stats                 JSONB NOT NULL DEFAULT '{"tasksCompleted":0,"tasksRequested":0,"avgRating":null,"ratingCount":0}',
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+```js
+{
+  _id: ObjectId,
+  uuid: "usr_9f2a...",          // 🔒 our stable ID, used everywhere instead of _id
+  auth0Sub: "auth0|abc123",     // 🔒 from Auth0 JWT sub claim
+  firstName: "Will",            // 🔒 real name, verified via CMU email
+  lastName: "…",                // 🔒
+  cmuEmail: "…@andrew.cmu.edu", // 🔒 unique index
+  phone: "+14125550123",        // 🔒 E.164 format, always
+  preferenceText: "I'm usually around Gates and Tepper on weekday afternoons. Happy to do food runs and package pickups, not moving furniture. Min $8.",
+  preferenceEmbedding: [0.013, ...],  // 768 floats (Gemini text-embedding-004)
+  availability: { isAvailable: true, until: ISODate },
+  stats: { tasksCompleted: 0, tasksRequested: 0, avgRating: null, ratingCount: 0 },
+  createdAt: ISODate,
+  updatedAt: ISODate
+}
 ```
 
-`preference_text` is the star. It's free-text, it's what gets embedded, and it's what the personal agent reads to negotiate on someone's behalf. Onboarding should push people to write 2–3 sentences, not check boxes.
+`preferenceText` is the star. It's free-text, it's what gets embedded, and it's what the personal agent reads to negotiate on someone's behalf. Onboarding should push people to write 2–3 sentences, not check boxes.
 
 ### `tasks`
 
-```sql
-CREATE TABLE tasks (
-  task_id              TEXT PRIMARY KEY,           -- 🔒 tsk_…
-  requester_uuid       TEXT NOT NULL REFERENCES users(uuid), -- 🔒
-  raw_text             TEXT NOT NULL,
-  structured           JSONB NOT NULL,             -- 🔒 StructuredTask
-  task_embedding       vector(768),
-  ethics               JSONB,                      -- 🔒 EthicsVerdict
-  status               TEXT NOT NULL,              -- 🔒 see §4
-  matched_worker_uuid  TEXT REFERENCES users(uuid),
-  agreed_price_usd     NUMERIC,
-  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+```js
+{
+  _id: ObjectId,
+  taskId: "tsk_4b81...",        // 🔒
+  requesterUuid: "usr_...",     // 🔒
+  rawText: "I need someone to pick up my package from the UC and bring it to Gates before 6. Max $10.",
+  structured: {                 // 🔒 produced by the personal agent
+    title: "Package pickup: UC → Gates",
+    category: "pickup",         // pickup | food | moving | errand | tutoring_allowed | other
+    pickupLocation: "Cohon University Center",
+    dropoffLocation: "Gates Hillman Center",
+    deadline: ISODate,
+    maxPriceUsd: 10,
+    estimatedMinutes: 25,
+    requirements: ["Requester must provide package pickup authorization"]
+  },
+  taskEmbedding: [ ... ],
+  ethics: {                     // 🔒 written by the ethics agent
+    verdict: "ALLOW",           // ALLOW | ALLOW_WITH_CONDITIONS | BLOCK
+    categories: [],
+    conditions: [],
+    reason: "Routine campus errand, no integrity or safety concerns.",
+    reviewedAt: ISODate
+  },
+  status: "OPEN",               // 🔒 see §4
+  matchedWorkerUuid: null,
+  agreedPriceUsd: null,
+  createdAt: ISODate,
+  updatedAt: ISODate
+}
 ```
 
-`structured` JSON: `{ title, category, pickupLocation, dropoffLocation, deadline, maxPriceUsd, estimatedMinutes, requirements }`. Category: `pickup | food | moving | errand | tutoring_allowed | other`.
+### `offers` — one doc per negotiation between a task and a candidate worker
 
-### `offers` — one row per negotiation between a task and a candidate worker
-
-```sql
-CREATE TABLE offers (
-  offer_id         TEXT PRIMARY KEY,               -- ofr_…
-  task_id          TEXT NOT NULL REFERENCES tasks(task_id), -- 🔒
-  worker_uuid      TEXT NOT NULL REFERENCES users(uuid),    -- 🔒
-  match_score      NUMERIC NOT NULL,
-  transcript       JSONB NOT NULL DEFAULT '[]',    -- 🔒 NegotiationMessage[]
-  outcome          TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | AGREED | FAILED | WITHDRAWN
-  final_price_usd  NUMERIC,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (task_id, worker_uuid)
-);
+```js
+{
+  _id: ObjectId,
+  taskId: "tsk_...",            // 🔒
+  workerUuid: "usr_...",        // 🔒
+  matchScore: 0.83,
+  transcript: [                 // 🔒 agent-to-agent messages, this is the demo money shot
+    { round: 1, from: "worker_agent", priceUsd: 14, etaMinutes: 20, rationale: "…", accept: false, at: ISODate },
+    { round: 1, from: "requester_agent", priceUsd: 9,  etaMinutes: 30, rationale: "…", accept: false, at: ISODate },
+    { round: 2, from: "worker_agent", priceUsd: 11, etaMinutes: 22, rationale: "…", accept: false, at: ISODate },
+    { round: 2, from: "requester_agent", priceUsd: 11, etaMinutes: 22, rationale: "…", accept: true,  at: ISODate }
+  ],
+  outcome: "AGREED",            // PENDING | AGREED | FAILED | WITHDRAWN
+  finalPriceUsd: 11,
+  createdAt: ISODate
+}
 ```
 
 ### `agreements`
 
-```sql
-CREATE TABLE agreements (
-  task_id                 TEXT PRIMARY KEY REFERENCES tasks(task_id),
-  requester_uuid          TEXT NOT NULL REFERENCES users(uuid),
-  worker_uuid             TEXT NOT NULL REFERENCES users(uuid),
-  final_price_usd         NUMERIC NOT NULL,
-  terms                   JSONB NOT NULL DEFAULT '[]',
-  requester_approved_at   TIMESTAMPTZ,
-  worker_approved_at      TIMESTAMPTZ,
-  payment                 JSONB NOT NULL DEFAULT '{"method":"cash","solanaTxSig":null,"status":"unpaid"}',
-  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+```js
+{
+  _id: ObjectId,
+  taskId: "tsk_...",
+  requesterUuid: "usr_...",
+  workerUuid: "usr_...",
+  finalPriceUsd: 11,
+  terms: ["Deliver to Gates 4th floor by 5:45pm", "Requester covers any pickup fee"],
+  requesterApprovedAt: ISODate,
+  workerApprovedAt: ISODate,
+  payment: { method: "cash", solanaTxSig: null, status: "unpaid" },
+  createdAt: ISODate
+}
 ```
 
 ### `reviews`
 
-```sql
-CREATE TABLE reviews (
-  task_id         TEXT NOT NULL REFERENCES tasks(task_id),
-  rater_uuid      TEXT NOT NULL REFERENCES users(uuid),
-  rated_uuid      TEXT NOT NULL REFERENCES users(uuid),
-  rating          INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
-  survey_answers  JSONB NOT NULL,
-  comment         TEXT,
-  ethics_flag     TEXT,                            -- set by ethics agent if the comment describes a violation
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+```js
+{
+  _id: ObjectId,
+  taskId: "tsk_...",
+  raterUuid: "usr_...",
+  ratedUuid: "usr_...",
+  rating: 5,                    // 1–5
+  surveyAnswers: { onTime: true, asDescribed: true, wouldRepeat: true },
+  comment: "…",
+  ethicsFlag: null,             // set by ethics agent if the comment describes a violation
+  createdAt: ISODate
+}
 ```
 
-### Indexes — run these in hour 1 (`scripts/create-schema.ts`)
+### Indexes — run these in hour 1
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-
-CREATE UNIQUE INDEX users_cmu_email_idx ON users (cmu_email);
-CREATE UNIQUE INDEX users_auth0_sub_idx ON users (auth0_sub);
-CREATE INDEX tasks_status_created_idx ON tasks (status, created_at DESC);
-CREATE INDEX users_pref_vec_idx ON users
-  USING ivfflat (preference_embedding vector_cosine_ops) WITH (lists = 10);
+```js
+db.users.createIndex({ cmuEmail: 1 }, { unique: true })
+db.users.createIndex({ uuid: 1 }, { unique: true })
+db.users.createIndex({ auth0Sub: 1 }, { unique: true })
+db.tasks.createIndex({ taskId: 1 }, { unique: true })
+db.tasks.createIndex({ status: 1, createdAt: -1 })
+db.offers.createIndex({ taskId: 1, workerUuid: 1 }, { unique: true })
 ```
 
-`ivfflat` needs a few rows before it is useful — seed 25 users first, then create the vector index. Until then, cosine `<=>` still works as a sequential scan, which is fine at hackathon scale.
+Atlas Vector Search index on `users`, named `user_pref_vec` (create in the Atlas UI → Search → Create Index → JSON editor):
 
-Filter in SQL (`WHERE is_available = true`), not in an Atlas-style index declaration. There is no `$vectorSearch`.
+```json
+{
+  "fields": [
+    { "type": "vector", "path": "preferenceEmbedding", "numDimensions": 768, "similarity": "cosine" },
+    { "type": "filter", "path": "availability.isAvailable" },
+    { "type": "filter", "path": "uuid" }
+  ]
+}
+```
+
+Filter fields **must** be declared in the index or `$vectorSearch` filters silently fail. This burns people. Declare them now.
 
 ---
 
@@ -214,7 +246,7 @@ ACCEPTED ──► IN_PROGRESS ──► COMPLETED ──► REVIEWED
 ```
 
 Owner of each transition:
-- `DRAFT → ETHICS_REVIEW → OPEN|BLOCKED` — Daphne
+- `DRAFT → ETHICS_REVIEW → OPEN|BLOCKED` — Will
 - `OPEN → MATCHING → NEGOTIATING` — Divya
 - `NEGOTIATING → PENDING_APPROVAL|NO_MATCH` — Daphne
 - `PENDING_APPROVAL → ACCEPTED|DECLINED` — Daphne (human approval UI)
@@ -231,13 +263,15 @@ All routes are `app/api/**/route.ts`. All return `{ ok: true, data }` or `{ ok: 
 | `POST /api/onboarding` | Will | `{firstName, lastName, phone, preferenceText}` → `{user}` — creates user, embeds preference |
 | `PATCH /api/me/availability` | Will | `{isAvailable, until?}` → `{user}` |
 | `POST /api/tasks` | Thomas | `{rawText}` → `{task}` — parses to `structured`, then calls ethics internally |
-| `POST /api/ethics/review` | Daphne | `{taskId}` *or* `{structured}` → `{verdict, categories, conditions, reason}` |
+| `POST /api/ethics/review` | Daphne | `{taskId}` *or* `{structured}` → `{verdict, categories, conditions, reason}` — Thomas calls the **function**, not HTTP |
+| `POST /api/ethics/amendment` | Daphne | `{original, proposed}` → `{verdict, sameTask, allowedChanges, rejectedChanges, reason}` |
+| `POST /api/ethics/arbitrate` | Daphne | move + original/current structured → `{verdict, structured, stripped, reason}` — Divya's `agent/` loop may HTTP this |
 | `POST /api/tasks/:taskId/match` | Divya | `{}` → `{candidates: [{uuid, matchScore, reasons[]}]}` — sets status `MATCHING` |
-| `POST /api/tasks/:taskId/negotiate` | Daphne | `{workerUuid}` → `{offer}` — runs the full bounded negotiation loop |
+| `POST /api/tasks/:taskId/negotiate` | Divya (live loop in `agent/`; web stub may remain) | `{workerUuid}` → `{offer}` |
 | `POST /api/offers/:offerId/approve` | Daphne | `{role: "requester"\|"worker"}` → `{agreement?}` |
 | `POST /api/tasks/:taskId/complete` | Will | `{}` → `{task}` |
 | `POST /api/tasks/:taskId/review` | Will | `{rating, surveyAnswers, comment}` → `{review}` |
-| `GET /api/feed` | Daphne | → `{tasks[]}` — open task pool, polled every 3s (upgrade to LISTEN/NOTIFY if time) |
+| `GET /api/feed` | Daphne | → `{tasks[]}` — open task pool, polled every 3s (upgrade to change stream if time) |
 
 Shared types live in `lib/types.ts` and **Will writes that file first**, in hour 1, before anything else. Everyone imports from it.
 
@@ -268,60 +302,72 @@ Never invent a deadline more than 7 days out.
 
 Rules the prompt must enforce: never exceed your reservation; concede at most 30% of the gap per round; accept if the other side's offer is within your reservation; be brief (one sentence of rationale).
 
-### 6b. Market-making agent — Divya & Daphne
+### 6b. Market-making agent — Divya (match + `agent/` negotiate); Daphne referees via `arbitrateMove`
 
 Not one big prompt. It's **a database query plus a bounded loop**, with an LLM only in the tie-break.
 
-```sql
--- Divya: the ranking query (pgvector cosine distance)
-SELECT
-  uuid,
-  first_name,
-  preference_text,
-  stats,
-  (1 - (preference_embedding <=> $1::vector)) AS vector_score,
-  COALESCE((stats->>'avgRating')::float / 5.0, 0.7) AS rating_score,
-  LEAST(COALESCE((stats->>'tasksCompleted')::float / 10.0, 0), 1) AS experience_score,
-  (
-    0.6 * (1 - (preference_embedding <=> $1::vector)) +
-    0.25 * COALESCE((stats->>'avgRating')::float / 5.0, 0.7) +
-    0.15 * LEAST(COALESCE((stats->>'tasksCompleted')::float / 10.0, 0), 1)
-  ) AS final_score
-FROM users
-WHERE is_available = true
-  AND uuid <> $2
-  AND preference_embedding IS NOT NULL
-ORDER BY preference_embedding <=> $1::vector
-LIMIT 5;
+```js
+// Divya: the ranking pipeline
+db.users.aggregate([
+  { $vectorSearch: {
+      index: "user_pref_vec",
+      path: "preferenceEmbedding",
+      queryVector: taskEmbedding,
+      numCandidates: 200,
+      limit: 25,
+      filter: { "availability.isAvailable": true }
+  }},
+  { $match: { uuid: { $ne: requesterUuid } } },
+  { $addFields: {
+      vectorScore: { $meta: "vectorSearchScore" },
+      ratingScore: { $ifNull: [ { $divide: ["$stats.avgRating", 5] }, 0.7 ] },
+      experienceScore: { $min: [ { $divide: ["$stats.tasksCompleted", 10] }, 1 ] }
+  }},
+  { $addFields: { finalScore: { $add: [
+      { $multiply: ["$vectorScore", 0.6] },
+      { $multiply: ["$ratingScore", 0.25] },
+      { $multiply: ["$experienceScore", 0.15] }
+  ]}}},
+  { $sort: { finalScore: -1 } },
+  { $limit: 5 },
+  { $project: { preferenceEmbedding: 0, auth0Sub: 0, phone: 0 } }
+])
 ```
 
 Never return `phone` or `auth0Sub` to the client. Ever.
 
-### 6c. Ethics agent — Daphne
+### 6c. Ethics and arbitration agent — Daphne
 
-Runs on every task before it hits the pool, and on every review comment after.
+Full contract: `ethics-arbitration-spec.md`. Policy is a **distilled** Student Handbook (“The Word”) + Academic Integrity Policy in `gotchu/lib/prompts/ethics-handbook.ts` (not a dump of the full handbook).
 
-Two stages: a **deny-list prefilter** (regex on obvious terms — exam, homework submission, alcohol for someone underage, prescription, weapons, "use my ID") that short-circuits to `BLOCK` in ~0ms, then the LLM for everything else.
+**Ethics (gate)** — every task before it hits the pool, and every review comment after. Deny-list prefilter then heuristics/LLM.
 
-Output schema:
+**Arbitration (referee)** — Divya's negotiate loop (and any web `nextMove` loop) calls `arbitrateMove` **once per turn**. Rules:
+- **Price is the only thing exchanged.** ETA may ride along. No dollar cap.
+- **Same job may flex** (paint the fence navy instead of white).
+- **Job identity may not change** (paint the fence ↛ write my lab). Snapshot `originalStructured` at first ALLOW.
+
+Output of the gate:
 
 ```json
 {
   "verdict": "ALLOW | ALLOW_WITH_CONDITIONS | BLOCK",
   "categories": ["academic_integrity", "controlled_substances", "physical_safety",
                  "credential_misuse", "harassment", "illegal", "financial_risk", "none"],
-  "conditions": ["Requester must be present for ID verification at pickup"],
-  "reason": "One sentence, addressed to the student, explaining the call.",
+  "conditions": ["Tutoring may explain concepts only — do not complete graded work."],
+  "reason": "One sentence to the student, citing The Word when blocking.",
   "confidence": 0.0
 }
 ```
 
-The rubric, in the system prompt:
-- **BLOCK** — anything graded (writing papers, taking quizzes, sitting exams, completing problem sets), buying alcohol/tobacco/controlled substances, tasks requiring someone to impersonate the requester, anything illegal, anything with meaningful physical danger.
-- **ALLOW_WITH_CONDITIONS** — package pickup (needs the requester's own ID or an authorization note — this is the edge case from the whiteboard, handle it explicitly), anything entering a private residence, anything handling >$50 of someone's money, tutoring (allowed for *concept explanation*, blocked for *doing the work*).
-- **ALLOW** — food runs, moving help, errands, campus deliveries, event help.
+Gate rubric:
+- **BLOCK** — graded work done *for* them (unauthorized assistance); **package pickup** (needs the other person's ID — false ID / misrepresentation / unauthorized access credentials); alcohol/tobacco/controlled substances; impersonation / “use my ID”; illegal; meaningful physical danger.
+- **ALLOW_WITH_CONDITIONS** — private residence; tutoring (*concept explanation* only, not *doing the work*).
+- **ALLOW** — food runs, moving help, errands, event help, same-job work like painting a fence.
 
-Demo tip: have a deliberately bad task ready ("write my 15-213 lab for $50") and show the block in real time. That's the moment that separates us from a generic Uber-for-X.
+Arbitration verdicts per turn: `ALLOW` | `STRIP_AMENDMENTS` | `REJECT_MOVE` | `BLOCK_TASK`.
+
+Demo tip: block “write my 15-213 lab for $50” (Academic Integrity) **and** “pick up my package at the UC” (credential). Happy path is a food run or fence paint, not package pickup. Optional beat: navy fence allowed, “also write my essay” stripped.
 
 ---
 
@@ -329,15 +375,15 @@ Demo tip: have a deliberately bad task ready ("write my 15-213 lab for $50") and
 
 Assume T+0 is kickoff. Adjust to your actual clock.
 
-### Will — onboarding, auth, review loop
+### Will — onboarding, auth, completion, review loop
 
 **T+0 → T+2 (shared setup, you lead it)**
 1. `npx create-next-app@latest gotchu --ts --tailwind --app --eslint`
 2. `npx shadcn@latest init`, then `npx shadcn@latest add button card input textarea form label badge dialog tabs avatar separator skeleton sonner scroll-area slider select`
 3. Push to GitHub, add all three as collaborators, connect Vercel. Everyone works on branches off `main`, small PRs, no one commits directly.
 4. Write `lib/types.ts` with every interface from §3 and the status union from §4. Push it. **Tell the group it's live.**
-5. Write `lib/pg.ts` (cached `pg.Pool` — reuse across hot reload, not a new pool per request) and `lib/llm.ts` (the shared JSON-mode LLM call). Use `DATABASE_URL` from Railway. If the URL contains `.railway.internal`, skip TLS; otherwise `ssl: { rejectUnauthorized: false }` like the existing Sightline services.
-6. Run `scripts/create-schema.ts` against Railway Postgres: `CREATE EXTENSION vector`, five tables, unique indexes. Share `DATABASE_URL` in the team channel. **No Atlas. No Mongo.**
+5. Write `lib/mongo.ts` (cached client promise — the Next.js hot-reload pattern, not a new client per request) and `lib/agent.ts` (the shared JSON-mode LLM call).
+6. Create the Atlas cluster, the indexes, and the vector index. Share the connection string in the team channel.
 7. Seed script: `scripts/seed.ts` — 25 fake CMU students with real-sounding `preferenceText` and precomputed embeddings. **Divya cannot test matching without this. It is your highest-priority deliverable after types.**
 
 **T+2 → T+6 — Auth0 + onboarding**
@@ -360,13 +406,15 @@ exports.onExecutePostLogin = async (event, api) => {
 11. `POST /api/onboarding` — generate `uuid`, embed `preferenceText`, upsert on `auth0Sub`, return the user. Re-embed on every preference edit (`PATCH /api/me`).
 12. Availability toggle in the header — one switch, writes `availability.isAvailable`. Divya's filter depends on it.
 
-**T+6 → T+12 — free to help with onboarding polish / integration**
-With the ethics agent off your plate, use this block to harden onboarding, help Thomas or Divya unblock, and get ahead on the completion loop below.
+**T+6 → T+12 — ethics UI (Daphne owns the agent)**
+13. Daphne owns `reviewTask` / `reviewAmendment` / `arbitrateMove` (`ethics-arbitration-spec.md`). You do not rewrite the rubric.
+14. UI: a `Badge` on every task card showing the verdict. `BLOCK` renders a card explaining why, in the agent's own words, with a "revise request" button. `components/ethics/` stays yours.
+15. Logging to `ethics_log` is Daphne's unless she asks you to wire Mongo.
 
 **T+12 → T+18 — completion loop**
-17. `POST /api/tasks/:id/complete` and the post-task survey dialog (3 toggles + 1–5 stars + optional comment).
-18. Write the rating back to `users.stats` in **one** `UPDATE` that reads the jsonb, increments counts, and stores the new average. Don't SELECT-then-UPDATE in two round trips.
-19. Run the comment through Daphne's ethics agent (call `reviewComment()` as a plain function, no HTTP round trip); set `ethicsFlag` if it describes a violation. This closes the "rates jobs and staff" box on the whiteboard.
+16. `POST /api/tasks/:id/complete` and the post-task survey dialog (3 toggles + 1–5 stars + optional comment).
+17. Write the rating back to `users.stats` with `$inc` and a recomputed average — in one `findOneAndUpdate`, don't read-modify-write.
+18. Run the comment through Daphne's `reviewComment`; set `ethicsFlag` if it describes a violation. This closes the "rates jobs and staff" box on the whiteboard.
 
 **T+18 → T+24** — integration, demo dry runs, README. You own the README because you own the types.
 
@@ -380,14 +428,14 @@ With the ethics agent off your plate, use this block to harden onboarding, help 
 1. `lib/agents/personal.ts`, export `parseTask(rawText, user) → StructuredTask`.
 2. Prompt per §6a. Feed it the campus location list — grounding it in real building names is what makes the demo feel like it's *for CMU* rather than generic.
 3. Zod-validate the output. On parse failure, retry once with the error message appended; on second failure, return a minimal task with `needsReview: true`.
-4. `POST /api/tasks`: parse → embed `structured.title + description` → call Daphne's `reviewTask()` → set status `OPEN` or `BLOCKED` → insert. Return the task.
+4. `POST /api/tasks`: parse → embed `structured.title + description` → call Daphne's `reviewTask()` → snapshot `originalStructured` on ALLOW → set status `OPEN` or `BLOCKED` → insert. Return the task. On later field edits, call `reviewAmendment(original, proposed)` before saving. Package pickup will BLOCK — don't use it as the happy-path demo.
 5. Build the compose UI: one big textarea, a send button, and then the **structured card that appears underneath** showing what your agent understood, with every field editable inline. That reveal is the core interaction of the product — spend design time on it.
 
 **T+8 → T+16 — negotiation brain**
 6. Export `nextMove({task, principalPreferenceText, role, transcript, reservationPrice}) → NegotiationMessage`.
-7. Parse the reservation price out of `preferenceText` with a cheap LLM call at match time, cached on the offer row. Default to $7 if absent.
+7. Parse the reservation price out of `preferenceText` with a cheap LLM call at match time, cached on the offer doc. Default to $7 if absent.
 8. Enforce the concession rules in *code*, not just the prompt — clamp the returned price to `[reservation bounds]` before saving. Models will cheerfully agree to $3.
-9. Coordinate with Daphne: she calls your `nextMove` inside her loop. Agree on the exact signature at T+8 and don't change it after.
+9. Coordinate with Divya: her `agent/` loop (and any web negotiate stub) calls your `nextMove`, then **Daphne's** `arbitrateMove` before append. Bargain **only on price**. Optional same-job `amendments`. Agree signatures at T+8 and don't change them after.
 
 **T+16 → T+20** — Polish the rationale text. It's what the audience reads on screen during the negotiation replay, so it should sound like a person's agent ("Will's usually free around then, but 20 minutes each way is worth more than $9"), not a JSON field.
 
@@ -397,64 +445,43 @@ With the ethics agent off your plate, use this block to harden onboarding, help 
 
 ### Divya — market-making: matching engine
 
-**T+0 → T+2** — Get `DATABASE_URL` from Will. Confirm `CREATE EXTENSION vector` succeeded. You present the **pgvector** story, not Mongo.
+**T+0 → T+2** — Set up Atlas access with Will. Read §2 twice; you're the one presenting the MongoDB story.
 
 **T+2 → T+8 — get vector search working on seed data**
-1. Confirm Will's seed script has run and `preference_embedding` is populated on all 25 users. If it hasn't, write it yourself — don't wait.
-2. Create the `ivfflat` index in §3 after seed data exists. Until then, sequential `<=>` is fine.
-3. Write `lib/agents/market.ts` → `findCandidates(task) → Candidate[]` using the SQL in §6b. Test it in a scratch route with a hardcoded task before touching the real flow.
+1. Confirm Will's seed script has run and `preferenceEmbedding` is populated on all 25 users. If it hasn't, write it yourself — don't wait.
+2. Build the vector index (§3). Verify in the Atlas UI that it's `ACTIVE` before debugging anything else.
+3. Write `lib/agents/market.ts` → `findCandidates(task) → Candidate[]` using the pipeline in §6b. Test it in a scratch route with a hardcoded task before touching the real flow.
 4. Sanity check: a task about food should surface the seeded users whose preference text mentions food runs. If it doesn't, your embedding of the *task* is probably including boilerplate — embed only the meaningful text.
 
 **T+8 → T+14 — ranking + explanation**
 5. Add the weighted `finalScore`. Tune the weights against seed data until the top result is obviously right to a human.
 6. For each candidate, generate a one-line `reason` ("Does package pickups, usually near Gates, 4.8★ over 12 tasks"). Cheap LLM call over the top 5 only, or template it from the fields — templating is faster and fine.
-7. `POST /api/tasks/:taskId/match` → sets `MATCHING`, returns top 5, then hands off to Daphne's negotiate route for the top candidate.
+7. `POST /api/tasks/:taskId/match` → sets `MATCHING`, returns top 5, then the live negotiate loop in `agent/` (auto-counter / auto-accept on price). Call Daphne's `arbitrateMove` (or `POST /api/ethics/arbitrate`) before sending an offer/counter. Do not offer package-pickup tasks — they never pass the gate.
 8. Handle `NO_MATCH`: fewer than 1 candidate above a score floor → status `NO_MATCH`, UI offers to broaden the task.
 
 **T+14 → T+20 — the demo artifact**
-9. Build the **matching visualization**: a panel showing the 5 candidates with their score breakdown as small stacked bars (vector / rating / experience). This is the screen where you say "that's Postgres + pgvector ranking 25 students in one query." Make it look good.
+9. Build the **matching visualization**: a panel showing the 5 candidates with their score breakdown as small stacked bars (vector / rating / experience). This is the screen where you say "that's Atlas Vector Search ranking 25 students in one aggregation." Make it look good.
 10. Add the sponsor line to the README with the actual pipeline code in it.
 
-**T+20 → T+24** — Integration with Daphne, then rehearse your 30 seconds of the pitch.
+**T+20 → T+24** — Integration with Daphne's ethics HTTP + Thomas's `nextMove`, then rehearse your 30 seconds of the pitch.
 
 ---
 
-### Daphne — market-making: negotiation loop + task pool + ethics agent
+### Daphne — ethics + arbitration (standalone first)
 
-**T+0 → T+2** — Setup. Agree the `nextMove` signature with Thomas early; you're his consumer.
+Contract: `ethics-arbitration-spec.md`. Build in `gotchu/lib/agents/ethics.ts`. Branch: `daphne/ethics-arbitrate`.
 
-**T+2 → T+6 — build against a mock**
-1. Don't wait for Thomas. Write `mockNextMove()` that returns a scripted concession ladder, build the whole loop against it, and swap in the real one at T+8.
+The live haggle loop is **Divya's** (`agent/` `autoNegotiate`). Do not treat `gotchu/lib/agents/negotiate.ts` as your job; leave the stub unless the team deletes it later. You still own web **feed / approval / replay UI** if those screens stay in Next.js.
 
-**T+6 → T+12 — ethics agent**
-1a. `lib/agents/ethics.ts`: prefilter regex list, then the LLM call with the §6c rubric. Export `reviewTask(structured) → EthicsVerdict` and `reviewComment(comment) → EthicsVerdict`.
-1b. `POST /api/ethics/review`. Thomas calls this from inside `POST /api/tasks` — expose it as a plain function too so he doesn't pay an HTTP round trip. Will's completion route calls `reviewComment()` the same way.
-1c. Log every verdict to an `ethics_log` table with the input, output, and latency. An audit trail is a 30-second slide and judges love it.
-1d. UI: a `Badge` on every task card showing the verdict (`components/ethics/EthicsBadge`, `BlockedCard`, `ConditionsList`). `BLOCK` renders a card explaining why, in the ethics agent's own words, with a "revise request" button.
+**T+0 → T+6 — ethics + arbitration**
+0. Types, deny-list (include package pickup → `credential_misuse`), distilled The Word (`ethics-handbook.ts`), the 8 canned tests, `npm run ethics-smoke`.
+1. `reviewTask`, `reviewAmendment`, `arbitrateMove`, `reviewComment`. Routes under `/api/ethics/*`.
+2. Tell Thomas: call `reviewTask` / `reviewAmendment`. Tell Divya: call `arbitrateMove` once per offer/counter (HTTP from `agent/` is fine). Tell Will: call `reviewComment`; keep the badge UI.
 
-**T+6 → T+14 — the loop**
-2. `lib/agents/negotiate.ts` → `runNegotiation(task, worker) → Offer`:
+**Then — feed / approval / replay (web)**
+3. `/feed`, approval card, transcript replay as before if those screens are still yours. Ethics badge data comes from your verdicts.
 
-```
-create offer row (outcome: PENDING)
-for round in 1..3:
-  workerMsg = nextMove(role: "worker_agent")
-  append to transcript; if workerMsg.accept → AGREED, break
-  requesterMsg = nextMove(role: "requester_agent")
-  append to transcript; if requesterMsg.accept → AGREED, break
-if not agreed → outcome FAILED, task back to MATCHING with next candidate
-on AGREED → task status PENDING_APPROVAL, finalPriceUsd set
-```
-
-3. Hard caps: 3 rounds, 6 LLM calls, 20s wall clock. A runaway loop on stage is death. Write the cap as a constant at the top of the file.
-4. `POST /api/tasks/:taskId/negotiate`. Persist the transcript incrementally so the UI can stream it.
-
-**T+14 → T+20 — the two screens that carry the demo**
-5. **Negotiation replay**: transcript rendered as a two-sided chat, one side per agent, prices as a running ledger down the middle, messages revealed with a ~600ms stagger so the audience can follow. This is the single most memorable screen in the app — build it properly and let everything around it stay quiet.
-6. **Approval card**: final price, terms, both names, one primary button per side. Status only flips to `ACCEPTED` when *both* have approved. Humans-in-the-loop is a core claim of the pitch; make it visibly true.
-7. **Task pool** (`/feed`): open tasks as cards with category, price, deadline, ethics badge. Poll `GET /api/feed` every 3s. If you have spare time at T+20, upgrade to Postgres `LISTEN/NOTIFY` over SSE and say "live" in the demo.
-
-**T+20 → T+24** — Integration + rehearsal.
+**T+20 → T+24** — Integration + rehearsal. Demo happy path = food/fence, not package pickup.
 
 ---
 
@@ -496,7 +523,7 @@ Copy: buttons say what happens (`Approve $11 deal`, not `Submit`). Empty task po
 
 | Time | Gate | Everyone stops until it passes |
 |---|---|---|
-| **T+2** | `lib/types.ts`, Postgres connected, schema + seed data in, repo deployed | Yes |
+| **T+2** | `lib/types.ts`, Mongo connected, seed data in, repo deployed | Yes |
 | **T+8** | End-to-end with mocks: raw text → structured → ethics → 5 candidates → fake negotiation | Yes |
 | **T+14** | Real agents wired, one full task completes with real LLM calls | Yes |
 | **T+18** | **Feature freeze.** Nothing new after this line | Yes |
@@ -511,9 +538,9 @@ Submit the devpost/form at T+22, not T+23:59. Every year a team loses on a submi
 
 1. **(15s)** "Every CMU student needs small things done and every CMU student has gaps in their day. The friction isn't finding people — it's the negotiating. So we removed the humans from the middle and left them at the ends." Show the landing screen.
 2. **(20s)** Log in with a real `@andrew.cmu.edu` account. Show the Auth0 gate rejecting a gmail address. "Everyone here is a verified CMU student, with their real name — and their agent only has authority up to a limit they set."
-3. **(25s)** Type the package request in plain English. The structured card resolves underneath it. "Thomas's agent turned that sentence into a task."
-4. **(20s)** The bad task: "write my 15-213 lab, $50." Blocked, with the reason on screen. "Every task passes an ethics agent before it's ever visible."
-5. **(35s)** Matching panel. "25 students, one Postgres + pgvector query, ranked on preference similarity, rating and history." Show the score bars.
+3. **(25s)** Type a food run or “paint my fence navy” in plain English. The structured card resolves underneath it. "Thomas's agent turned that sentence into a task."
+4. **(20s)** The bad tasks: "write my 15-213 lab, $50" (Academic Integrity) and optionally UC package pickup (needs someone else's ID). Blocked, with The Word in the reason. "Every task passes an ethics agent before it's ever visible."
+5. **(35s)** Matching panel. "25 students, one Atlas Vector Search aggregation, ranked on preference similarity, rating and history." Show the score bars.
 6. **(45s)** The negotiation replay — let it play, with audio. Don't talk over the first few seconds. Then: "Neither student is on their phone right now. Their agents are doing this."
 7. **(20s)** Both approvals, agreement card, completion + rating. "Humans come back exactly once: to say yes."
 8. **(20s)** Close on what's next: Solana escrow, embeddings that update from completed-task history, campus-wide rollout. "Need something? Gotchu."
@@ -529,13 +556,13 @@ If you're behind, cut from the bottom up. Decide *now* so nobody defends their f
 1. Vultr — never started, nothing to cut
 2. Solana — cut first among things we started
 3. ElevenLabs voice intake (keep the negotiation TTS if it works — it's 5 lines once the pipeline exists)
-4. LISTEN/NOTIFY live feed → keep polling
+4. Change streams → keep polling
 5. Multi-candidate negotiation → negotiate with the top candidate only
 6. Post-task survey → keep the star rating only
 7. Availability window → boolean toggle only
 8. Score-breakdown bars → plain numbers
 
-**Never cut:** onboarding + auth, structured task parsing, ethics gating, vector matching, the negotiation replay. Those five are the product.
+**Never cut:** onboarding + auth, structured task parsing, ethics gating (including `arbitrateMove` even if the UI only shows the initial BLOCK), vector matching, the negotiation replay. Those five are the product.
 
 ---
 
@@ -549,9 +576,10 @@ AUTH0_BASE_URL=http://localhost:3000
 AUTH0_ISSUER_BASE_URL=
 AUTH0_CLIENT_ID=
 AUTH0_CLIENT_SECRET=
-DATABASE_URL=                    # Railway Postgres (public URL locally; .railway.internal on Railway)
+MONGODB_URI=
+MONGODB_DB=gotchu
 ANTHROPIC_API_KEY=
-GOOGLE_API_KEY=          # Gemini: embeddings (Will) + ethics agent (Daphne)
+GOOGLE_API_KEY=          # Gemini: embeddings + ethics agent
 ELEVENLABS_API_KEY=
 NEXT_PUBLIC_ENABLE_SOLANA=false
 NEXT_PUBLIC_ENABLE_VOICE=false
@@ -560,8 +588,7 @@ NEXT_PUBLIC_ENABLE_VOICE=false
 Mirror every one of these into Vercel's environment variables at T+2, not at T+20.
 
 ```bash
-npm i pg @auth0/nextjs-auth0 @anthropic-ai/sdk @google/generative-ai zod nanoid date-fns
-npm i -D @types/pg
+npm i mongodb @auth0/nextjs-auth0 @anthropic-ai/sdk @google/generative-ai zod nanoid date-fns
 npm i @elevenlabs/elevenlabs-js   # T+16, Daphne
 npm i @solana/web3.js @solana/wallet-adapter-react @solana/wallet-adapter-react-ui @solana/wallet-adapter-wallets  # T+20 only
 ```
@@ -575,11 +602,11 @@ Branches: `will/*`, `thomas/*`, `divya/*`, `daphne/*`. PR into `main`, one revie
 ```mermaid
 flowchart TD
   A[Onboarding form<br/>Auth0 + CMU email gate] --> B[User embedding<br/>preferenceText vectorized]
-  B --> C[(users<br/>Postgres + pgvector)]
+  B --> C[(users<br/>Atlas Vector Index)]
   D[Web app<br/>availability + compose] --> E[Personal AI agent<br/>parses + negotiates]
   E --> F{Ethics agent<br/>gate}
   F -->|BLOCK| G[Revise request]
-  F -->|ALLOW| H[Market-making agent<br/>pgvector + ranking]
+  F -->|ALLOW| H[Market-making agent<br/>$vectorSearch + ranking]
   C --> H
   H --> I[Task pool<br/>open jobs]
   H --> J[Negotiation loop<br/>agent ↔ agent, max 3 rounds]
@@ -590,7 +617,7 @@ flowchart TD
   M --> C
 ```
 
-Two changes from the whiteboard worth noting: the ethics agent now sits **inline** in the flow (a gate before the pool, plus a reviewer of completed work) rather than off to the side, and completion feeds ratings back into the user rows that matching reads — so the market actually gets better as it's used. That feedback loop is the thing to say out loud in the pitch. We also dropped Mongo: same five entities, now Postgres tables + pgvector.
+Two changes from the whiteboard worth noting: the ethics agent (Daphne, The Word) now sits **inline** in the flow (a gate before the pool, a referee during the deal, plus a reviewer of completed work) rather than off to the side, and completion feeds ratings back into the user documents that matching reads — so the market actually gets better as it's used. That feedback loop is the thing to say out loud in the pitch.
 
 ---
 
@@ -615,6 +642,8 @@ gotchu/
 │       ├── me/route.ts                       Will      PATCH profile + preference re-embed
 │       ├── me/availability/route.ts          Will
 │       ├── ethics/review/route.ts            Daphne
+│       ├── ethics/amendment/route.ts         Daphne
+│       ├── ethics/arbitrate/route.ts         Daphne
 │       ├── feed/route.ts                     Daphne
 │       ├── offers/[offerId]/approve/route.ts Daphne
 │       └── tasks/
@@ -623,14 +652,14 @@ gotchu/
 │               ├── route.ts                  Thomas    GET one, PATCH structured fields
 │               ├── match/route.ts            Divya
 │               ├── negotiate/route.ts        Daphne
-│               ├── complete/route.ts         Will      (calls Daphne's reviewComment())
+│               ├── complete/route.ts         Will
 │               └── review/route.ts           Will
 │
 ├── components/
 │   ├── ui/                                   ◆ shadcn-generated — NOBODY hand-edits
 │   ├── shell/                                ◆ SHARED — Will (nav, header, availability toggle)
 │   ├── onboarding/                           Will      OnboardingForm, PreferenceField
-│   ├── ethics/                               Daphne    EthicsBadge, BlockedCard, ConditionsList
+│   ├── ethics/                               Will UI   EthicsBadge, BlockedCard, ConditionsList
 │   ├── task/                                 Thomas    ComposeBox, StructuredCard, FieldEditor
 │   ├── match/                                Divya     CandidateList, ScoreBars, MatchReason
 │   ├── negotiate/                            Daphne    TranscriptView, OfferLedger, ApprovalCard
@@ -643,35 +672,38 @@ gotchu/
 │   │   ├── offer.ts                          Daphne
 │   │   ├── agreement.ts                      Daphne
 │   │   ├── review.ts                         Will
-│   │   ├── ethics.ts                         Daphne
+│   │   ├── ethics.ts                         Daphne    verdicts + arbitration types
 │   │   ├── match.ts                          Divya
 │   │   └── status.ts                         Will      the status union + legal transitions
-│   ├── pg.ts                                 Will      cached pg.Pool
-│   ├── db.ts                                 Will      typed table helpers (SQL, not collections)
+│   ├── mongo.ts                              Will      cached client
+│   ├── db.ts                                 Will      typed collection accessors
 │   ├── auth.ts                               Will      session → user, requireUser()
 │   ├── llm.ts                                Will      shared JSON-mode call + zod validate
 │   ├── embed.ts                              Will
 │   ├── ids.ts                                Will      usr_ / tsk_ / ofr_ generators
 │   ├── agents/
 │   │   ├── personal.ts                       Thomas    parseTask, nextMove
-│   │   ├── ethics.ts                         Daphne    reviewTask, reviewComment
+│   │   ├── ethics.ts                         Daphne    reviewTask, reviewAmendment, arbitrateMove, reviewComment
 │   │   ├── market.ts                         Divya     findCandidates
-│   │   └── negotiate.ts                      Daphne    runNegotiation
+│   │   └── negotiate.ts                      leftover stub; live loop is agent/ (Divya)
 │   └── prompts/                              one prompt per file, never a shared prompts.ts
 │       ├── personal-intake.ts                Thomas
 │       ├── personal-negotiate.ts             Thomas
 │       ├── ethics-rubric.ts                  Daphne
 │       ├── ethics-denylist.ts                Daphne
+│       ├── ethics-arbitrate.ts               Daphne
+│       ├── ethics-handbook.ts                Daphne    distilled The Word
 │       └── match-explain.ts                  Divya
 │
 ├── mocks/                                    delete before submission
 │   ├── task.ts                               Thomas    a valid StructuredTask
 │   ├── candidates.ts                         Divya     5 fake ranked candidates
-│   └── negotiation.ts                        Daphne    scripted concession ladder
+│   ├── negotiation.ts                        leftover web ladder
+│   └── ethics.ts                             Daphne    gate + amendment + arbitrate fixtures
 │
 ├── scripts/
 │   ├── seed.ts                               Will      25 users + embeddings
-│   └── create-schema.ts                      Will      tables + pgvector extension
+│   └── create-indexes.ts                     Will
 │
 ├── middleware.ts                             ◆ Will
 ├── components.json                           ◆ shadcn config — Will only
@@ -698,7 +730,7 @@ Will still writes the first version of every type file at T+1 so nobody is block
 
 ### Git rules
 
-- Branches: `will/onboarding`, `thomas/intake-agent`, `divya/vector-match`, `daphne/negotiate-loop`. One branch per feature, not one per person for the whole night.
+- Branches: `will/onboarding`, `thomas/intake-agent`, `divya/vector-match`, `daphne/ethics-arbitrate`. One branch per feature, not one per person for the whole night.
 - **Pull before every push:** `git pull --rebase origin main`. Rebase, not merge — the history stays readable and conflicts surface one commit at a time.
 - Merge to `main` at least every 3 hours whether or not the feature is finished. Long-lived branches are how teams discover at hour 20 that two people rewrote the same route.
 - PRs are for visibility, not gatekeeping — one glance, then merge. Nothing sits unmerged for more than 30 minutes.
@@ -706,7 +738,7 @@ Will still writes the first version of every type file at T+1 so nobody is block
 
 ### Ownership in one line each
 
-- **Will** — everything under `lib/` that isn't an agent, all of `app/api/auth|onboarding|me`, `components/onboarding|shell`, both scripts, and the shared config. He's the integration owner: if two workstreams disagree about a shape, he decides.
-- **Thomas** — `lib/agents/personal.ts`, `lib/prompts/personal-*`, `app/api/tasks/route.ts` + `[taskId]/route.ts`, `app/compose`, `components/task`.
-- **Divya** — `lib/agents/market.ts`, `lib/prompts/match-explain.ts`, `app/api/tasks/[taskId]/match`, `app/tasks/[taskId]/matches`, `components/match`, the pgvector query.
-- **Daphne** — `lib/agents/negotiate.ts`, `lib/agents/ethics.ts`, `lib/prompts/ethics-*`, `lib/types/offer.ts|agreement.ts|ethics.ts`, `app/api/tasks/[taskId]/negotiate`, `app/api/ethics/review`, `app/api/offers`, `app/api/feed`, `app/feed`, `app/tasks/[taskId]`, `components/negotiate|feed|ethics`.
+- **Will** — everything under `lib/` that isn't an agent, `app/api/auth|onboarding|me`, `components/onboarding|ethics|shell`, both scripts, and the shared config. Integration owner: if two workstreams disagree about a shape, he decides. He **calls** Daphne's `reviewComment`; he does not own the ethics model.
+- **Thomas** — `lib/agents/personal.ts`, `lib/prompts/personal-*`, `app/api/tasks/route.ts` + `[taskId]/route.ts`, `app/compose`, `components/task`. Calls `reviewTask` and `reviewAmendment`.
+- **Divya** — `lib/agents/market.ts`, matching UI, Atlas index, and the live negotiate loop in `agent/`. Calls `arbitrateMove` (function or HTTP) once per offer/counter.
+- **Daphne** — ethics + arbitration (`lib/agents/ethics.ts`, `lib/types/ethics.ts`, `lib/prompts/ethics-*`, `app/api/ethics/*`); web feed / approval / replay screens if still in Next.js.

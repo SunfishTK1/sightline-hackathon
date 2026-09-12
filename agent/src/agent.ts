@@ -1,8 +1,10 @@
 import { config } from "./config.js";
 import {
   mcp, market, type OpenJob, type MyOrder, type OpenCounter, type JobQuestion,
+  type WorkItem,
 } from "./mcp.js";
 import { CAMPUS_CONTEXT } from "./campus.js";
+import { evaluateDeal } from "./broker.js";
 import type { Turn } from "./db.js";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
@@ -67,7 +69,7 @@ const TOOL_SCHEMAS = [
     type: "function",
     name: "respond_to_job",
     description:
-      "Accept or turn down one job they were offered. They may be holding several at once, so pass the offer id of the one they mean. If it is unclear which, ask them first.",
+      "Accept or turn down one job they were offered. They may be holding several at once, so pass the offer id of the one they mean. If it is unclear which, ask them first. If they can do it but need more time, do not accept — use counter_offer at the same price with a note about the time.",
     parameters: {
       type: "object",
       properties: {
@@ -75,6 +77,36 @@ const TOOL_SCHEMAS = [
         accept: { type: "boolean" },
       },
       required: ["offer_id", "accept"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "mark_task_done",
+    description:
+      "They finished a job they were doing. The requester is then asked to confirm, and payment is only recorded once they do.",
+    parameters: {
+      type: "object",
+      properties: { order_id: { type: "string", description: "The job they finished" } },
+      required: ["order_id"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "confirm_task_done",
+    description:
+      "They confirm a task they requested was actually done, which releases payment. Use confirmed false if they say it was not done properly.",
+    parameters: {
+      type: "object",
+      properties: {
+        order_id: { type: "string" },
+        confirmed: { type: "boolean" },
+        note: { type: "string", description: "What was wrong, if not confirmed; empty otherwise" },
+      },
+      required: ["order_id", "confirmed", "note"],
       additionalProperties: false,
     },
     strict: true,
@@ -115,7 +147,7 @@ const TOOL_SCHEMAS = [
     type: "function",
     name: "counter_offer",
     description:
-      "Propose a different price for a job they were offered, instead of taking it or passing. Use it whenever they name a price they would do it for. The person who asked for the task then decides.",
+      "Propose different terms for a job they were offered — a different price, more time, or both. Use it when they name a price they would do it for, or when they say they cannot make the deadline. The person who asked for the task then decides.",
     parameters: {
       type: "object",
       properties: {
@@ -246,6 +278,29 @@ function describeQuestions(q?: { waiting_on_them: JobQuestion[]; they_asked: Job
   return parts.join(" ");
 }
 
+function describeWork(work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] }): string {
+  const parts: string[] = [];
+  if (work?.doing?.length) {
+    parts.push(
+      "Jobs they are doing right now: " +
+        work.doing
+          .map((j) => `[job ${j.id}] ${j.title}${j.budget_usd ? ` for $${j.budget_usd}` : ""}${j.status === "done_pending" ? " - they marked it done, waiting on the requester" : ""}`)
+          .join("; ") +
+        ". When they say one is finished, call mark_task_done with that job id.",
+    );
+  }
+  if (work?.awaitingConfirmation?.length) {
+    parts.push(
+      "Waiting on them to confirm somebody finished: " +
+        work.awaitingConfirmation
+          .map((j) => `[job ${j.id}] ${j.title}${j.budget_usd ? ` for $${j.budget_usd}` : ""}`)
+          .join("; ") +
+        ". Confirming with confirm_task_done is what records the money as owed, so only do it when they actually say it was done.",
+    );
+  }
+  return parts.join(" ");
+}
+
 function systemPrompt(
   openJobs: OpenJob[] = [],
   displayName?: string | null,
@@ -253,6 +308,7 @@ function systemPrompt(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): string {
   const who = displayName
     ? `You are talking to ${displayName}. Use their name naturally, not in every message.`
@@ -275,11 +331,13 @@ function systemPrompt(
     describeMyRequests(myOrders),
     describeCounters(openCounters),
     describeQuestions(questions),
+    describeWork(work),
     "If they are unsure about something on an offered job, ask the requester right away with ask_about_job instead of guessing or leaving it hanging.",
     replyContext
       ? `${replyContext} Treat that as what they are answering - do not ask which one they mean.`
       : "",
     "If they name a price they would do an offered job for, that is a counter-offer: call counter_offer with the offer id and the amount, and tell them it is with the requester. Do not talk them into passing when they are really haggling.",
+    "If they can do the job but need more time, call counter_offer at the offered price and put the extra time in the note. Do not accept a job they said they cannot finish by the deadline.",
     "Photos they send are attached for you to look at, so describe or use what you actually see. If a note says an attachment could not be opened, say so plainly rather than guessing.",
     "You only ever see and act on this one person's information. Never mention other users, other requests, or anything about the wider system.",
     "This is an early beta. If you cannot do something, say so plainly in one sentence.",
@@ -321,6 +379,7 @@ async function callModel(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): Promise<any> {
   const res = await fetch(OPENAI_URL, {
     method: "POST",
@@ -331,7 +390,7 @@ async function callModel(
     body: JSON.stringify({
       model: config.model,
       instructions: systemPrompt(
-        openJobs, displayName, myOrders, openCounters, replyContext, questions,
+        openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
       ),
       input,
       tools: TOOL_SCHEMAS,
@@ -389,6 +448,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       min_price_usd: args.min_price_usd > 0 ? args.min_price_usd : undefined,
     });
   }
+  if (name === "mark_task_done") {
+    return await market.markDone(String(args.order_id), phone);
+  }
+  if (name === "confirm_task_done") {
+    return await market.confirmDone(
+      String(args.order_id), phone, Boolean(args.confirmed), args.note || undefined,
+    );
+  }
   if (name === "ask_about_job") {
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
@@ -403,9 +470,72 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
     if (!target) return { error: "That job offer is not open for you." };
+
+    // The market-maker decides the number, not this agent and not the worker.
+    const onTable = Number(target.offered_usd ?? target.budget_usd ?? 0);
+    const verdict = await evaluateDeal({
+      order: {
+        title: target.title,
+        details: target.details,
+        budget_usd: target.budget_usd,
+        deadline_at: target.deadline_at,
+        pickup_location: target.pickup_location,
+        dropoff_location: target.dropoff_location,
+      },
+      current_offer_usd: onTable,
+      decision: "COUNTER",
+      price_usd: args.price_usd,
+      note: args.note || undefined,
+    });
+
+    // Broker unreachable: fall back to putting it to the requester.
+    if (!verdict) {
+      return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
+    }
+
+    if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
+      // Do not relay the note - it is a different job, or the haggling is over.
+      await market.respond(target.id, false).catch(() => null);
+      return {
+        status: verdict.action.toLowerCase(),
+        say: verdict.messageHint,
+        note: "Offer closed for this person; the task goes to someone else.",
+      };
+    }
+    if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
+      // Record it at the broker's number. It is inside the auto band, so the
+      // requester's own agent settles it within seconds via AUTO_REQUESTER -
+      // the worker's view has no business holding the requester's phone.
+      await market.counter(target.id, phone, verdict.agreedUsd, args.note || undefined);
+      return {
+        status: "agreed_pending_settlement",
+        agreed_usd: verdict.agreedUsd,
+        say: verdict.messageHint,
+      };
+    }
+    if (verdict.action === "COUNTER" && verdict.nextOfferUsd != null) {
+      // Counter back to the worker at the broker's number; the requester is
+      // not asked yet.
+      await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      return { status: "countered_back", offer_usd: verdict.nextOfferUsd, say: verdict.messageHint };
+    }
+    // ASK_REQUESTER, or anything unexpected: put it to the requester.
     return await market.counter(target.id, phone, args.price_usd, args.note || undefined);
   }
   if (name === "respond_to_counter") {
+    // The requester's own yes or no still goes past the broker, so its record
+    // of what cleared stays right.
+    const pending = (await market.openCounters(phone)).find(
+      (c) => String(c.id) === String(args.offer_id),
+    );
+    if (pending) {
+      await evaluateDeal({
+        order: { title: pending.title, budget_usd: pending.budget_usd },
+        current_offer_usd: Number(pending.budget_usd ?? 0),
+        decision: args.accept ? "REQUESTER_YES" : "REQUESTER_NO",
+        price_usd: Number(pending.counter_price_usd ?? 0),
+      }).catch(() => null);
+    }
     // The phone is bound, so they can only answer counters on their own tasks.
     return await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
   }
@@ -423,6 +553,17 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     const jobs = await market.openJobs(phone);
     const target = jobs.find((j) => String(j.id) === String(args.offer_id));
     if (!target) return { error: "That job offer is not open for you." };
+
+    // Tell the broker either way, so its view of the market stays current.
+    const verdict = await evaluateDeal({
+      order: { title: target.title, budget_usd: target.budget_usd, details: target.details },
+      current_offer_usd: Number(target.offered_usd ?? target.budget_usd ?? 0),
+      decision: args.accept ? "ACCEPT" : "DECLINE",
+    });
+    if (args.accept && verdict && verdict.action === "REJECT_SCOPE") {
+      await market.respond(target.id, false).catch(() => null);
+      return { status: "rejected_scope", say: verdict.messageHint };
+    }
     return await market.respond(target.id, Boolean(args.accept));
   }
   throw new Error(`unknown tool ${name}`);
@@ -440,6 +581,7 @@ export async function respond(
   openCounters: OpenCounter[] = [],
   replyContext?: string,
   questions?: { waiting_on_them: JobQuestion[]; they_asked: JobQuestion[] },
+  work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
 ): Promise<{ reply: string; usedTools: string[]; toolTurns: Turn[] }> {
   // Images ride on the current turn only; stored history stays text so the
   // conversation row doesn't fill up with base64.
@@ -466,7 +608,7 @@ export async function respond(
 
   for (let i = 0; i < config.maxToolIterations; i++) {
     const body = await callModel(
-      input, openJobs, displayName, myOrders, openCounters, replyContext, questions,
+      input, openJobs, displayName, myOrders, openCounters, replyContext, questions, work,
     );
     const items: ResponseItem[] = body.output ?? [];
     const calls = items.filter((o) => o.type === "function_call");
