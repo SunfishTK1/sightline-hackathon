@@ -253,6 +253,10 @@ export async function ensureSchema(): Promise<void> {
       embedding   jsonb NOT NULL,
       updated_at  timestamptz NOT NULL DEFAULT now()
     );
+    -- Things this person said outright about how they want to be talked to
+    -- ("keep it short", "no emojis") rather than inferred from their tone.
+    -- An explicit ask always outranks an inferred one.
+    ALTER TABLE person_style ADD COLUMN IF NOT EXISTS preferences jsonb NOT NULL DEFAULT '[]'::jsonb;
     -- How many times the matcher looked at this task and picked nobody. A task
     -- nobody will take should say so once, not be retried every twenty seconds
     -- for the rest of the day.

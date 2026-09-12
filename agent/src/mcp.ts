@@ -119,7 +119,7 @@ export const market = {
       travel_note,
     }),
   pendingOutreach: () => get<Outreach[]>("/v1/offers/outreach"),
-  markOutreachSent: (id: string) => post(`/v1/offers/${id}/sent`),
+  markOutreachSent: (id: string) => post<{ id: string }>(`/v1/offers/${id}/sent`),
   /** A person can be holding several offers at once. */
   openJobs: (phone: string) =>
     get<OpenJob[]>(`/v1/offers/open?phone=${encodeURIComponent(phone)}`),
@@ -128,7 +128,9 @@ export const market = {
 
   /** The broker's price for a live offer. Never the requester's budget. */
   setOfferPrice: (id: string, offered_usd: number) =>
-    post<{ id: string; offered_usd: string }>(`/v1/offers/${id}/price`, { offered_usd }),
+    post<{ id: string; offered_usd: string; status: string }>(`/v1/offers/${id}/price`, {
+      offered_usd,
+    }),
 
   counter: (id: string, phone: string, price_usd: number, note?: string) =>
     post<{ status: string }>(`/v1/offers/${id}/counter`, { phone, price_usd, note }),
@@ -153,6 +155,8 @@ export const market = {
     post<{ status: string }>(`/v1/orders/${orderId}/done`, { phone }),
   confirmDone: (orderId: string, phone: string, confirmed: boolean, note?: string) =>
     post<{ status: string }>(`/v1/orders/${orderId}/confirm`, { phone, confirmed, note }),
+  relayChat: (orderId: string, body: string, to: "worker" | "requester") =>
+    post<{ sent: boolean }>(`/v1/orders/${orderId}/relay-chat`, { body, to }),
   work: (phone: string) =>
     get<{ doing: WorkItem[]; awaiting_their_confirmation: WorkItem[] }>(
       `/v1/work?phone=${encodeURIComponent(phone)}`,

@@ -155,6 +155,9 @@ export async function announceHandoffOnLive(handoff: {
     });
     return;
   }
+  if (handoff.kind === "live_chat") {
+    return;
+  }
   if (handoff.kind === "no_takers") {
     await postLiveEvent({
       orderId,
@@ -211,6 +214,33 @@ export async function ackLiveSkip(token: string): Promise<void> {
     await fetch(`${config.marketMakerUrl}/api/live/${token}/ack-skip`, { method: "POST" });
   } catch {
     /* ignore */
+  }
+}
+
+export async function postLiveChat(input: {
+  orderId: string;
+  author: "requester" | "worker" | "gotchu";
+  body: string;
+}): Promise<void> {
+  const url = `${config.marketMakerUrl}/api/live/chat`;
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (config.voiceMcpToken) {
+      headers.Authorization = `Bearer ${config.voiceMcpToken}`;
+      headers["x-api-key"] = config.voiceMcpToken;
+    }
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      console.error(`live chat failed: HTTP ${res.status} ${url} ${detail}`.trim());
+    }
+  } catch (err) {
+    console.error(`live chat error at ${url}: ${(err as Error).message}`);
   }
 }
 

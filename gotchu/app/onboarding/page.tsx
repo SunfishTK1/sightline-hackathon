@@ -1,6 +1,7 @@
 /** @owner Will (onboarding form) / @owner Claude (returning-visitor account view) */
 import { OnboardingForm } from "@/components/onboarding/OnboardingForm";
 import { AccountOrForm } from "@/components/onboarding/AccountOrForm";
+import { RelinkForm } from "@/components/onboarding/RelinkForm";
 import { getIdentity } from "@/lib/identity";
 import { findUserByAuth0Sub, refreshEmailVerification } from "@/lib/users";
 import { getRequestHistory, getWorkHistory, getWalletSummary } from "@/lib/history";
@@ -46,6 +47,9 @@ export default async function OnboardingPage() {
             can get something done — fill this out once, then everything else
             (asking, getting matched, agreeing on a price) happens over text.
           </p>
+          <div className="my-6 rounded-xl border border-[var(--ink)]/10 p-4">
+            <RelinkForm />
+          </div>
           <div className="my-9 h-px bg-[var(--ink)]/10" />
         </>
       )}

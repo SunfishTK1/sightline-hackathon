@@ -14,7 +14,7 @@ import {
 } from "./marketplace.js";
 import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
-import { saveStyle } from "./style.js";
+import { saveStyle, addPreferences, getFullStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
 import { chargeToTreasury, topUpWallet } from "./pay.js";
 import { reviewTask } from "./ethics.js";
@@ -202,7 +202,7 @@ app.get("/v1/wallets/:phone", async (req, res) => {
  * typed into a form - that's what the ToS training clause covers.
  */
 app.post("/v1/style/save", async (req, res) => {
-  const { phone, summary, style_tag, embedding } = req.body ?? {};
+  const { phone, summary, style_tag, embedding, preferences } = req.body ?? {};
   if (!phone || !summary || !style_tag || !Array.isArray(embedding)) {
     return res.status(400).json({
       ok: false,
@@ -210,8 +210,40 @@ app.post("/v1/style/save", async (req, res) => {
     });
   }
   try {
-    await saveStyle(String(phone), String(summary), String(style_tag), embedding);
+    await saveStyle(
+      String(phone), String(summary), String(style_tag), embedding,
+      Array.isArray(preferences) ? preferences.map(String) : [],
+    );
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Record newly-stated preferences without re-learning tone - cheaper than a full save. */
+app.post("/v1/style/preferences", async (req, res) => {
+  const { phone, preferences } = req.body ?? {};
+  if (!phone || !Array.isArray(preferences)) {
+    return res.status(400).json({ ok: false, error: "phone and preferences (array) are required" });
+  }
+  try {
+    await addPreferences(String(phone), preferences.map(String));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * Internal only - includes the embedding, so the agent can decide whether
+ * someone's tone has actually shifted before spending a model call re-
+ * learning it. Never call this from anything a user's own request reaches.
+ */
+app.get("/v1/style/full", async (req, res) => {
+  const phone = String(req.query.phone ?? "");
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    res.json({ ok: true, data: await getFullStyle(phone) });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -267,6 +299,8 @@ app.get("/v1/workers/active", async (_req, res) => {
        FROM worker_profiles w
        JOIN people p ON p.id = w.person_id
       WHERE w.is_available AND p.phone_verified
+        AND p.phone NOT LIKE '+1412555%'
+        AND p.phone NOT LIKE '+1555%'
       ORDER BY w.updated_at DESC`,
   );
   res.json({ ok: true, data: rows });
@@ -329,10 +363,12 @@ app.get("/v1/orders/:orderId/candidates", async (req, res) => {
         -- gates the web availability toggle; it just no longer decides whether
         -- somebody can earn.
         AND w.person_id <> o.person_id
+        AND wp.phone NOT LIKE '+1412555%'
+        AND wp.phone NOT LIKE '+1555%'
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
            WHERE j.order_id = o.id AND j.phone = w.phone
-             AND j.status IN ('offered', 'countered', 'accepted'))
+             AND j.status IN ('offered', 'countered', 'accepted', 'declined', 'dropped'))
       LIMIT 25`,
     [req.params.orderId],
   );
@@ -406,9 +442,14 @@ app.post("/v1/offers", async (req, res) => {
                WHEN job_offers.status IN ('accepted', 'countered') THEN job_offers.countered_at
                ELSE NULL
              END
+       WHERE job_offers.status NOT IN ('declined', 'dropped')
        RETURNING id, order_id, phone, status, offered_usd, travel_note`,
       [order_id, person.id, e164, reason ?? null, offered, travel_note ?? null],
     );
+    if (!rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "worker_already_considered" });
+    }
     await client.query(
       `UPDATE orders SET status = 'offered', updated_at = now()
         WHERE id = $1 AND status IN ('submitted', 'offered')`,
@@ -477,10 +518,14 @@ app.get("/v1/offers/outreach", async (_req, res) => {
 });
 
 app.post("/v1/offers/:id/sent", async (req, res) => {
-  await pool.query(`UPDATE job_offers SET outreach_sent_at = now() WHERE id = $1`, [
-    req.params.id,
-  ]);
-  res.json({ ok: true });
+  const { rows } = await pool.query(
+    `UPDATE job_offers SET outreach_sent_at = now()
+      WHERE id = $1 AND status = 'offered' AND outreach_sent_at IS NULL
+      RETURNING id`,
+    [req.params.id],
+  );
+  if (!rows[0]) return res.status(409).json({ ok: false, error: "offer is not awaiting outreach" });
+  res.json({ ok: true, data: rows[0] });
 });
 
 /**
@@ -1156,6 +1201,49 @@ app.post("/v1/dev/top-up-wallets", async (req, res) => {
   res.json({ ok: true, data: { topped, checked: results.length, results } });
 });
 
+/**
+ * Pass a live-page chat line to the other person by SMS. The board stays
+ * anonymous until someone has taken the job; after that this is how they
+ * keep talking until it is done.
+ */
+app.post("/v1/orders/:id/relay-chat", async (req, res) => {
+  const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+  const to = req.body?.to === "requester" ? "requester" : "worker";
+  if (!body) return res.status(400).json({ ok: false, error: "body is required" });
+  const { rows } = await pool.query(
+    `SELECT o.id, o.title, o.status, p.id AS requester_id, p.phone AS requester_phone,
+            w.id AS worker_id, w.phone AS worker_phone
+       FROM orders o
+       JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
+      WHERE o.id = $1`,
+    [req.params.id],
+  );
+  const order = rows[0];
+  if (!order) return res.status(404).json({ ok: false, error: "no such order" });
+  if (!["accepted", "done_pending"].includes(order.status)) {
+    return res.status(409).json({ ok: false, error: "chat_closed" });
+  }
+  const target =
+    to === "requester"
+      ? { id: order.requester_id, phone: order.requester_phone }
+      : { id: order.worker_id, phone: order.worker_phone };
+  if (!target.id || !target.phone) {
+    return res.status(409).json({ ok: false, error: "nobody_to_text" });
+  }
+  await pool.query(
+    `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+     VALUES ($1,$2,$3,'live_chat',$4::jsonb)`,
+    [
+      target.id,
+      target.phone,
+      order.id,
+      JSON.stringify({ title: order.title, body, from: to === "requester" ? "worker" : "requester" }),
+    ],
+  );
+  res.json({ ok: true, data: { sent: true } });
+});
+
 /** Call a task off, telling anyone who was holding it. */
 app.post("/v1/orders/:id/cancel", async (req, res) => {
   try {
@@ -1251,9 +1339,11 @@ app.get("/v1/orders/:id", async (req, res) => {
             o.deadline_at, o.budget_usd, o.urgency, o.status, o.created_at,
             o.film_requested_at, o.film_paid_signature,
             p.phone AS requester_phone,
+            w.display_name AS worker_name,
             pay.status AS payment_status, pay.solana_signature
        FROM orders o
        LEFT JOIN people p ON p.id = o.person_id
+       LEFT JOIN people w ON w.id = o.accepted_by
        LEFT JOIN payments pay ON pay.order_id = o.id
       WHERE o.id = $1`,
     [req.params.id],

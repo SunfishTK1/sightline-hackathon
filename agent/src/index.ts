@@ -28,6 +28,7 @@ import {
   announceHandoffOnLive,
   listLiveSkips,
   postLiveEvent,
+  postLiveChat,
   postLiveMedia,
   startLiveBoard,
 } from "./live.js";
@@ -81,10 +82,12 @@ async function handleEvent(event: RelayEvent): Promise<void> {
   // Messages' inline reply tells us exactly which of our messages they are
   // answering. That removes the guesswork behind a bare "yes".
   let replyContext: string | undefined;
+  let replyRefId: string | undefined;
   const repliedTo = event.data.inReplyTo?.providerMessageId;
   if (repliedTo) {
     const prior = await findSent(repliedTo).catch(() => null);
     if (prior) {
+      replyRefId = prior.ref_id ?? undefined;
       const about = prior.kind === "offer" ? ` (job offer ${prior.ref_id})` : "";
       replyContext = `They used an inline reply on your earlier message${about}: "${prior.text}".`;
       log(`  inline reply to ${prior.kind}${about}`);
@@ -122,6 +125,45 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     reply = "I hit a snag on my end - say that again and I'll pick it back up.";
   }
 
+  type ChatTarget = { id: string; title?: string; role: "worker" | "requester" };
+  let chatTarget: ChatTarget | null = null;
+  if (!usedTools.length) {
+    const workerTargets: ChatTarget[] = (who?.jobs_in_progress ?? [])
+      .filter((order: { id?: string }) => order.id)
+      .map((order: { id: string; title?: string }) => ({
+        id: String(order.id),
+        title: order.title,
+        role: "worker" as const,
+      }));
+    const requesterTargets: ChatTarget[] = [
+      ...(who?.open_requests ?? []).filter(
+        (order: { id?: string; status: string }) => order.id && order.status === "accepted",
+      ),
+      ...(who?.awaiting_their_confirmation ?? []),
+    ]
+      .filter((order: { id?: string }) => order.id)
+      .map((order: { id: string; title?: string }) => ({
+        id: String(order.id),
+        title: order.title,
+        role: "requester" as const,
+      }));
+    const targets = [...workerTargets, ...requesterTargets];
+    chatTarget = targets.find((target) => target.id === replyRefId) ?? null;
+    if (!chatTarget) {
+      const lower = text.toLowerCase();
+      const named = targets.filter(
+        (target) => target.title && lower.includes(target.title.toLowerCase()),
+      );
+      if (named.length === 1) chatTarget = named[0];
+    }
+    if (!chatTarget && targets.length === 1) {
+      chatTarget = targets[0];
+    } else if (!chatTarget && targets.length > 1) {
+      const names = targets.map((target) => `"${target.title ?? target.id}"`).join(", ");
+      reply = shorten(`Which job do you mean: ${names}?`);
+    }
+  }
+
   const sent = await sendText(phone, reply, `gotchu-${event.id}`);
   await recordSent(sent.requestId, phone, "reply", null, reply);
   log(`-> ${phone} [${usedTools.join(",") || "no tools"}] ${sent.accepted ? "sent" : "FAILED " + sent.detail}: ${reply}`);
@@ -147,6 +189,15 @@ async function handleEvent(event: RelayEvent): Promise<void> {
     // two model calls and their style doesn't change message to message.
     if (updatedHistory.length % 8 < 2) {
       learnStyle(phone, updatedHistory).catch(() => {});
+    }
+
+    // After someone has taken the job, ordinary texts become the live thread.
+    // Tool calls (yes/no, counters) stay off that thread.
+    if (!usedTools.length && chatTarget) {
+      await postLiveChat({ orderId: chatTarget.id, author: chatTarget.role, body: text });
+      await market
+        .relayChat(chatTarget.id, text, chatTarget.role === "worker" ? "requester" : "worker")
+        .catch(() => null);
     }
   }
 }
@@ -222,9 +273,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       if (!open) {
         reply = "That job isn't open any more, so I couldn't take it for you.";
       } else {
-        await market.respond(open.id, true).catch(() => null);
-        reply = `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`;
-        if (open.order_id) {
+        const accepted = await market.respond(open.id, true, phone).catch(() => null);
+        reply = accepted
+          ? `Taking that as a yes on "${open.title}" - it's yours. Text me if you didn't mean that.`
+          : "That job isn't open any more, so I couldn't take it for you.";
+        if (accepted && open.order_id) {
           await postLiveEvent({
             orderId: open.order_id,
             kind: "accepted",
@@ -236,9 +289,11 @@ async function handleReaction(event: RelayEvent): Promise<void> {
       }
     } else if (data.kind === "disliked") {
       if (open) {
-        await market.respond(open.id, false).catch(() => null);
-        reply = `Passed on "${open.title}" for you.`;
-        if (open.order_id) {
+        const declined = await market.respond(open.id, false, phone).catch(() => null);
+        reply = declined
+          ? `Passed on "${open.title}" for you.`
+          : "That job isn't open any more, so I couldn't pass on it.";
+        if (declined && open.order_id) {
           await postLiveEvent({
             orderId: open.order_id,
             kind: "declined",
@@ -297,15 +352,6 @@ async function pollInbound(): Promise<void> {
 
 const MAX_HANDOFF_ATTEMPTS = 3;
 const MAX_OUTREACH_ATTEMPTS = 3;
-/**
- * How long an offer waits for its picture before going out without one.
- *
- * This was seven minutes because a film had to render first. Films are gone,
- * and an illustration takes about twenty seconds - so holding an offer for
- * minutes now only delays asking someone to do a job, which is the one thing
- * that actually has to happen quickly.
- */
-const ASSET_WAIT_MS = Number(process.env.ASSET_WAIT_MS || 60_000);
 
 function confirmationLine(handoff: Handoff, url?: string | null): string {
   const price = handoff.payload?.budget_usd;
@@ -365,6 +411,10 @@ function handoffText(handoff: Handoff): string | null {
   }
   if (handoff.kind === "order_confirmation") {
     return confirmationLine(handoff);
+  }
+  if (handoff.kind === "live_chat") {
+    const who = handoff.payload?.from === "worker" ? "They" : "They";
+    return `${who} wrote about "${handoff.payload?.title}": ${handoff.payload?.body} Reply here and I'll put it on the live page.`;
   }
   if (handoff.kind === "worker_accepted") {
     return `Someone just took your request: ${handoff.payload?.title}. I'll let you know when it's done.`;
@@ -449,6 +499,12 @@ function handoffText(handoff: Handoff): string | null {
   if (handoff.kind === "counter_released") {
     return `They moved on from your counter on "${handoff.payload?.title}", so I'm asking someone else.`;
   }
+  if (handoff.kind === "counter_revised") {
+    return `They changed the terms on "${handoff.payload?.title}", so your $${handoff.payload?.asked_usd} counter is no longer pending. I'll send the revised offer separately.`;
+  }
+  if (handoff.kind === "offer_released") {
+    return `They moved on from your offer for "${handoff.payload?.title}", so you're off the hook.`;
+  }
   return null;
 }
 
@@ -495,13 +551,20 @@ async function matchOpenOrders(): Promise<void> {
     const travelNote = pick.travel
       ? `${pick.travel.line}. ~${pick.travel.totalMin} min door to done.`
       : undefined;
-    const offer = await market.createOffer(
-      order.id,
-      pick.phone,
-      pick.reason,
-      pick.offerUsd,
-      travelNote,
-    );
+    const offer = await market
+      .createOffer(
+        order.id,
+        pick.phone,
+        pick.reason,
+        pick.offerUsd,
+        travelNote,
+      )
+      .catch((err) => {
+        // Candidate data can go stale between ranking and the locked write.
+        // One raced order must not abort matching every other open request.
+        log(`could not offer "${order.title}" to ${pick.phone}: ${(err as Error).message}`);
+        return null;
+      });
     if (offer) {
       log(`offered "${order.title}" to ${pick.phone} at $${pick.offerUsd ?? "?"} pDeal=${pick.pDeal ?? "?"}: ${pick.reason}`);
       const offerId = String((offer as { id?: string }).id ?? "");
@@ -561,19 +624,10 @@ async function sendOutreach(): Promise<void> {
     // The relay requires an 8-128 char key; a bare "offer-1" is too short and
     // is rejected outright.
     const key = `gotchu-offer-${offer.id}-attempt-${attempt}`;
-    // Hold briefly for the illustration only. Films are a separate paid
-    // request and must never delay ordinary job outreach.
+    // Send now. Holding for the illustration left the live board up with
+    // nobody actually asked, and films are a separate paid request anyway.
     const orderId = String(offer.order_id ?? "");
-    const waited = offer.created_at ? Date.now() - new Date(offer.created_at).getTime() : Infinity;
-    // Only the picture is waited for. Films are no longer made for every task -
-    // they are requested and paid for on the live board - so holding an offer
-    // for one would hold most offers forever.
     const png = await imageFor(orderId);
-
-    if (!png && waited < ASSET_WAIT_MS) {
-      log(`holding offer ${offer.id} ${Math.round(waited / 1000)}s for its picture`);
-      continue;
-    }
 
     const attachments: string[] = [];
     if (png) {
@@ -581,15 +635,26 @@ async function sendOutreach(): Promise<void> {
       if (id) attachments.push(id);
     }
     if (!png) {
-      log(`offer ${offer.id} going out without a picture after ${Math.round(waited / 1000)}s`);
+      log(`offer ${offer.id} going out without a picture`);
     }
 
     const message = shorten(text);
     const sent = await sendText(offer.phone, message, key, attachments);
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
-    if (sent.accepted || sent.permanent) {
-      await market.markOutreachSent(offer.id);
+    if (sent.accepted) {
+      const marked = await market.markOutreachSent(offer.id).catch(() => null);
+      if (!marked) {
+        log(`outreach offer ${offer.id} landed after it was no longer live`);
+        continue;
+      }
+      // Only make the delivered offer actionable in the conversation after
+      // the marketplace has made it actionable through openJobs too.
+      const history = await loadTurns(offer.phone);
+      await saveTurns(offer.phone, [
+        ...history,
+        { role: "assistant", content: message, at: new Date().toISOString() },
+      ]);
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -601,23 +666,30 @@ async function sendOutreach(): Promise<void> {
           state: "waiting",
         });
       }
-      if (sent.accepted) {
-        // The offer has to land in their thread, or a later "I'll take the
-        // fridge one" refers to a message the agent has no record of sending.
-        const history = await loadTurns(offer.phone);
-        await saveTurns(offer.phone, [
-          ...history,
-          { role: "assistant", content: message, at: new Date().toISOString() },
-        ]);
-      }
       log(`outreach offer ${offer.id} -> ${offer.phone}: ${sent.detail}`);
       continue;
     }
-    if (attempt >= MAX_OUTREACH_ATTEMPTS) {
-      // They never got the text. Marking it sent would hold the exclusive
-      // slot for ten minutes; decline so rematch can move on now.
-      await market.respond(offer.id, false).catch(() => null);
-      log(`outreach offer ${offer.id} GIVING UP after ${attempt} attempts to ${offer.phone}: ${sent.detail}`);
+    if (sent.permanent || attempt >= MAX_OUTREACH_ATTEMPTS) {
+      // They never got the text. A permanent failure cannot become actionable;
+      // release it immediately instead of starting an exclusive waiting clock.
+      const released = await market.respond(offer.id, false).catch(() => null);
+      if (released && offer.order_id) {
+        // recordNoMatch refuses to count while another live offer or counter
+        // exists, which is expected during a volunteer overlap.
+        await market.noMatch(String(offer.order_id)).catch(() => null);
+        await postLiveEvent({
+          orderId: offer.order_id,
+          kind: "timeout",
+          message: "Could not deliver the offer. Trying the next person.",
+          offerId: String(offer.id),
+          state: "dropped",
+        });
+      }
+      log(
+        released
+          ? `outreach offer ${offer.id} RELEASED after ${attempt} failed attempt(s) to ${offer.phone}: ${sent.detail}`
+          : `outreach offer ${offer.id} changed before give-up could release it`,
+      );
       continue;
     }
     log(`outreach offer ${offer.id} attempt ${attempt} failed: ${sent.detail}`);
@@ -673,6 +745,7 @@ async function deliverHandoffs(): Promise<void> {
     if (prior?.request_id) {
       const { state, detail } = await getDelivery(prior.request_id);
       if (state === "delivered") {
+        await announceHandoffOnLive(handoff);
         await markHandoffDelivered(handoff.id);
         log(`handoff ${handoff.id} (${handoff.kind}) -> ${handoff.phone}: ${detail}`);
         const history = await loadTurns(handoff.phone);
@@ -703,9 +776,6 @@ async function deliverHandoffs(): Promise<void> {
     }
 
     const attemptNo = (prior?.attempts ?? 0) + 1;
-    if (attemptNo === 1) {
-      await announceHandoffOnLive(handoff);
-    }
     // A retry needs a fresh key: replaying the old one returns the original
     // response and sends nothing.
     const outbound = shortenHandoff(text);
@@ -753,24 +823,31 @@ async function sayTo(
 
 async function applyLiveSkips(): Promise<void> {
   for (const skip of await listLiveSkips()) {
-    if (skip.offerId) {
-      const order = await market.getOrder(skip.orderId).catch(() => null);
-      const phone = order?.requester_phone;
-      const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
-      const countered = counters.find((c) => String(c.id) === String(skip.offerId));
-      if (countered && phone) {
-        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null);
-      } else {
-        await market.respond(skip.offerId, false).catch(() => null);
-      }
-      await postLiveEvent({
-        orderId: skip.orderId,
-        kind: "skipped",
-        message: "You asked to move on. Trying the next person.",
-        offerId: skip.offerId,
-        state: "dropped",
-      });
+    // A board/candidate race can briefly produce no active offer. Keep the
+    // request set until there is something concrete to release.
+    if (!skip.offerId) continue;
+    const order = await market.getOrder(skip.orderId).catch(() => null);
+    const phone = order?.requester_phone;
+    const counters = phone ? await market.openCounters(phone).catch(() => []) : [];
+    const countered = counters.find((c) => String(c.id) === String(skip.offerId));
+    let released = false;
+    if (countered && phone) {
+      released = Boolean(
+        await market.respondToCounter(skip.offerId, phone, false, true).catch(() => null),
+      );
+    } else {
+      released = Boolean(await market.respond(skip.offerId, false).catch(() => null));
     }
+    // Keep skip_requested set when the marketplace release fails so the
+    // next poll retries instead of showing a drop that never happened.
+    if (!released) continue;
+    await postLiveEvent({
+      orderId: skip.orderId,
+      kind: "skipped",
+      message: "You asked to move on. Trying the next person.",
+      offerId: skip.offerId,
+      state: "dropped",
+    });
     await ackLiveSkip(skip.token);
   }
 }
@@ -802,11 +879,6 @@ async function expireStaleOffers(): Promise<void> {
           state: "dropped",
         });
       }
-      await sayTo(
-        offer.phone,
-        `We didn't hear back on "${offer.title}", so I'm asking someone else.`,
-        `gotchu-timeout-${offer.id}`,
-      );
       log(`timed out offer ${offer.id} for ${offer.phone}`);
     } catch (err) {
       log(`timeout failed on offer ${offer.id}: ${(err as Error).message}`);
@@ -924,12 +996,25 @@ async function autoNegotiate(): Promise<void> {
       if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
         continue;
       }
-      await market.counter(
+      const result = await market.counter(
         offer.id,
         offer.phone,
         verdict.nextOfferUsd,
         verdict.messageHint,
       );
+      if (result.status !== "countered") {
+        if (result.status === "cancelled_too_many_rounds" && offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "skipped",
+            message: "Negotiation ended. Trying the next person.",
+            offerId: String(offer.id),
+            state: "dropped",
+          });
+        }
+        log(`auto-counter stopped on offer ${offer.id}: ${result.status}`);
+        continue;
+      }
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -1031,14 +1116,11 @@ async function chaseStuckItems(): Promise<void> {
     // Past the final notice, do the thing the card said would happen.
     if (strike > FINAL_NOTICE_STRIKE) {
       if (item.reason === "offer_unanswered" && item.offer_id) {
-        await market.respond(item.offer_id, false).catch(() => null);
-        await sayTo(
-          item.phone,
-          `No reply on "${item.about}", so I've released it - it's going to someone else.`,
-          `gotchu-released-${item.offer_id}`,
-          "offer_released",
-          item.offer_id,
-        );
+        const released = await market.respond(item.offer_id, false).catch(() => null);
+        if (!released) {
+          log(`offer ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         if (item.order_id) {
           await postLiveEvent({
             orderId: item.order_id,
@@ -1050,7 +1132,13 @@ async function chaseStuckItems(): Promise<void> {
         }
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
-        await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
+        const released = await market
+          .respondToCounter(item.offer_id, item.phone, false, true)
+          .catch(() => null);
+        if (!released) {
+          log(`counter ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         await sayTo(
           item.phone,
           `No answer on that counter-offer for "${item.about}", so it's expired. I'm asking someone else.`,

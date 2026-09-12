@@ -29,7 +29,13 @@ type OrderDetail = {
   status: string | null;
   payment_status: string | null;
   solana_signature: string | null;
+  worker_name?: string | null;
 };
+
+function firstName(name: string | null | undefined): string | null {
+  const part = (name ?? "").trim().split(/\s+/)[0];
+  return part || null;
+}
 
 /** The board stores no locations, so the task itself is the source for them. */
 async function loadOrder(orderId: string): Promise<OrderDetail | null> {
@@ -100,6 +106,8 @@ export default async function LivePage({
   const needsRetry =
     order?.status === "completed" && !alreadyPaid && Boolean(railcoins && railcoins > 0);
 
+  const workerName = firstName(order?.worker_name);
+  const chatOpen = ["accepted", "done_pending"].includes(order?.status ?? "");
 
   return (
     <>
@@ -108,6 +116,8 @@ export default async function LivePage({
       initial={board}
       pickup={order?.pickup_location}
       dropoff={order?.dropoff_location}
+      workerName={workerName}
+      chatOpen={chatOpen}
       money={{
         railcoins,
         requesterBalance: wallet.railcoins,

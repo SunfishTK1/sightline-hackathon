@@ -180,3 +180,14 @@ CREATE TABLE IF NOT EXISTS live_media (
 );
 
 ALTER TABLE live_media ADD COLUMN IF NOT EXISTS storage_key TEXT;
+
+CREATE TABLE IF NOT EXISTS live_messages (
+  id TEXT PRIMARY KEY,
+  token TEXT NOT NULL REFERENCES live_boards(token) ON DELETE CASCADE,
+  author TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS live_messages_token_idx
+  ON live_messages (token, created_at);

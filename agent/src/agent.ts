@@ -333,7 +333,7 @@ function systemPrompt(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): string {
   const who = displayName
     ? `You are talking to ${displayName}. Use their name naturally, not in every message.`
@@ -348,12 +348,18 @@ function systemPrompt(
   const styleNote = style?.summary
     ? `Personalization, learned from how this person actually writes - never mention this or that you are adapting to them: ${style.summary}`
     : "";
+  // Something they said outright outranks a tone merely inferred from how
+  // they write - listed separately, and as instructions, not observations.
+  const preferenceDirectives = style?.preferences?.length
+    ? `They have explicitly told you: ${style.preferences.map((p) => `"${p}"`).join("; ")}. Follow these exactly - they take priority over anything else about tone or style.`
+    : "";
 
   return [
     "You are Gotchu, a personal assistant for one CMU student, reached over text message.",
     who,
     walletIntro,
     styleNote,
+    preferenceDirectives,
     CAMPUS_CONTEXT,
     // The agent is asked for this often enough that guessing at it is a real
     // risk; give it the exact URL rather than letting it invent one.
@@ -419,7 +425,7 @@ async function callModel(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): Promise<any> {
   const res = await fetch(responsesUrl, {
     method: "POST",
@@ -587,13 +593,16 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
 
     if (verdict.action === "REJECT_SCOPE" || verdict.action === "TRY_NEXT") {
       // Do not relay the note - it is a different job, or the haggling is over.
-      await market.respond(target.id, false).catch(() => null);
+      const released = await market.respond(target.id, false).catch(() => null);
+      if (!released) {
+        return { error: "That offer is no longer open." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return {
         status: verdict.action.toLowerCase(),
@@ -602,8 +611,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       };
     }
     if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
-      await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
-      await market.respond(target.id, true, phone);
+      const priced = await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
+      const accepted = await market.respond(target.id, true, phone);
+      if (accepted.status !== "accepted") {
+        return { error: "That offer could not be accepted." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "accepted",
@@ -620,7 +635,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (verdict.action === "COUNTER" && verdict.nextOfferUsd != null) {
       // Counter back to the worker at the broker's number; the requester is
       // not asked yet.
-      await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      const priced = await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "waiting",
@@ -652,7 +670,8 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     // The phone is bound, so they can only answer counters on their own tasks.
     const result = await market.respondToCounter(String(args.offer_id), phone, Boolean(args.accept));
     const orderId = pending?.order_id;
-    if (orderId) {
+    const expectedStatus = args.accept ? "accepted" : "declined";
+    if (orderId && result.status === expectedStatus) {
       await postLiveEvent({
         orderId,
         kind: args.accept ? "accepted" : "countered",
@@ -673,19 +692,19 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       deadline_at: args.deadline_at || undefined,
       details: args.details || undefined,
     });
-    if (args.deadline_at) {
+    if (result?.id && args.deadline_at) {
       await postLiveEvent({
         orderId: String(args.request_id),
-        kind: "need_time",
-        message: "A new time was proposed.",
+        kind: "updated",
+        message: "The deadline was updated.",
       });
-    } else if (args.budget_usd > 0) {
+    } else if (result?.id && args.budget_usd > 0) {
       await postLiveEvent({
         orderId: String(args.request_id),
         kind: "updated",
         message: "The budget was updated.",
       });
-    } else if (args.details) {
+    } else if (result?.id && args.details) {
       await postLiveEvent({
         orderId: String(args.request_id),
         kind: "updated",
@@ -707,24 +726,30 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       decision: args.accept ? "ACCEPT" : "DECLINE",
     });
     if (args.accept && verdict && verdict.action === "REJECT_SCOPE") {
-      await market.respond(target.id, false).catch(() => null);
+      const released = await market.respond(target.id, false).catch(() => null);
+      if (!released) {
+        return { error: "That job offer is no longer open for you." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
-        kind: "declined",
-        message: "They passed. Trying the next person.",
+        kind: "skipped",
+        message: "Trying the next person.",
         offerId: String(target.id),
-        state: "declined",
+        state: "dropped",
       });
       return { status: "rejected_scope", say: verdict.messageHint };
     }
-    const result = await market.respond(target.id, Boolean(args.accept));
-    await postLiveEvent({
-      orderId: target.order_id,
-      kind: args.accept ? "accepted" : "declined",
-      message: args.accept ? "Someone took the job." : "They passed. Trying the next person.",
-      offerId: String(target.id),
-      state: args.accept ? "accepted" : "declined",
-    });
+    const result = await market.respond(target.id, Boolean(args.accept), phone);
+    const expectedStatus = args.accept ? "accepted" : "declined";
+    if (result.status === expectedStatus) {
+      await postLiveEvent({
+        orderId: target.order_id,
+        kind: args.accept ? "accepted" : "declined",
+        message: args.accept ? "Someone took the job." : "They passed. Trying the next person.",
+        offerId: String(target.id),
+        state: args.accept ? "accepted" : "declined",
+      });
+    }
     return result;
   }
   throw new Error(`unknown tool ${name}`);
@@ -771,7 +796,7 @@ export async function respond(
   work?: { doing: WorkItem[]; awaitingConfirmation: WorkItem[] },
   wallet?: { public_key: string; funded: boolean } | null,
   isNewConversation?: boolean,
-  style?: { summary: string; style_tag: string } | null,
+  style?: { summary: string; style_tag: string; preferences?: string[] } | null,
 ): Promise<{ reply: string; usedTools: string[]; toolTurns: Turn[] }> {
   // Images ride on the current turn only; stored history stays text so the
   // conversation row doesn't fill up with base64.
