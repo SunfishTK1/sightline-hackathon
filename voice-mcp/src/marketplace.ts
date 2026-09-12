@@ -73,7 +73,7 @@ export async function resolveOffer(
     }
 
     const offerResult = await client.query(
-      `SELECT id, order_id, person_id, phone, offered_usd
+      `SELECT id, order_id, person_id, phone, offered_usd, outreach_sent_at
          FROM job_offers
         WHERE id = $1 AND order_id = $2 AND status = 'offered'
           AND ($3::text IS NULL OR phone = $3)
@@ -92,6 +92,21 @@ export async function resolveOffer(
           WHERE id = $1 AND status = 'offered'`,
         [offer.id, nextStatus],
       );
+      if (guard == null && offer.outreach_sent_at) {
+        await client.query(
+          `INSERT INTO agent_handoffs (person_id, phone, order_id, kind, payload)
+           VALUES ($1,$2,$3,'offer_released',$4::jsonb)`,
+          [
+            offer.person_id,
+            offer.phone,
+            offer.order_id,
+            JSON.stringify({
+              title: order.title,
+              offer_id: String(offer.id),
+            }),
+          ],
+        );
+      }
       // A decline must never resurrect a task that was blocked out from under
       // it. Only reopen a still-open order once no other worker holds it.
       await client.query(
