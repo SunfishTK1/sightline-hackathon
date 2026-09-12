@@ -16,6 +16,7 @@ export async function GET(
   return new Response(new Uint8Array(media.bytes), {
     headers: {
       "Content-Type": media.contentType,
+      "Content-Disposition": 'inline; filename="job-clip.mp4"',
       "Cache-Control": "no-store",
     },
   });

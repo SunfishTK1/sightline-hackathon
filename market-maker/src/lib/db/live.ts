@@ -177,17 +177,28 @@ export async function recordLiveEvent(input: {
 
   let slot = input.slot;
   if (input.addSlot) {
-    const count = await query<{ n: string }>(
-      "SELECT COUNT(*)::text AS n FROM live_candidates WHERE token = $1",
+    const free = await query<{ slot: number }>(
+      `SELECT slot FROM live_candidates
+        WHERE token = $1 AND state = 'queued'
+        ORDER BY slot
+        LIMIT 1`,
       [token],
     );
-    slot = Number(count.rows[0]?.n ?? 0);
-    await query(
-      `INSERT INTO live_candidates (id, token, slot, color, state)
-       VALUES ($1,$2,$3,$4,'queued')
-       ON CONFLICT (token, slot) DO NOTHING`,
-      [newId("lc"), token, slot, CANDIDATE_COLORS[slot % CANDIDATE_COLORS.length]],
-    );
+    if (free.rows[0]) {
+      slot = free.rows[0].slot;
+    } else {
+      const count = await query<{ n: string }>(
+        "SELECT COUNT(*)::text AS n FROM live_candidates WHERE token = $1",
+        [token],
+      );
+      slot = Number(count.rows[0]?.n ?? 0);
+      await query(
+        `INSERT INTO live_candidates (id, token, slot, color, state)
+         VALUES ($1,$2,$3,$4,'queued')
+         ON CONFLICT (token, slot) DO NOTHING`,
+        [newId("lc"), token, slot, CANDIDATE_COLORS[slot % CANDIDATE_COLORS.length]],
+      );
+    }
   } else if (slot == null && input.offerId) {
     const found = await query<{ slot: number }>(
       "SELECT slot FROM live_candidates WHERE token = $1 AND offer_id = $2",
@@ -204,7 +215,7 @@ export async function recordLiveEvent(input: {
   if (slot != null && exclusive) {
     await query(
       `UPDATE live_candidates
-       SET state = 'dropped', waiting_until = NULL
+       SET state = 'declined', waiting_until = NULL
        WHERE token = $1 AND slot <> $2
          AND state IN ('considering', 'waiting', 'countered')`,
       [token, slot],
@@ -226,6 +237,33 @@ export async function recordLiveEvent(input: {
     await query(
       `UPDATE live_boards SET status = 'agreed', skip_requested = FALSE, updated_at = NOW()
        WHERE token = $1`,
+      [token],
+    );
+    if (slot == null) {
+      const found = await query<{ slot: number }>(
+        `SELECT slot FROM live_candidates
+          WHERE token = $1 AND state IN ('considering','waiting','countered')
+          ORDER BY CASE state
+            WHEN 'countered' THEN 0
+            WHEN 'waiting' THEN 1
+            ELSE 2 END
+          LIMIT 1`,
+        [token],
+      );
+      slot = found.rows[0]?.slot;
+      if (slot != null) {
+        await query(
+          `UPDATE live_candidates
+           SET state = 'accepted', waiting_until = NULL
+           WHERE token = $1 AND slot = $2`,
+          [token, slot],
+        );
+      }
+    }
+    await query(
+      `UPDATE live_candidates
+       SET state = 'declined', waiting_until = NULL
+       WHERE token = $1 AND state IN ('considering','waiting','countered')`,
       [token],
     );
   } else if (input.kind === "stopped") {
@@ -335,6 +373,39 @@ async function reconcileWithOrder(
        WHERE token = $1 AND status = 'matching'`,
       [token, next],
     );
+    if (next === "agreed") {
+      const marked = await query<{ slot: number }>(
+        `UPDATE live_candidates
+         SET state = 'accepted', waiting_until = NULL
+         WHERE token = $1
+           AND slot = (
+             SELECT slot FROM live_candidates
+              WHERE token = $1
+                AND state IN ('considering','waiting','countered','accepted')
+              ORDER BY CASE state
+                WHEN 'accepted' THEN 0
+                WHEN 'countered' THEN 1
+                WHEN 'waiting' THEN 2
+                ELSE 3 END
+              LIMIT 1
+           )
+         RETURNING slot`,
+        [token],
+      );
+      await query(
+        `UPDATE live_candidates
+         SET state = 'declined', waiting_until = NULL
+         WHERE token = $1 AND state IN ('considering','waiting','countered')`,
+        [token],
+      );
+      const last = await query<{ kind: string }>(
+        `SELECT kind FROM live_events WHERE token = $1 ORDER BY created_at DESC LIMIT 1`,
+        [token],
+      );
+      if (last.rows[0]?.kind !== "accepted") {
+        await insertEvent(token, "accepted", "Someone took the job.", marked.rows[0]?.slot ?? null);
+      }
+    }
     return next;
   } catch {
     return null;
@@ -361,6 +432,7 @@ export async function loadLiveBoard(token: string): Promise<LiveBoardView | null
     const reconciled = await reconcileWithOrder(token, row.order_id);
     if (reconciled) row.status = reconciled;
   }
+  await enforceOneAsking(token);
 
   const candidates = await query<{
     slot: number;
@@ -435,6 +507,31 @@ function currentSlot(board: LiveBoardView): number | null {
     board.candidates.find((candidate) =>
       ["considering", "waiting", "countered"].includes(candidate.state),
     )?.slot ?? null
+  );
+}
+
+/** One person on the line. Extra "asking" slots are leftover from races or old seeds. */
+async function enforceOneAsking(token: string): Promise<void> {
+  const live = await query<{ slot: number; state: LiveCandidateState }>(
+    `SELECT slot, state FROM live_candidates
+      WHERE token = $1 AND state IN ('countered','waiting','considering')
+      ORDER BY CASE state
+        WHEN 'countered' THEN 0
+        WHEN 'waiting' THEN 1
+        WHEN 'considering' THEN 2
+        ELSE 3 END,
+        slot DESC`,
+    [token],
+  );
+  const keep = live.rows[0];
+  if (!keep || live.rows.length < 2) return;
+  await query(
+    `UPDATE live_candidates
+     SET state = 'declined', waiting_until = NULL
+     WHERE token = $1
+       AND slot <> $2
+       AND state IN ('countered','waiting','considering')`,
+    [token, keep.slot],
   );
 }
 

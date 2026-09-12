@@ -71,9 +71,9 @@ export function TaskMoney({
       <h2 className="text-lg font-semibold">The money</h2>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {railcoins != null && (
-          <div className="rounded-[28px] border border-[#e7e2d8] bg-white p-5">
+          <div className="min-w-0 overflow-hidden rounded-[20px] border border-[#e7e2d8] bg-white p-4 sm:rounded-[28px] sm:p-5">
             <p className="text-sm text-zinc-500">This task pays</p>
-            <p className="mt-1 font-mono text-3xl font-semibold tabular-nums text-[#1f5c3a]">
+            <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#1f5c3a] sm:text-3xl">
               {railcoins.toLocaleString()}
             </p>
             <p className="mt-1 text-sm text-zinc-500">
@@ -81,9 +81,9 @@ export function TaskMoney({
             </p>
           </div>
         )}
-        <div className="rounded-[28px] border border-[#e7e2d8] bg-white p-5">
+        <div className="min-w-0 overflow-hidden rounded-[20px] border border-[#e7e2d8] bg-white p-4 sm:rounded-[28px] sm:p-5">
           <p className="text-sm text-zinc-500">Your Solana wallet</p>
-          <p className="mt-1 font-mono text-3xl font-semibold tabular-nums text-zinc-900">
+          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-zinc-900 sm:text-3xl">
             {balance != null ? balance.toLocaleString() : "—"}
           </p>
           <p className="mt-1 text-sm text-zinc-500">

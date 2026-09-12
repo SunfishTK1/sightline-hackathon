@@ -112,22 +112,12 @@ body {
 }
 
 .gotchu-leaflet {
-  background: #14532d;
-}
-
-.gotchu-leaflet .leaflet-tile-pane {
-  filter: sepia(0.62) hue-rotate(88deg) saturate(1.85) brightness(0.8) contrast(1.12);
+  background: #e8e4dc;
 }
 
 .gotchu-leaflet .leaflet-control-attribution {
   background: rgba(246, 243, 238, 0.82) !important;
   color: #3f4a3d;
-}
-
-.gotchu-leaflet-wash {
-  background:
-    radial-gradient(ellipse at 50% 120%, rgba(20, 83, 45, 0.28), transparent 55%),
-    linear-gradient(180deg, rgba(20, 83, 45, 0.08), transparent 24%, transparent 70%, rgba(20, 83, 45, 0.22));
 }
 
 .gotchu-station-label {

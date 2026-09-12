@@ -5,8 +5,7 @@
  *
  * Building coords and Leaflet loading follow Daphne's campus map
  * (`gotchu/lib/campus-buildings.ts`, `gotchu/components/map/CampusMap.tsx`).
- * Tiles are OpenStreetMap, then washed green so it reads like a tartan
- * station board instead of a default street map.
+ * Tiles are normal OpenStreetMap. The green border is the only wash.
  */
 import { useEffect, useRef, useState } from "react";
 import { findPlacesInText, resolvePlace } from "@/lib/market/campus-travel";
@@ -137,8 +136,8 @@ export function LiveCampusMap({
         const coords = stations.map((s) => [s.lat, s.lng] as [number, number]);
         if (coords.length > 1) {
           L.polyline(coords, {
-            color: "#14532d",
-            weight: 5,
+            color: "#1f5c3a",
+            weight: 4,
             dashArray: "10 8",
             opacity: 0.9,
           }).addTo(map);
@@ -182,25 +181,24 @@ export function LiveCampusMap({
   }, [title, pickup, dropoff]);
 
   return (
-    <section className="overflow-hidden rounded-[28px] border border-[#14532d]/20 bg-[#157a38] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]">
-      <div className="flex items-end justify-between px-4 pt-3 pb-2 text-emerald-50">
-        <div>
-          <p className="text-[11px] font-semibold tracking-[0.16em] uppercase">Campus line</p>
-          <p className="text-sm font-semibold">{route || "Carnegie Mellon"}</p>
+    <section className="overflow-hidden rounded-[22px] border-2 border-[#1f5c3a] bg-white sm:rounded-[28px]">
+      <div className="flex items-end justify-between gap-3 px-3 pt-2.5 pb-2 text-[#142016] sm:px-4 sm:pt-3">
+        <div className="min-w-0">
+          <p className="text-[10px] font-semibold tracking-[0.16em] text-zinc-400 uppercase sm:text-[11px]">
+            Campus line
+          </p>
+          <p className="truncate text-sm font-semibold">{route || "Carnegie Mellon"}</p>
         </div>
-        <p className="text-[10px] font-medium tracking-[0.12em] text-emerald-100/80 uppercase">
-          Outdoor only · not GPS
+        <p className="shrink-0 text-[10px] font-medium tracking-[0.12em] text-zinc-400 uppercase">
+          Outdoor only
         </p>
       </div>
       {failed ? (
-        <p className="px-4 pb-4 text-sm text-emerald-50/90">
+        <p className="px-3 pb-3 text-sm text-zinc-600 sm:px-4">
           The campus map could not load. The hop is still {route || "on campus"}.
         </p>
       ) : (
-        <div className="relative">
-          <div ref={elRef} className="gotchu-leaflet h-[280px] w-full sm:h-[320px]" />
-          <div className="gotchu-leaflet-wash pointer-events-none absolute inset-0" />
-        </div>
+        <div ref={elRef} className="gotchu-leaflet h-[160px] w-full sm:h-[280px]" />
       )}
     </section>
   );
