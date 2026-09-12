@@ -25,6 +25,7 @@ export async function listOpenTasks() {
             o.deadline_at, o.budget_usd, o.urgency, o.created_at
        FROM orders o
       WHERE o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 20`,
   );
@@ -56,8 +57,16 @@ export async function resolveOffer(
   if (!offer) return { status: "unchanged", error: "That offer is not open for this person." };
 
   if (!accepted) {
+    // A decline must never resurrect a task that was blocked out from under
+    // it - blindly reopening to 'submitted' regardless of ethics_verdict is
+    // exactly how a BLOCK verdict got silently bypassed before: the order
+    // went back into matching, was accepted, and completed with nobody ever
+    // re-checking it. Blocked stays blocked.
     await pool.query(
-      `UPDATE orders SET status = 'submitted', updated_at = now() WHERE id = $1`,
+      `UPDATE orders
+          SET status = CASE WHEN ethics_verdict = 'BLOCK' THEN 'blocked' ELSE 'submitted' END,
+              updated_at = now()
+        WHERE id = $1`,
       [offer.order_id],
     );
     return { status: "declined", order_id: offer.order_id };

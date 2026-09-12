@@ -245,6 +245,7 @@ app.get("/v1/orders/open", async (_req, res) => {
        FROM orders o
        JOIN people p ON p.id = o.person_id
       WHERE o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
         AND NOT EXISTS (
           SELECT 1 FROM job_offers j
            WHERE j.order_id = o.id AND j.status IN ('offered', 'accepted'))
@@ -426,6 +427,7 @@ app.get("/v1/orders/needing-video", async (_req, res) => {
        JOIN people p ON p.id = o.person_id
        LEFT JOIN order_videos v ON v.order_id = o.id
       WHERE v.order_id IS NULL AND o.status IN ('submitted', 'offered')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 3`,
   );
@@ -513,6 +515,7 @@ app.get("/v1/orders/needing-image", async (_req, res) => {
        LEFT JOIN order_images i ON i.order_id = o.id
       WHERE i.order_id IS NULL
         AND o.status IN ('submitted','offered','accepted')
+        AND o.ethics_verdict IS DISTINCT FROM 'BLOCK'
       ORDER BY o.created_at DESC
       LIMIT 5`,
   );
