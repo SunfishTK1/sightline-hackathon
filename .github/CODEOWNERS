@@ -16,7 +16,6 @@
 /gotchu/app/api/auth/                           @wmontagu
 /gotchu/app/api/onboarding/                     @wmontagu
 /gotchu/app/api/me/                             @wmontagu
-/gotchu/app/api/ethics/                         @wmontagu
 /gotchu/app/api/tasks/[taskId]/complete/        @wmontagu
 /gotchu/app/api/tasks/[taskId]/review/          @wmontagu
 /gotchu/components/onboarding/                  @wmontagu
@@ -24,7 +23,6 @@
 /gotchu/lib/types/user.ts                       @wmontagu
 /gotchu/lib/types/task.ts                       @wmontagu
 /gotchu/lib/types/review.ts                     @wmontagu
-/gotchu/lib/types/ethics.ts                     @wmontagu
 /gotchu/lib/types/status.ts                     @wmontagu
 /gotchu/lib/mongo.ts                            @wmontagu
 /gotchu/lib/db.ts                               @wmontagu
@@ -32,9 +30,6 @@
 /gotchu/lib/llm.ts                              @wmontagu
 /gotchu/lib/embed.ts                            @wmontagu
 /gotchu/lib/ids.ts                              @wmontagu
-/gotchu/lib/agents/ethics.ts                    @wmontagu
-/gotchu/lib/prompts/ethics-rubric.ts            @wmontagu
-/gotchu/lib/prompts/ethics-denylist.ts          @wmontagu
 /gotchu/scripts/                                @wmontagu
 
 # Thomas
@@ -68,3 +63,12 @@
 /gotchu/lib/types/agreement.ts                  @daphnedavila
 /gotchu/lib/agents/negotiate.ts                 @daphnedavila
 /gotchu/mocks/negotiation.ts                    @daphnedavila
+/gotchu/mocks/ethics.ts                         @daphnedavila
+/gotchu/lib/types/ethics.ts                     @daphnedavila
+/gotchu/lib/agents/ethics.ts                    @daphnedavila
+/gotchu/lib/prompts/ethics-rubric.ts            @daphnedavila
+/gotchu/lib/prompts/ethics-denylist.ts          @daphnedavila
+/gotchu/lib/prompts/ethics-arbitrate.ts         @daphnedavila
+/gotchu/lib/prompts/ethics-handbook.ts          @daphnedavila
+/gotchu/app/api/ethics/                         @daphnedavila
+/gotchu/scripts/ethics-smoke.ts                 @daphnedavila

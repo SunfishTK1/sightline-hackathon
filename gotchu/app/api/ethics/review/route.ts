@@ -1,4 +1,4 @@
-/** @owner Will — POST ethics review */
+/** @owner Daphne — POST ethics review */
 import { NextResponse } from "next/server";
 import { reviewTask } from "@/lib/agents/ethics";
 import type { StructuredTask } from "@/lib/types/task";

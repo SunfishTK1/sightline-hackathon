@@ -2,9 +2,11 @@
 
 **"Need something?" → "Gotchu."**
 
-A text-first task marketplace for verified CMU students. You type what you need in plain English; your personal AI agent structures it, an ethics agent gates it, a market-making agent finds candidates and negotiates with *their* agents, and humans only come back in to approve the deal.
+A text-first task marketplace for verified CMU students. You type what you need in plain English; your personal AI agent structures it, an **ethics and arbitration agent** (The Word / Academic Integrity) gates it and referees the deal, a market-making agent finds candidates and negotiates with *their* agents, and humans only come back in to approve the deal.
 
-**Team:** Will (onboarding + ethics agent) · Thomas (personal AI agent) · Divya (market-making: matching engine) · Daphne (market-making: negotiation + task pool)
+**Team:** Will (onboarding + auth + completion) · Thomas (personal AI agent) · Divya (market-making: matching + live negotiate loop in `agent/`) · Daphne (ethics + arbitration; web feed / approval UI)
+
+**Ethics addendum:** `ethics-arbitration-spec.md`. Price is the only thing agents exchange. Same-job tweaks are allowed. Package pickup is **BLOCKED** (needs someone else's ID). No dollar cap. Daphne owns the agent; others call her functions.
 
 ---
 
@@ -64,9 +66,9 @@ Vector search still matters, but for a different reason — it's the tiebreaker 
 **3. Gemini — a one-file change.**
 Swap `lib/embed.ts` from OpenAI to Gemini's `text-embedding-004`. Same interface, same call site, and it legitimately qualifies us. **Note the dimension change: 768, not 1536** — update the Atlas vector index definition in §3 to match, or the index silently rejects your vectors.
 
-If we want a second, more visible Gemini surface: run the ethics agent on Gemini and the personal/negotiation agents on Claude. That's defensible on the merits (a cheap fast classifier vs. a reasoning-heavy negotiator) and gives a better answer than "we swapped one API call" when a judge asks why.
+If we want a second, more visible Gemini surface: run the ethics/arbitration agent on Gemini and the personal/negotiation agents on Claude. That's defensible on the merits (a cheap fast classifier vs. a reasoning-heavy negotiator) and gives a better answer than "we swapped one API call" when a judge asks why.
 
-→ **Will** owns both (embed.ts and ethics.ts are already his files).
+→ **Will** owns `embed.ts`. **Daphne** owns ethics (`lib/agents/ethics.ts`, handbook distill, deny-list).
 
 **4. ElevenLabs — the rare integration that makes the project better.**
 TTS on the negotiation replay: two distinct voices reading the agents' one-line rationales as the transcript plays. It's ~45 minutes on a screen Daphne is already building, and it turns our best demo moment into something people remember. Pre-generate the audio when the negotiation resolves, cache the URLs on the offer doc, play on reveal.
@@ -261,9 +263,11 @@ All routes are `app/api/**/route.ts`. All return `{ ok: true, data }` or `{ ok: 
 | `POST /api/onboarding` | Will | `{firstName, lastName, phone, preferenceText}` → `{user}` — creates user, embeds preference |
 | `PATCH /api/me/availability` | Will | `{isAvailable, until?}` → `{user}` |
 | `POST /api/tasks` | Thomas | `{rawText}` → `{task}` — parses to `structured`, then calls ethics internally |
-| `POST /api/ethics/review` | Will | `{taskId}` *or* `{structured}` → `{verdict, categories, conditions, reason}` |
+| `POST /api/ethics/review` | Daphne | `{taskId}` *or* `{structured}` → `{verdict, categories, conditions, reason}` — Thomas calls the **function**, not HTTP |
+| `POST /api/ethics/amendment` | Daphne | `{original, proposed}` → `{verdict, sameTask, allowedChanges, rejectedChanges, reason}` |
+| `POST /api/ethics/arbitrate` | Daphne | move + original/current structured → `{verdict, structured, stripped, reason}` — Divya's `agent/` loop may HTTP this |
 | `POST /api/tasks/:taskId/match` | Divya | `{}` → `{candidates: [{uuid, matchScore, reasons[]}]}` — sets status `MATCHING` |
-| `POST /api/tasks/:taskId/negotiate` | Daphne | `{workerUuid}` → `{offer}` — runs the full bounded negotiation loop |
+| `POST /api/tasks/:taskId/negotiate` | Divya (live loop in `agent/`; web stub may remain) | `{workerUuid}` → `{offer}` |
 | `POST /api/offers/:offerId/approve` | Daphne | `{role: "requester"\|"worker"}` → `{agreement?}` |
 | `POST /api/tasks/:taskId/complete` | Will | `{}` → `{task}` |
 | `POST /api/tasks/:taskId/review` | Will | `{rating, surveyAnswers, comment}` → `{review}` |
@@ -298,7 +302,7 @@ Never invent a deadline more than 7 days out.
 
 Rules the prompt must enforce: never exceed your reservation; concede at most 30% of the gap per round; accept if the other side's offer is within your reservation; be brief (one sentence of rationale).
 
-### 6b. Market-making agent — Divya & Daphne
+### 6b. Market-making agent — Divya (match + `agent/` negotiate); Daphne referees via `arbitrateMove`
 
 Not one big prompt. It's **a database query plus a bounded loop**, with an LLM only in the tie-break.
 
@@ -332,31 +336,38 @@ db.users.aggregate([
 
 Never return `phone` or `auth0Sub` to the client. Ever.
 
-### 6c. Ethics agent — Will
+### 6c. Ethics and arbitration agent — Daphne
 
-Runs on every task before it hits the pool, and on every review comment after.
+Full contract: `ethics-arbitration-spec.md`. Policy is a **distilled** Student Handbook (“The Word”) + Academic Integrity Policy in `gotchu/lib/prompts/ethics-handbook.ts` (not a dump of the full handbook).
 
-Two stages: a **deny-list prefilter** (regex on obvious terms — exam, homework submission, alcohol for someone underage, prescription, weapons, "use my ID") that short-circuits to `BLOCK` in ~0ms, then the LLM for everything else.
+**Ethics (gate)** — every task before it hits the pool, and every review comment after. Deny-list prefilter then heuristics/LLM.
 
-Output schema:
+**Arbitration (referee)** — Divya's negotiate loop (and any web `nextMove` loop) calls `arbitrateMove` **once per turn**. Rules:
+- **Price is the only thing exchanged.** ETA may ride along. No dollar cap.
+- **Same job may flex** (paint the fence navy instead of white).
+- **Job identity may not change** (paint the fence ↛ write my lab). Snapshot `originalStructured` at first ALLOW.
+
+Output of the gate:
 
 ```json
 {
   "verdict": "ALLOW | ALLOW_WITH_CONDITIONS | BLOCK",
   "categories": ["academic_integrity", "controlled_substances", "physical_safety",
                  "credential_misuse", "harassment", "illegal", "financial_risk", "none"],
-  "conditions": ["Requester must be present for ID verification at pickup"],
-  "reason": "One sentence, addressed to the student, explaining the call.",
+  "conditions": ["Tutoring may explain concepts only — do not complete graded work."],
+  "reason": "One sentence to the student, citing The Word when blocking.",
   "confidence": 0.0
 }
 ```
 
-The rubric, in the system prompt:
-- **BLOCK** — anything graded (writing papers, taking quizzes, sitting exams, completing problem sets), buying alcohol/tobacco/controlled substances, tasks requiring someone to impersonate the requester, anything illegal, anything with meaningful physical danger.
-- **ALLOW_WITH_CONDITIONS** — package pickup (needs the requester's own ID or an authorization note — this is the edge case from the whiteboard, handle it explicitly), anything entering a private residence, anything handling >$50 of someone's money, tutoring (allowed for *concept explanation*, blocked for *doing the work*).
-- **ALLOW** — food runs, moving help, errands, campus deliveries, event help.
+Gate rubric:
+- **BLOCK** — graded work done *for* them (unauthorized assistance); **package pickup** (needs the other person's ID — false ID / misrepresentation / unauthorized access credentials); alcohol/tobacco/controlled substances; impersonation / “use my ID”; illegal; meaningful physical danger.
+- **ALLOW_WITH_CONDITIONS** — private residence; tutoring (*concept explanation* only, not *doing the work*).
+- **ALLOW** — food runs, moving help, errands, event help, same-job work like painting a fence.
 
-Demo tip: have a deliberately bad task ready ("write my 15-213 lab for $50") and show the block in real time. That's the moment that separates us from a generic Uber-for-X.
+Arbitration verdicts per turn: `ALLOW` | `STRIP_AMENDMENTS` | `REJECT_MOVE` | `BLOCK_TASK`.
+
+Demo tip: block “write my 15-213 lab for $50” (Academic Integrity) **and** “pick up my package at the UC” (credential). Happy path is a food run or fence paint, not package pickup. Optional beat: navy fence allowed, “also write my essay” stripped.
 
 ---
 
@@ -364,7 +375,7 @@ Demo tip: have a deliberately bad task ready ("write my 15-213 lab for $50") and
 
 Assume T+0 is kickoff. Adjust to your actual clock.
 
-### Will — onboarding, auth, ethics agent, review loop
+### Will — onboarding, auth, completion, review loop
 
 **T+0 → T+2 (shared setup, you lead it)**
 1. `npx create-next-app@latest gotchu --ts --tailwind --app --eslint`
@@ -395,16 +406,15 @@ exports.onExecutePostLogin = async (event, api) => {
 11. `POST /api/onboarding` — generate `uuid`, embed `preferenceText`, upsert on `auth0Sub`, return the user. Re-embed on every preference edit (`PATCH /api/me`).
 12. Availability toggle in the header — one switch, writes `availability.isAvailable`. Divya's filter depends on it.
 
-**T+6 → T+12 — ethics agent**
-13. `lib/ethics.ts`: prefilter regex list, then the LLM call with the §6c rubric. Export `reviewTask(structured) → EthicsVerdict`.
-14. `POST /api/ethics/review`. Thomas calls this from inside `POST /api/tasks` — expose it as a plain function too so he doesn't pay an HTTP round trip.
-15. Log every verdict to a `ethics_log` collection with the input, output, and latency. An audit trail is a 30-second slide and judges love it.
-16. UI: a `Badge` on every task card showing the verdict. `BLOCK` renders a card explaining why, in the ethics agent's own words, with a "revise request" button.
+**T+6 → T+12 — ethics UI (Daphne owns the agent)**
+13. Daphne owns `reviewTask` / `reviewAmendment` / `arbitrateMove` (`ethics-arbitration-spec.md`). You do not rewrite the rubric.
+14. UI: a `Badge` on every task card showing the verdict. `BLOCK` renders a card explaining why, in the agent's own words, with a "revise request" button. `components/ethics/` stays yours.
+15. Logging to `ethics_log` is Daphne's unless she asks you to wire Mongo.
 
 **T+12 → T+18 — completion loop**
-17. `POST /api/tasks/:id/complete` and the post-task survey dialog (3 toggles + 1–5 stars + optional comment).
-18. Write the rating back to `users.stats` with `$inc` and a recomputed average — in one `findOneAndUpdate`, don't read-modify-write.
-19. Run the comment through the ethics agent; set `ethicsFlag` if it describes a violation. This closes the "rates jobs and staff" box on the whiteboard.
+16. `POST /api/tasks/:id/complete` and the post-task survey dialog (3 toggles + 1–5 stars + optional comment).
+17. Write the rating back to `users.stats` with `$inc` and a recomputed average — in one `findOneAndUpdate`, don't read-modify-write.
+18. Run the comment through Daphne's `reviewComment`; set `ethicsFlag` if it describes a violation. This closes the "rates jobs and staff" box on the whiteboard.
 
 **T+18 → T+24** — integration, demo dry runs, README. You own the README because you own the types.
 
@@ -418,14 +428,14 @@ exports.onExecutePostLogin = async (event, api) => {
 1. `lib/agents/personal.ts`, export `parseTask(rawText, user) → StructuredTask`.
 2. Prompt per §6a. Feed it the campus location list — grounding it in real building names is what makes the demo feel like it's *for CMU* rather than generic.
 3. Zod-validate the output. On parse failure, retry once with the error message appended; on second failure, return a minimal task with `needsReview: true`.
-4. `POST /api/tasks`: parse → embed `structured.title + description` → call Will's `reviewTask()` → set status `OPEN` or `BLOCKED` → insert. Return the task.
+4. `POST /api/tasks`: parse → embed `structured.title + description` → call Daphne's `reviewTask()` → snapshot `originalStructured` on ALLOW → set status `OPEN` or `BLOCKED` → insert. Return the task. On later field edits, call `reviewAmendment(original, proposed)` before saving. Package pickup will BLOCK — don't use it as the happy-path demo.
 5. Build the compose UI: one big textarea, a send button, and then the **structured card that appears underneath** showing what your agent understood, with every field editable inline. That reveal is the core interaction of the product — spend design time on it.
 
 **T+8 → T+16 — negotiation brain**
 6. Export `nextMove({task, principalPreferenceText, role, transcript, reservationPrice}) → NegotiationMessage`.
 7. Parse the reservation price out of `preferenceText` with a cheap LLM call at match time, cached on the offer doc. Default to $7 if absent.
 8. Enforce the concession rules in *code*, not just the prompt — clamp the returned price to `[reservation bounds]` before saving. Models will cheerfully agree to $3.
-9. Coordinate with Daphne: she calls your `nextMove` inside her loop. Agree on the exact signature at T+8 and don't change it after.
+9. Coordinate with Divya: her `agent/` loop (and any web negotiate stub) calls your `nextMove`, then **Daphne's** `arbitrateMove` before append. Bargain **only on price**. Optional same-job `amendments`. Agree signatures at T+8 and don't change them after.
 
 **T+16 → T+20** — Polish the rationale text. It's what the audience reads on screen during the negotiation replay, so it should sound like a person's agent ("Will's usually free around then, but 20 minutes each way is worth more than $9"), not a JSON field.
 
@@ -446,47 +456,32 @@ exports.onExecutePostLogin = async (event, api) => {
 **T+8 → T+14 — ranking + explanation**
 5. Add the weighted `finalScore`. Tune the weights against seed data until the top result is obviously right to a human.
 6. For each candidate, generate a one-line `reason` ("Does package pickups, usually near Gates, 4.8★ over 12 tasks"). Cheap LLM call over the top 5 only, or template it from the fields — templating is faster and fine.
-7. `POST /api/tasks/:taskId/match` → sets `MATCHING`, returns top 5, then hands off to Daphne's negotiate route for the top candidate.
+7. `POST /api/tasks/:taskId/match` → sets `MATCHING`, returns top 5, then the live negotiate loop in `agent/` (auto-counter / auto-accept on price). Call Daphne's `arbitrateMove` (or `POST /api/ethics/arbitrate`) before sending an offer/counter. Do not offer package-pickup tasks — they never pass the gate.
 8. Handle `NO_MATCH`: fewer than 1 candidate above a score floor → status `NO_MATCH`, UI offers to broaden the task.
 
 **T+14 → T+20 — the demo artifact**
 9. Build the **matching visualization**: a panel showing the 5 candidates with their score breakdown as small stacked bars (vector / rating / experience). This is the screen where you say "that's Atlas Vector Search ranking 25 students in one aggregation." Make it look good.
 10. Add the sponsor line to the README with the actual pipeline code in it.
 
-**T+20 → T+24** — Integration with Daphne, then rehearse your 30 seconds of the pitch.
+**T+20 → T+24** — Integration with Daphne's ethics HTTP + Thomas's `nextMove`, then rehearse your 30 seconds of the pitch.
 
 ---
 
-### Daphne — market-making: negotiation loop + task pool
+### Daphne — ethics + arbitration (standalone first)
 
-**T+0 → T+2** — Setup. Agree the `nextMove` signature with Thomas early; you're his consumer.
+Contract: `ethics-arbitration-spec.md`. Build in `gotchu/lib/agents/ethics.ts`. Branch: `daphne/ethics-arbitrate`.
 
-**T+2 → T+6 — build against a mock**
-1. Don't wait for Thomas. Write `mockNextMove()` that returns a scripted concession ladder, build the whole loop against it, and swap in the real one at T+8.
+The live haggle loop is **Divya's** (`agent/` `autoNegotiate`). Do not treat `gotchu/lib/agents/negotiate.ts` as your job; leave the stub unless the team deletes it later. You still own web **feed / approval / replay UI** if those screens stay in Next.js.
 
-**T+6 → T+14 — the loop**
-2. `lib/agents/negotiate.ts` → `runNegotiation(task, worker) → Offer`:
+**T+0 → T+6 — ethics + arbitration**
+0. Types, deny-list (include package pickup → `credential_misuse`), distilled The Word (`ethics-handbook.ts`), the 8 canned tests, `npm run ethics-smoke`.
+1. `reviewTask`, `reviewAmendment`, `arbitrateMove`, `reviewComment`. Routes under `/api/ethics/*`.
+2. Tell Thomas: call `reviewTask` / `reviewAmendment`. Tell Divya: call `arbitrateMove` once per offer/counter (HTTP from `agent/` is fine). Tell Will: call `reviewComment`; keep the badge UI.
 
-```
-create offer doc (outcome: PENDING)
-for round in 1..3:
-  workerMsg = nextMove(role: "worker_agent")
-  append to transcript; if workerMsg.accept → AGREED, break
-  requesterMsg = nextMove(role: "requester_agent")
-  append to transcript; if requesterMsg.accept → AGREED, break
-if not agreed → outcome FAILED, task back to MATCHING with next candidate
-on AGREED → task status PENDING_APPROVAL, finalPriceUsd set
-```
+**Then — feed / approval / replay (web)**
+3. `/feed`, approval card, transcript replay as before if those screens are still yours. Ethics badge data comes from your verdicts.
 
-3. Hard caps: 3 rounds, 6 LLM calls, 20s wall clock. A runaway loop on stage is death. Write the cap as a constant at the top of the file.
-4. `POST /api/tasks/:taskId/negotiate`. Persist the transcript incrementally so the UI can stream it.
-
-**T+14 → T+20 — the two screens that carry the demo**
-5. **Negotiation replay**: transcript rendered as a two-sided chat, one side per agent, prices as a running ledger down the middle, messages revealed with a ~600ms stagger so the audience can follow. This is the single most memorable screen in the app — build it properly and let everything around it stay quiet.
-6. **Approval card**: final price, terms, both names, one primary button per side. Status only flips to `ACCEPTED` when *both* have approved. Humans-in-the-loop is a core claim of the pitch; make it visibly true.
-7. **Task pool** (`/feed`): open tasks as cards with category, price, deadline, ethics badge. Poll `GET /api/feed` every 3s. If you have spare time at T+20, upgrade to a change stream over SSE and say "live" in the demo.
-
-**T+20 → T+24** — Integration + rehearsal.
+**T+20 → T+24** — Integration + rehearsal. Demo happy path = food/fence, not package pickup.
 
 ---
 
@@ -543,8 +538,8 @@ Submit the devpost/form at T+22, not T+23:59. Every year a team loses on a submi
 
 1. **(15s)** "Every CMU student needs small things done and every CMU student has gaps in their day. The friction isn't finding people — it's the negotiating. So we removed the humans from the middle and left them at the ends." Show the landing screen.
 2. **(20s)** Log in with a real `@andrew.cmu.edu` account. Show the Auth0 gate rejecting a gmail address. "Everyone here is a verified CMU student, with their real name — and their agent only has authority up to a limit they set."
-3. **(25s)** Type the package request in plain English. The structured card resolves underneath it. "Thomas's agent turned that sentence into a task."
-4. **(20s)** The bad task: "write my 15-213 lab, $50." Blocked, with the reason on screen. "Every task passes an ethics agent before it's ever visible."
+3. **(25s)** Type a food run or “paint my fence navy” in plain English. The structured card resolves underneath it. "Thomas's agent turned that sentence into a task."
+4. **(20s)** The bad tasks: "write my 15-213 lab, $50" (Academic Integrity) and optionally UC package pickup (needs someone else's ID). Blocked, with The Word in the reason. "Every task passes an ethics agent before it's ever visible."
 5. **(35s)** Matching panel. "25 students, one Atlas Vector Search aggregation, ranked on preference similarity, rating and history." Show the score bars.
 6. **(45s)** The negotiation replay — let it play, with audio. Don't talk over the first few seconds. Then: "Neither student is on their phone right now. Their agents are doing this."
 7. **(20s)** Both approvals, agreement card, completion + rating. "Humans come back exactly once: to say yes."
@@ -567,7 +562,7 @@ If you're behind, cut from the bottom up. Decide *now* so nobody defends their f
 7. Availability window → boolean toggle only
 8. Score-breakdown bars → plain numbers
 
-**Never cut:** onboarding + auth, structured task parsing, ethics gating, vector matching, the negotiation replay. Those five are the product.
+**Never cut:** onboarding + auth, structured task parsing, ethics gating (including `arbitrateMove` even if the UI only shows the initial BLOCK), vector matching, the negotiation replay. Those five are the product.
 
 ---
 
@@ -622,7 +617,7 @@ flowchart TD
   M --> C
 ```
 
-Two changes from the whiteboard worth noting: the ethics agent now sits **inline** in the flow (a gate before the pool, plus a reviewer of completed work) rather than off to the side, and completion feeds ratings back into the user documents that matching reads — so the market actually gets better as it's used. That feedback loop is the thing to say out loud in the pitch.
+Two changes from the whiteboard worth noting: the ethics agent (Daphne, The Word) now sits **inline** in the flow (a gate before the pool, a referee during the deal, plus a reviewer of completed work) rather than off to the side, and completion feeds ratings back into the user documents that matching reads — so the market actually gets better as it's used. That feedback loop is the thing to say out loud in the pitch.
 
 ---
 
@@ -646,7 +641,9 @@ gotchu/
 │       ├── onboarding/route.ts               Will
 │       ├── me/route.ts                       Will      PATCH profile + preference re-embed
 │       ├── me/availability/route.ts          Will
-│       ├── ethics/review/route.ts            Will
+│       ├── ethics/review/route.ts            Daphne
+│       ├── ethics/amendment/route.ts         Daphne
+│       ├── ethics/arbitrate/route.ts         Daphne
 │       ├── feed/route.ts                     Daphne
 │       ├── offers/[offerId]/approve/route.ts Daphne
 │       └── tasks/
@@ -662,7 +659,7 @@ gotchu/
 │   ├── ui/                                   ◆ shadcn-generated — NOBODY hand-edits
 │   ├── shell/                                ◆ SHARED — Will (nav, header, availability toggle)
 │   ├── onboarding/                           Will      OnboardingForm, PreferenceField
-│   ├── ethics/                               Will      EthicsBadge, BlockedCard, ConditionsList
+│   ├── ethics/                               Will UI   EthicsBadge, BlockedCard, ConditionsList
 │   ├── task/                                 Thomas    ComposeBox, StructuredCard, FieldEditor
 │   ├── match/                                Divya     CandidateList, ScoreBars, MatchReason
 │   ├── negotiate/                            Daphne    TranscriptView, OfferLedger, ApprovalCard
@@ -675,7 +672,7 @@ gotchu/
 │   │   ├── offer.ts                          Daphne
 │   │   ├── agreement.ts                      Daphne
 │   │   ├── review.ts                         Will
-│   │   ├── ethics.ts                         Will
+│   │   ├── ethics.ts                         Daphne    verdicts + arbitration types
 │   │   ├── match.ts                          Divya
 │   │   └── status.ts                         Will      the status union + legal transitions
 │   ├── mongo.ts                              Will      cached client
@@ -686,20 +683,23 @@ gotchu/
 │   ├── ids.ts                                Will      usr_ / tsk_ / ofr_ generators
 │   ├── agents/
 │   │   ├── personal.ts                       Thomas    parseTask, nextMove
-│   │   ├── ethics.ts                         Will      reviewTask, reviewComment
+│   │   ├── ethics.ts                         Daphne    reviewTask, reviewAmendment, arbitrateMove, reviewComment
 │   │   ├── market.ts                         Divya     findCandidates
-│   │   └── negotiate.ts                      Daphne    runNegotiation
+│   │   └── negotiate.ts                      leftover stub; live loop is agent/ (Divya)
 │   └── prompts/                              one prompt per file, never a shared prompts.ts
 │       ├── personal-intake.ts                Thomas
 │       ├── personal-negotiate.ts             Thomas
-│       ├── ethics-rubric.ts                  Will
-│       ├── ethics-denylist.ts                Will
+│       ├── ethics-rubric.ts                  Daphne
+│       ├── ethics-denylist.ts                Daphne
+│       ├── ethics-arbitrate.ts               Daphne
+│       ├── ethics-handbook.ts                Daphne    distilled The Word
 │       └── match-explain.ts                  Divya
 │
 ├── mocks/                                    delete before submission
 │   ├── task.ts                               Thomas    a valid StructuredTask
 │   ├── candidates.ts                         Divya     5 fake ranked candidates
-│   └── negotiation.ts                        Daphne    scripted concession ladder
+│   ├── negotiation.ts                        leftover web ladder
+│   └── ethics.ts                             Daphne    gate + amendment + arbitrate fixtures
 │
 ├── scripts/
 │   ├── seed.ts                               Will      25 users + embeddings
@@ -730,7 +730,7 @@ Will still writes the first version of every type file at T+1 so nobody is block
 
 ### Git rules
 
-- Branches: `will/onboarding`, `thomas/intake-agent`, `divya/vector-match`, `daphne/negotiate-loop`. One branch per feature, not one per person for the whole night.
+- Branches: `will/onboarding`, `thomas/intake-agent`, `divya/vector-match`, `daphne/ethics-arbitrate`. One branch per feature, not one per person for the whole night.
 - **Pull before every push:** `git pull --rebase origin main`. Rebase, not merge — the history stays readable and conflicts surface one commit at a time.
 - Merge to `main` at least every 3 hours whether or not the feature is finished. Long-lived branches are how teams discover at hour 20 that two people rewrote the same route.
 - PRs are for visibility, not gatekeeping — one glance, then merge. Nothing sits unmerged for more than 30 minutes.
@@ -738,7 +738,7 @@ Will still writes the first version of every type file at T+1 so nobody is block
 
 ### Ownership in one line each
 
-- **Will** — everything under `lib/` that isn't an agent, all of `app/api/auth|onboarding|me|ethics`, `components/onboarding|ethics|shell`, both scripts, and the shared config. He's the integration owner: if two workstreams disagree about a shape, he decides.
-- **Thomas** — `lib/agents/personal.ts`, `lib/prompts/personal-*`, `app/api/tasks/route.ts` + `[taskId]/route.ts`, `app/compose`, `components/task`.
-- **Divya** — `lib/agents/market.ts`, `lib/prompts/match-explain.ts`, `app/api/tasks/[taskId]/match`, `app/tasks/[taskId]/matches`, `components/match`, the Atlas index.
-- **Daphne** — `lib/agents/negotiate.ts`, `lib/types/offer.ts|agreement.ts`, `app/api/tasks/[taskId]/negotiate`, `app/api/offers`, `app/api/feed`, `app/feed`, `app/tasks/[taskId]`, `components/negotiate|feed`.
+- **Will** — everything under `lib/` that isn't an agent, `app/api/auth|onboarding|me`, `components/onboarding|ethics|shell`, both scripts, and the shared config. Integration owner: if two workstreams disagree about a shape, he decides. He **calls** Daphne's `reviewComment`; he does not own the ethics model.
+- **Thomas** — `lib/agents/personal.ts`, `lib/prompts/personal-*`, `app/api/tasks/route.ts` + `[taskId]/route.ts`, `app/compose`, `components/task`. Calls `reviewTask` and `reviewAmendment`.
+- **Divya** — `lib/agents/market.ts`, matching UI, Atlas index, and the live negotiate loop in `agent/`. Calls `arbitrateMove` (function or HTTP) once per offer/counter.
+- **Daphne** — ethics + arbitration (`lib/agents/ethics.ts`, `lib/types/ethics.ts`, `lib/prompts/ethics-*`, `app/api/ethics/*`); web feed / approval / replay screens if still in Next.js.
