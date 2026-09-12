@@ -594,7 +594,20 @@ async function sendOutreach(): Promise<void> {
     await recordSent(sent.requestId, offer.phone, "offer", String(offer.id), message);
 
     if (sent.accepted || sent.permanent) {
-      await market.markOutreachSent(offer.id);
+      if (sent.accepted) {
+        // The offer has to land in their thread, or a later "I'll take the
+        // fridge one" refers to a message the agent has no record of sending.
+        const history = await loadTurns(offer.phone);
+        await saveTurns(offer.phone, [
+          ...history,
+          { role: "assistant", content: message, at: new Date().toISOString() },
+        ]);
+      }
+      const marked = await market.markOutreachSent(offer.id).catch(() => null);
+      if (!marked) {
+        log(`outreach offer ${offer.id} landed after it was no longer live`);
+        continue;
+      }
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -605,15 +618,6 @@ async function sendOutreach(): Promise<void> {
           // the first moment they have actually been asked.
           state: "waiting",
         });
-      }
-      if (sent.accepted) {
-        // The offer has to land in their thread, or a later "I'll take the
-        // fridge one" refers to a message the agent has no record of sending.
-        const history = await loadTurns(offer.phone);
-        await saveTurns(offer.phone, [
-          ...history,
-          { role: "assistant", content: message, at: new Date().toISOString() },
-        ]);
       }
       log(`outreach offer ${offer.id} -> ${offer.phone}: ${sent.detail}`);
       continue;
@@ -945,12 +949,25 @@ async function autoNegotiate(): Promise<void> {
       if (!verdict || verdict.action !== "COUNTER" || verdict.nextOfferUsd == null) {
         continue;
       }
-      await market.counter(
+      const result = await market.counter(
         offer.id,
         offer.phone,
         verdict.nextOfferUsd,
         verdict.messageHint,
       );
+      if (result.status !== "countered") {
+        if (result.status === "cancelled_too_many_rounds" && offer.order_id) {
+          await postLiveEvent({
+            orderId: offer.order_id,
+            kind: "skipped",
+            message: "Negotiation ended. Trying the next person.",
+            offerId: String(offer.id),
+            state: "dropped",
+          });
+        }
+        log(`auto-counter stopped on offer ${offer.id}: ${result.status}`);
+        continue;
+      }
       if (offer.order_id) {
         await postLiveEvent({
           orderId: offer.order_id,
@@ -1052,7 +1069,11 @@ async function chaseStuckItems(): Promise<void> {
     // Past the final notice, do the thing the card said would happen.
     if (strike > FINAL_NOTICE_STRIKE) {
       if (item.reason === "offer_unanswered" && item.offer_id) {
-        await market.respond(item.offer_id, false).catch(() => null);
+        const released = await market.respond(item.offer_id, false).catch(() => null);
+        if (!released) {
+          log(`offer ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         await sayTo(
           item.phone,
           `No reply on "${item.about}", so I've released it - it's going to someone else.`,
@@ -1071,7 +1092,13 @@ async function chaseStuckItems(): Promise<void> {
         }
         log(`released offer ${item.offer_id} after ${strike - 1} notices`);
       } else if (item.reason === "counter_undecided" && item.offer_id) {
-        await market.respondToCounter(item.offer_id, item.phone, false, true).catch(() => null);
+        const released = await market
+          .respondToCounter(item.offer_id, item.phone, false, true)
+          .catch(() => null);
+        if (!released) {
+          log(`counter ${item.offer_id} changed before escalation could release it`);
+          continue;
+        }
         await sayTo(
           item.phone,
           `No answer on that counter-offer for "${item.about}", so it's expired. I'm asking someone else.`,

@@ -607,8 +607,14 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
       };
     }
     if (verdict.action === "ACCEPT" && verdict.agreedUsd != null) {
-      await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
-      await market.respond(target.id, true, phone);
+      const priced = await market.setOfferPrice(target.id, verdict.agreedUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
+      const accepted = await market.respond(target.id, true, phone);
+      if (accepted.status !== "accepted") {
+        return { error: "That offer could not be accepted." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "accepted",
@@ -625,7 +631,10 @@ async function runTool(name: string, args: any, phone: string): Promise<unknown>
     if (verdict.action === "COUNTER" && verdict.nextOfferUsd != null) {
       // Counter back to the worker at the broker's number; the requester is
       // not asked yet.
-      await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      const priced = await market.setOfferPrice(target.id, verdict.nextOfferUsd).catch(() => null);
+      if (priced?.status !== "offered") {
+        return { error: "That offer is no longer open." };
+      }
       await postLiveEvent({
         orderId: target.order_id,
         kind: "waiting",
