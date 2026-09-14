@@ -16,7 +16,7 @@ import { tools, toolsByName } from "./tools.js";
 import { ensureWallet, getWallet } from "./wallet.js";
 import { saveStyle, addPreferences, getFullStyle } from "./style.js";
 import { registerSignup, verifySignup, signupStatus, setAvailability } from "./signup.js";
-import { chargeToTreasury, topUpWallet } from "./pay.js";
+import { chargeToTreasury, topUpWallet, sweepToTreasury } from "./pay.js";
 import { reviewTask } from "./ethics.js";
 import { createWalletLink, resolveWalletLink, createWalletForLink } from "./walletlink.js";
 
@@ -1185,6 +1185,24 @@ app.post("/v1/orders/:id/claim", async (req, res) => {
     res.json({ ok: true, data: result });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * Send one person's railcoins back to the treasury.
+ *
+ * Deleting a person cascades to their wallet row, and that row holds the only
+ * copy of the key - so anything left behind is gone for good. Sweep first.
+ */
+app.post("/v1/dev/sweep-to-treasury", async (req, res) => {
+  const phone = String(req.body?.phone ?? "");
+  if (!phone) return res.status(400).json({ ok: false, error: "phone is required" });
+  try {
+    const result = await sweepToTreasury(phone, String(req.body?.reference ?? `sweep:${phone}`));
+    console.log(`swept ${result.swept} railcoins from ${phone} (${result.stranded} stranded)`);
+    res.json({ ok: result.settled, data: result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 

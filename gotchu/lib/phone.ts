@@ -18,6 +18,19 @@ export function digitsOf(raw: string): string {
  * Turn typed input into E.164.
  * 10-digit US numbers become +1XXXXXXXXXX.
  * Already-international numbers (11–15 digits, or starting with +) stay as +digits.
+ *
+ * The digit count decides, not the leading "+". This used to trust anything
+ * starting with "+" verbatim, so someone typing "+3122591843" - their own
+ * number, with the country code forgotten - was stored exactly like that. It
+ * passes the E.164 regex, so nothing complained. But voice-mcp's normalizer
+ * reads those same ten digits as a US number and returns +13122591843, so the
+ * two services disagreed about who this was: the web app wrote the profile
+ * under one identity and the marketplace put the wallet under another. The
+ * person then had a profile with no money, a wallet they could not see, and an
+ * unreachable number - and every part of it looked fine in isolation.
+ *
+ * No NANP number is ten digits *including* its country code, so ten digits
+ * means the country code is missing whether or not a "+" was typed.
  */
 export function toE164(raw: string): string | null {
   const trimmed = raw.trim();
@@ -25,11 +38,6 @@ export function toE164(raw: string): string | null {
 
   const digits = digitsOf(trimmed);
   if (!digits) return null;
-
-  if (trimmed.startsWith("+")) {
-    const candidate = `+${digits}`;
-    return isE164(candidate) ? candidate : null;
-  }
 
   if (digits.length === 10) {
     const candidate = `+1${digits}`;
@@ -51,13 +59,12 @@ export function formatPhoneMask(raw: string): string {
   const digits = digitsOf(trimmed);
   if (!digits) return trimmed.startsWith("+") ? "+" : "";
 
-  const e164ish = trimmed.startsWith("+")
-    ? `+${digits}`
-    : digits.length === 10
+  // Same precedence as toE164 above, so what someone sees as they type is what
+  // gets stored - a mask that disagrees with the parser is its own bug.
+  const e164ish =
+    digits.length === 10
       ? `+1${digits}`
-      : digits.length === 11 && digits.startsWith("1")
-        ? `+${digits}`
-        : `+${digits}`;
+      : `+${digits}`;
 
   if (e164ish.startsWith("+1") && e164ish.length <= 12) {
     const rest = e164ish.slice(2);

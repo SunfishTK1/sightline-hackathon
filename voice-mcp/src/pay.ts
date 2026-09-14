@@ -42,6 +42,12 @@ const SETTLEMENT_MEMO_PREFIX = "gotchu:";
 const FEE_MEMO_PREFIX = "gotchu-fee:";
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const STALE_CLAIM_MINUTES = 5;
+/**
+ * Solana's rent-exempt minimum for a plain account, in lamports (~45
+ * railcoins). A transfer that would leave a non-empty account below this is
+ * rejected outright, which is why a wallet can never be emptied completely.
+ */
+const RENT_EXEMPT_LAMPORTS = 890_880;
 
 function signatureFromNote(note: string | null | undefined): string | null {
   if (!note || !note.startsWith(UNRECORDED_PREFIX)) return null;
@@ -387,6 +393,45 @@ export async function chargeToTreasury(
   } catch (err) {
     return { settled: false, reason: (err as Error).message, railcoins };
   }
+}
+
+/**
+ * Move everything this wallet can actually part with back to the treasury.
+ *
+ * Used before an account is deleted: the wallet row holds the only copy of the
+ * encrypted secret key, and `wallets.person_id` cascades on delete, so any
+ * balance still sitting there when the person row goes becomes unreachable by
+ * anyone, forever. Sweeping first turns a permanent loss into a transfer.
+ *
+ * A little is always stranded - Solana rejects a transfer that would leave a
+ * non-empty account below the rent-exempt minimum (~45 railcoins), and the fee
+ * has to come from somewhere.
+ */
+export async function sweepToTreasury(
+  phone: string,
+  reference?: string,
+): Promise<Settlement & { swept: number; stranded: number }> {
+  const wallet = await ensureWallet(phone);
+  const balance = await connection.getBalance(new PublicKey(wallet.public_key));
+  const keep = RENT_EXEMPT_LAMPORTS + 10_000; // rent floor, plus room for the fee
+  const spendable = balance - keep;
+  const railcoins = Math.floor((spendable / LAMPORTS_PER_SOL) * RAILCOINS_PER_SOL);
+  if (railcoins <= 0) {
+    return {
+      settled: false,
+      reason: "nothing above the rent floor to sweep",
+      railcoins: 0,
+      swept: 0,
+      stranded: Math.floor((balance / LAMPORTS_PER_SOL) * RAILCOINS_PER_SOL),
+    };
+  }
+  const result = await chargeToTreasury(phone, railcoins, reference);
+  const after = await connection.getBalance(new PublicKey(wallet.public_key));
+  return {
+    ...result,
+    swept: result.settled ? railcoins : 0,
+    stranded: Math.floor((after / LAMPORTS_PER_SOL) * RAILCOINS_PER_SOL),
+  };
 }
 
 /**
