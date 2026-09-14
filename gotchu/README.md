@@ -8,10 +8,10 @@ Text-first task marketplace for verified CMU students. See `../gotchu-hackathon-
 
 | Person | GitHub | Focus |
 |---|---|---|
-| **Will** | [@wmontagu](https://github.com/wmontagu) | Auth, onboarding, ethics, shared lib, shell |
+| **Will** | [@wmontagu](https://github.com/wmontagu) | Auth, onboarding, ethics UI, shared lib, shell |
 | **Thomas** | [@SunfishTK1](https://github.com/SunfishTK1) | Personal AI agent + compose |
-| **Divya** | [@divs997](https://github.com/divs997) | Vector matching |
-| **Daphne** | [@daphnedavila](https://github.com/daphnedavila) | Negotiation + feed + approval |
+| **Divya** | [@divs997](https://github.com/divs997) | Vector matching + live negotiate |
+| **Daphne** | [@daphnedavila](https://github.com/daphnedavila) | Ethics + arbitration agent, campus map |
 
 See [`OWNERS.md`](./OWNERS.md) and file `@owner` headers. One file → one owner.
 

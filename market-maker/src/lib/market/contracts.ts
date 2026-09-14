@@ -14,9 +14,9 @@ import type {
  * You (matching / market policy): findCandidates, createMatchingRun,
  * selectOutreachBatch, buildRelaxationOptions.
  *
- * Daphne (communication / negotiation): sendCandidateInvitations,
- * handleInboundMessage, evaluateNegotiation, requestRequesterApproval,
- * finalizeAgreement.
+ * Outreach, inbound SMS, and live evaluate live in `agent/` + `voice-mcp`.
+ * Daphne owns ethics only: POST `/api/ethics/review` and `/arbitrate`
+ * (see ETHICS-INTEGRATION.md). Do not copy the deny-list.
  *
  * Do not change these signatures without updating both sides.
  */
